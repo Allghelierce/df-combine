@@ -232,3 +232,14 @@ def test_spa_route_does_not_serve_sibling_dirs(settings, tmp_path, monkeypatch):
     with TestClient(create_app(settings, start_worker=False)) as c:
         r = c.get("/%2e%2e/dist-old/secret.txt")
         assert "SECRET" not in r.text
+
+
+def test_purge_extracted_files(client, settings, fixtures):
+    settings.keep_extracted = False
+    s = upload(client, fixtures["tar_gz"])
+    process_all(settings)
+    d = client.get(f"/api/scans/{s['id']}").json()
+    assert d["status"] == "completed" and d["severity_counts"]["critical"] >= 1
+    work = settings.work_root / s["id"]
+    assert not (work / "files").exists() and (work / "manifest.json").exists()
+    assert client.get(f"/api/scans/{s['id']}/artifacts").json()["total"] > 5

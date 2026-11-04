@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     sandbox_host_data_dir: Path | None = None  # host path of data_dir when the worker itself runs in Docker
     allow_unsandboxed: bool = True  # permit 'local' fallback when Docker is unavailable
 
+    keep_extracted: bool = True  # False: delete extracted files after a scan (manifest/findings/tool output kept)
+
     # Extraction limits (see dfa.core.limits.Limits)
     max_extract_total_mb: int = 2048
     max_extract_file_mb: int = 512

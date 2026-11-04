@@ -124,3 +124,17 @@ def test_ardupilot_descriptor(fixtures, run_analysis):
     from dfa.core.identify import AP_DESCRIPTOR_SIG, parse_ardupilot_descriptor
     unfilled = parse_ardupilot_descriptor(b"x" * 10 + AP_DESCRIPTOR_SIG + b"\0" * 40, 100)
     assert "note" in unfilled
+
+
+def test_vendor_containers_identified_not_overclaimed(tmp_path, run_analysis):
+    import os
+    p = tmp_path / "wm220_0801.sig"
+    p.write_bytes(b"IM*H" + bytes([1]) + os.urandom(4096))
+    m = run_analysis(p)
+    assert m["identification"]["format"] == "dji_imah"
+    assert m["identification"]["platform"] == "DJI"
+    f = [x for x in m["findings"] if x["rule_id"] == "vendor-container-dji_imah"]
+    assert f and f[0]["severity"] == "info"
+    q = tmp_path / "bebop.plf"
+    q.write_bytes(b"PLF!" + os.urandom(2048))
+    assert run_analysis(q)["identification"]["platform"] == "Parrot"

@@ -140,4 +140,8 @@ def process_scan(scan_id: str, settings: Settings) -> None:
         scan.classification_counts = {k: cls.get(k, 0) for k in ("detected", "suspicious", "unverified", "info")}
         scan.risk_score = risk_score(final)
     (work / "findings.json").write_text(json.dumps(final, indent=1))
+    if not settings.keep_extracted:
+        import shutil
+        shutil.rmtree(work / "files", ignore_errors=True)
+        log_event(scan_id, "cleanup", "Extracted files removed (DFA_KEEP_EXTRACTED=false); manifest and findings kept")
     log_event(scan_id, "complete", f"Scan complete: {len(final)} findings", progress=100)

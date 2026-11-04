@@ -59,6 +59,8 @@ FORMAT_DESCRIPTIONS = {
     "text": "Text file",
     "raw": "Unrecognised binary data",
     "lzma": "LZMA (alone/legacy) compressed data",
+    "dji_imah": "DJI IM*H signed/encrypted firmware module",
+    "parrot_plf": "Parrot PLF firmware container",
     "empty": "Empty file",
 }
 
@@ -109,6 +111,10 @@ def detect_format_bytes(head: bytes, size: int) -> FormatInfo:
         return _fmt("jffs2")
     if head[:8] == b"-rom1fs-":
         return _fmt("romfs")
+    if head[:4] == b"IM*H":
+        return _fmt("dji_imah", **_imah_details(head))
+    if head[:4] == b"PLF!":
+        return _fmt("parrot_plf")
     if head[:5] == b"DfuSe":
         return _fmt("dfu")
     if len(head) >= 512 and head[510:512] == b"\x55\xaa" and (
@@ -134,6 +140,15 @@ def detect_format_bytes(head: bytes, size: int) -> FormatInfo:
     if _is_text(head):
         return _fmt("text")
     return _fmt("raw")
+
+
+def _imah_details(head: bytes) -> dict:
+    """Best-effort fields from a DJI IM*H header (layout per community research; unverified)."""
+    if len(head) < 0x40:
+        return {}
+    version = head[4]
+    return {"header_version": version, "note": "IM*H modules are signed and usually encrypted per device "
+            "family; contents cannot be analysed statically without the vendor keys"}
 
 
 def _looks_like_lzma_alone(head: bytes) -> bool:
@@ -275,6 +290,20 @@ PLATFORMS: list[PlatformSignature] = [
         strong=[b"INAV/", b"INAV "],
         weak=[b"inav"],
         version_patterns=[re.compile(r"INAV/?\s*\w*\s*(\d+\.\d+\.\d+)")],
+    ),
+    PlatformSignature(
+        name="DJI",
+        family="vendor-proprietary",
+        strong=[b"IM*H", b"wm220", b"wm330", b"DJI_FW", b"dji_sys"],
+        weak=[b"DJI", b"dji"],
+        version_patterns=[],
+    ),
+    PlatformSignature(
+        name="Parrot",
+        family="vendor-proprietary",
+        strong=[b"PLF!", b"parrot_bebop", b"Parrot Bebop", b"Parrot ANAFI"],
+        weak=[b"Parrot", b"parrot"],
+        version_patterns=[],
     ),
     PlatformSignature(
         name="Companion computer (Linux)",

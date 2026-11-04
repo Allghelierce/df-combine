@@ -93,3 +93,20 @@ describe("routing smoke", () => {
     expect(screen.getAllByText(/builtin:/).length).toBeGreaterThan(0);
   });
 });
+
+describe("Dropzone", () => {
+  it("rejects oversize and empty files before uploading", async () => {
+    const { Dropzone } = await import("../components/Dropzone");
+    render(
+      <MemoryRouter>
+        <Dropzone maxMb={1} />
+      </MemoryRouter>,
+    );
+    const input = screen.getByTestId("file-input") as HTMLInputElement;
+    const big = new File([new Uint8Array(2 * 1024 * 1024)], "big.bin");
+    const empty = new File([], "empty.bin");
+    fireEvent.change(input, { target: { files: [big, empty] } });
+    expect(await screen.findByRole("alert")).toHaveTextContent(/big\.bin: .*exceeds the 1 MiB limit/);
+    expect(screen.getByRole("alert")).toHaveTextContent(/empty\.bin: file is empty/);
+  });
+});

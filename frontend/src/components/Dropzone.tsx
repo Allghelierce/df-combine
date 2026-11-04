@@ -14,33 +14,47 @@ export function Dropzone({ maxMb, onUploaded }: { maxMb?: number; onUploaded?: (
   const input = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
 
-  async function start(f: File) {
+  const [queue, setQueue] = useState<{ done: number; total: number } | null>(null);
+
+  async function start(files: File[]) {
     setError(null);
-    setFile(f);
-    if (maxMb && f.size > maxMb * 1024 * 1024) {
-      setError(`File is ${formatBytes(f.size)}; the server limit is ${maxMb} MiB.`);
+    const problems: string[] = [];
+    const ok = files.filter((f) => {
+      if (maxMb && f.size > maxMb * 1024 * 1024) problems.push(`${f.name}: ${formatBytes(f.size)} exceeds the ${maxMb} MiB limit`);
+      else if (f.size === 0) problems.push(`${f.name}: file is empty`);
+      else return true;
+      return false;
+    });
+    if (!ok.length) {
+      setError(problems.join("\n"));
       return;
     }
-    if (f.size === 0) {
-      setError("File is empty.");
-      return;
+    const ids: string[] = [];
+    setQueue({ done: 0, total: ok.length });
+    for (const [i, f] of ok.entries()) {
+      setFile(f);
+      setPct(0);
+      try {
+        const scan = await api.upload(f, setPct);
+        ids.push(scan.id);
+      } catch (e) {
+        problems.push(`${f.name}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      setQueue({ done: i + 1, total: ok.length });
     }
-    setPct(0);
-    try {
-      const scan = await api.upload(f, setPct);
-      onUploaded?.();
-      navigate(`/scans/${scan.id}`);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setPct(null);
-    }
+    setPct(null);
+    setQueue(null);
+    onUploaded?.();
+    if (problems.length) setError(problems.join("\n"));
+    if (ids.length === 1 && !problems.length) navigate(`/scans/${ids[0]}`);
+    else if (ids.length > 1 && !problems.length) navigate("/scans");
   }
 
   function onDrop(e: DragEvent) {
     e.preventDefault();
     setDrag(false);
-    const f = e.dataTransfer.files?.[0];
-    if (f) void start(f);
+    const files = Array.from(e.dataTransfer.files ?? []);
+    if (files.length) void start(files);
   }
 
   const busy = pct !== null && !error;
@@ -64,18 +78,22 @@ export function Dropzone({ maxMb, onUploaded }: { maxMb?: number; onUploaded?: (
         ref={input}
         type="file"
         hidden
+        multiple
         accept={ACCEPTED}
         data-testid="file-input"
         onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) void start(f);
+          const files = Array.from(e.target.files ?? []);
+          if (files.length) void start(files);
           e.target.value = "";
         }}
       />
       <div className="dz-icon">{Icon.upload}</div>
       {busy && file ? (
         <>
-          <div className="dz-title">Uploading {file.name}</div>
+          <div className="dz-title">
+            Uploading {file.name}
+            {queue && queue.total > 1 ? ` (${queue.done + 1} of ${queue.total})` : ""}
+          </div>
           <div className="progress">
             <span style={{ width: `${pct}%` }} />
           </div>
@@ -85,7 +103,7 @@ export function Dropzone({ maxMb, onUploaded }: { maxMb?: number; onUploaded?: (
         </>
       ) : (
         <>
-          <div className="dz-title">Drop firmware here or click to browse</div>
+          <div className="dz-title">Drop firmware here or click to browse (multiple files allowed)</div>
           <div className="dz-sub">
             PX4 (.px4), ArduPilot (.apj), .bin, .hex, .elf, .img, .zip, .tar, .gz / .tar.gz, DfuSe, SquashFS, ext4
             {maxMb ? ` · max ${maxMb} MiB` : ""}

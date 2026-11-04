@@ -12,7 +12,7 @@ drone platforms can be added.
 | Stage | Details |
 |---|---|
 | **Upload** | Drag-and-drop UI or `POST /api/scans`. Streamed with a size limit, hashed (SHA-256), never executed. |
-| **Identification** | Format detected from content (extensions are ignored): ELF, ZIP, tar, gzip/bzip2/xz (incl. `.tar.gz`), Intel HEX, PX4 `.px4`, ArduPilot `.apj`, DfuSe `.dfu`, U-Boot uImage, cpio, ROMFS, SquashFS, ext2/3/4, FAT, UBI/UBIFS and JFFS2 (container sandbox only), LZMA, MBR/GPT disk images (`.img`), raw ARM Cortex-M flash images. Platform (PX4, ArduPilot, Betaflight, INAV, Linux companion), version, vehicle type, board ID, architecture, OS, entropy. |
+| **Identification** | Format detected from content (extensions are ignored): ELF, ZIP, tar, gzip/bzip2/xz (incl. `.tar.gz`), Intel HEX, PX4 `.px4`, ArduPilot `.apj`, DfuSe `.dfu`, U-Boot uImage, cpio, ROMFS, SquashFS, ext2/3/4, FAT, UBI/UBIFS and JFFS2 (container sandbox only), LZMA, MBR/GPT disk images (`.img`), raw ARM Cortex-M flash images. Platform (PX4, ArduPilot, Betaflight, INAV, Linux companion; DJI `IM*H` and Parrot `PLF` containers are identified but not decrypted/unpacked), version, vehicle type, board ID, architecture, OS, entropy. |
 | **Extraction** | Recursive, with path-traversal/symlink/device protection and size/count/depth/ratio budgets. Carves embedded ROMFS (PX4 init scripts), gzip streams (ArduPilot ROMFS files), SquashFS, uImage, cpio and ELF objects from raw images. Partition tables are split into partitions. |
 | **Scanning** | Built-in: hardcoded credentials, private keys, tokens, `/etc/shadow` issues, Wi-Fi PSKs, insecure services (telnet, root SSH, autologin…), PX4 circuit breakers / ArduPilot safety parameters, MAVLink exposure (mavlink-router, MAVProxy), ELF hardening (NX/PIE/RELRO/canary), dangerous imports, suspicious strings, outdated components (offline knowledge base). External: **FwAnalyzer**, **cwe_checker**, **FACT** through modular adapters. |
 | **Normalisation** | One schema for every tool: severity, classification, confidence, evidence, affected component, source tool, CWE, remediation. Duplicates across tools are merged and credited (`corroborated-by:<tool>`). |
@@ -110,6 +110,7 @@ Environment variables (prefix `DFA_`, also read from `backend/.env`):
 | `DFA_SANDBOX_HOST_DATA_DIR` | – | Host path of `DFA_DATA_DIR` when the worker itself runs in a container |
 | `DFA_MAX_EXTRACT_TOTAL_MB` / `_FILE_MB` / `_FILES` / `_DEPTH` | 2048 / 512 / 20000 / 5 | Extraction budgets |
 | `DFA_MAX_COMPRESSION_RATIO` | 250 | Per-member ratio limit (bomb protection) |
+| `DFA_KEEP_EXTRACTED` | `true` | `false` deletes extracted files after each scan (manifest, findings and tool output are kept) |
 | `DFA_CWE_CHECKER_IMAGE` / `_BIN` / `_MAX_BINARIES` / `_TIMEOUT_S` / `_BARE_METAL` | ghcr image / – / 5 / 900 / false | cwe_checker |
 | `DFA_FWANALYZER_BIN` / `_TIMEOUT_S` | – / 600 | FwAnalyzer outside the sandbox image |
 | `DFA_FACT_URL` / `_API_KEY` / `_TIMEOUT_S` / `_MAX_UPLOAD_MB` | – / – / 3600 / 256 | FACT REST service |
