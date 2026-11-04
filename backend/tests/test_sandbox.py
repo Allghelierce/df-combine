@@ -85,3 +85,21 @@ def test_host_path_translation(settings, tmp_path):
     inside.mkdir(parents=True)
     assert _host_path(inside, settings) == "/srv/dfa/var/work/abc/files"
     assert _host_path(tmp_path, settings) == str(tmp_path.resolve())
+
+
+@pytest.mark.skipif(not DOCKER_OK, reason="Docker or dfa-sandbox image not available")
+@pytest.mark.parametrize("key", ["ubi", "jffs2", "ext4"])
+def test_docker_mode_filesystems(settings, fixtures, tmp_path, key):
+    from dfa.toolexec import image_has_binary
+    if key not in fixtures:
+        pytest.skip("fixture unavailable")
+    if key != "ext4" and not image_has_binary("dfa-sandbox:latest", "jefferson"):
+        pytest.skip("sandbox image built without UBI/JFFS2 tools")
+    settings.sandbox_mode = "docker"
+    settings.sandbox_image = "dfa-sandbox:latest"
+    res = run_analysis(fixtures[key], fixtures[key].name, tmp_path / "w", settings)
+    arts = {a["name"]: a for a in res.manifest["extraction"]["artifacts"]}
+    assert "/etc/shadow" in arts
+    if key == "ext4":
+        assert arts["/bin/busybox"]["mode"] == 0o4755
+    assert any(f["rule_id"] == "empty-password" for f in res.manifest["findings"])

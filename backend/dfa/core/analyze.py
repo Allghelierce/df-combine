@@ -56,7 +56,7 @@ def categorize(art: Artifact, elf: dict | None, ctx: ScanContext) -> str:
         return "executable"
     if art.format in ("cortexm_raw",):
         return "firmware_image"
-    if art.format in ("squashfs", "ext", "fat", "romfs", "disk_image", "ubi", "jffs2"):
+    if art.format in ("squashfs", "ext", "fat", "romfs", "disk_image", "ubi", "ubifs", "jffs2"):
         return "filesystem_image"
     if art.format in ("zip", "tar", "gzip", "bzip2", "xz", "lzma", "cpio"):
         return "archive"

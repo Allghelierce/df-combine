@@ -37,7 +37,7 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
 from .formats import px4json
-from .formats.ihex import IHexError, parse_ihex
+from .formats.ihex import parse_ihex
 from .formats.simplefs import FormatError, iter_cpio, iter_romfs, parse_dfuse, parse_partitions, romfs_size
 from .identify import FormatInfo, detect_format, parse_uimage_header
 from .limits import ExtractionBudget, LimitExceeded, Limits
@@ -158,8 +158,13 @@ class Extractor:
         self._next_id = 0
         self._paths: dict[int, Path] = {}
         self._pending_meta: dict[str, dict] = {}
+        self._tree_roots: dict[int, tuple[Path, bool]] = {}  # artifact id -> (root, written by external tool)
+        self._registered: set[int] = set()
+        # Unpackers that may follow links they create themselves are only allowed inside the container sandbox.
+        self.in_container = os.environ.get("DFA_IN_SANDBOX") == "1"
         self._progress = progress or (lambda msg: None)
-        self._external_tools = {t: shutil.which(t) for t in ("unsquashfs", "debugfs", "mcopy")}
+        self._external_tools = {t: shutil.which(t) for t in ("unsquashfs", "debugfs", "mcopy",
+                                                             "ubireader_extract_files", "jefferson")}
 
     # ---- public -----------------------------------------------------------
     def run(self, input_path: Path, original_name: str) -> ExtractionResult:
@@ -194,6 +199,7 @@ class Extractor:
     def _out_dir(self, art: Artifact) -> Path:
         d = self.root / f"{art.id:05d}_{_sanitize_component(art.name)}.d"
         d.mkdir(parents=True, exist_ok=False)
+        self._tree_roots.setdefault(art.id, (d, False))
         return d
 
     def _rel(self, p: Path) -> str:
@@ -225,6 +231,16 @@ class Extractor:
             dest.unlink(missing_ok=True)
             raise
         return written
+
+    def _member_write(self, art: Artifact, name: str, src: BinaryIO, dest: Path,
+                      compressed_size: int | None = None) -> bool:
+        """Write one archive member; path collisions reject the member instead of aborting the archive."""
+        try:
+            self._write_stream(src, dest, compressed_size=compressed_size, label=name)
+            return True
+        except (FileExistsError, NotADirectoryError, IsADirectoryError) as exc:
+            self.result.warnings.append(f"{art.name}: rejected member {name!r}: path collision ({type(exc).__name__})")
+            return False
 
     def _write_bytes(self, data: bytes, dest: Path) -> None:
         import io
@@ -261,25 +277,41 @@ class Extractor:
             art.extraction_note = f"limit exceeded: {exc}"
             self.result.warnings.append(f"{art.name}: {art.extraction_note}")
             self.result.limits_hit.append(str(exc))
-            children = [a for a in self.result.artifacts if a.parent_id == art.id]
+            children = self._salvage(art)
         except UnsupportedFormat as exc:
             art.extraction = "unsupported"
             art.extraction_note = str(exc)
             self.result.warnings.append(f"{art.name}: {exc}")
             return
-        except (FormatError, IHexError, px4json.ContainerError, zipfile.BadZipFile, tarfile.TarError,
-                zlib.error, lzma.LZMAError, OSError, EOFError, ValueError, UnsafePath) as exc:
+        except Exception as exc:  # noqa: BLE001 - any parser error is contained to this container
             art.extraction = "failed"
-            art.extraction_note = f"{type(exc).__name__}: {exc}"
+            art.extraction_note = f"{type(exc).__name__}: {str(exc)[:300]}"
             self.result.warnings.append(f"{art.name}: extraction failed ({art.extraction_note})")
-            children = [a for a in self.result.artifacts if a.parent_id == art.id]
+            children = self._salvage(art)
         for child in children:
             if self.budget.files_created > self.limits.max_files:
                 break
             self._process(child)
 
+    def _salvage(self, art: Artifact) -> list[Artifact]:
+        """After a failure, register whatever was safely written so it is still analysed."""
+        children = [a for a in self.result.artifacts if a.parent_id == art.id]
+        if children or art.id in self._registered or art.id not in self._tree_roots:
+            return children
+        root, external = self._tree_roots[art.id]
+        if not root.exists():
+            return children
+        try:
+            if external:
+                self._sanitize_tree(art, root)
+            return self._register_tree(art, root)
+        except Exception as exc:  # noqa: BLE001
+            self.result.warnings.append(f"{art.name}: could not salvage partial output ({exc})")
+            return [a for a in self.result.artifacts if a.parent_id == art.id]
+
     # ---- tree registration for directory-producing handlers --------------
     def _register_tree(self, parent: Artifact, out_dir: Path) -> list[Artifact]:
+        self._registered.add(parent.id)
         children = []
         for dirpath, dirnames, filenames in os.walk(out_dir):
             dirnames.sort()
@@ -332,8 +364,8 @@ class Extractor:
                     self.result.warnings.append(f"{art.name}: duplicate member {zi.filename!r} skipped")
                     continue
                 with zf.open(zi) as member:
-                    self._write_stream(member, dest, compressed_size=max(zi.compress_size, 1),
-                                       label=zi.filename)
+                    if not self._member_write(art, zi.filename, member, dest, compressed_size=max(zi.compress_size, 1)):
+                        continue
                 self._note_meta(dest, mode=(mode & 0o7777) or None)
         self._record_fs(art, "zip", out)
         return self._register_tree(art, out)
@@ -368,7 +400,8 @@ class Extractor:
                 fobj = tf.extractfile(ti)
                 if fobj is None:
                     continue
-                self._write_stream(fobj, dest, label=ti.name)
+                if not self._member_write(art, ti.name, fobj, dest):
+                    continue
                 self._note_meta(dest, mode=ti.mode & 0o7777, uid=ti.uid, gid=ti.gid)
         self._record_fs(art, "tar", out)
         return self._register_tree(art, out)
@@ -396,10 +429,10 @@ class Extractor:
         return self._decompress(art, lambda p: bz2.open(p, "rb"), (".bz2", ".tbz2"))
 
     def h_xz(self, art: Artifact) -> list[Artifact]:
-        return self._decompress(art, lambda p: lzma.open(p, "rb"), (".xz", ".txz"))
+        return self._decompress(art, lambda p: _LzmaReader(p, lzma.FORMAT_XZ), (".xz", ".txz"))
 
     def h_lzma(self, art: Artifact) -> list[Artifact]:
-        return self._decompress(art, lambda p: lzma.open(p, "rb", format=lzma.FORMAT_ALONE), (".lzma", ".lz"))
+        return self._decompress(art, lambda p: _LzmaReader(p, lzma.FORMAT_ALONE), (".lzma", ".lz"))
 
     def h_ihex(self, art: Artifact) -> list[Artifact]:
         src = self.path_of(art.id)
@@ -480,8 +513,8 @@ class Extractor:
         if dest.exists():
             return
         fp.seek(e.offset)
-        self._write_stream(_Bounded(fp, e.size), dest, label=e.name)
-        self._note_meta(dest, mode=e.mode, uid=e.uid, gid=e.gid)
+        if self._member_write(art, e.name, _Bounded(fp, e.size), dest):
+            self._note_meta(dest, mode=e.mode, uid=e.uid, gid=e.gid)
 
     def h_dfu(self, art: Artifact) -> list[Artifact]:
         src = self.path_of(art.id)
@@ -551,28 +584,37 @@ class Extractor:
             self.result.warnings.append(f"{art.name}: {cmd[0]} exited with status {proc.returncode}")
 
     def _sanitize_tree(self, art: Artifact, out: Path) -> None:
-        """Remove links/special files created by external tools, clamp modes, charge budget."""
+        """Remove links/special files created by external tools, clamp modes, then charge the budget.
+
+        Links are removed in a first pass so a budget error can never leave links behind."""
+        regular: list[tuple[Path, os.stat_result]] = []
         for dirpath, dirnames, filenames in os.walk(out, followlinks=False):
             for name in list(dirnames) + filenames:
                 p = Path(dirpath) / name
                 rel = "/" + str(p.relative_to(out))
                 st = p.lstat()
                 if stat.S_ISLNK(st.st_mode):
-                    self._record_link(art, rel, "symlink", os.readlink(p)[:4096])
+                    try:
+                        target = os.readlink(p)[:4096]
+                    except OSError:
+                        target = None
+                    self._record_link(art, rel, "symlink", target)
                     p.unlink()
                     if name in dirnames:
                         dirnames.remove(name)
                 elif stat.S_ISDIR(st.st_mode):
                     os.chmod(p, 0o755)
                 elif stat.S_ISREG(st.st_mode):
-                    self._note_meta(p, mode=st.st_mode & 0o7777)
                     os.chmod(p, 0o644)
-                    self.budget.charge_file()
-                    self.budget.charge_bytes(st.st_size, file_total=st.st_size)
+                    regular.append((p, st))
                 else:
                     kind = "device" if (stat.S_ISCHR(st.st_mode) or stat.S_ISBLK(st.st_mode)) else "fifo"
                     self._record_link(art, rel, kind, None)
                     p.unlink()
+        for p, st in regular:
+            self._pending_meta.setdefault(str(p), {"mode": st.st_mode & 0o7777})
+            self.budget.charge_file()
+            self.budget.charge_bytes(st.st_size, file_total=st.st_size)
 
     def _need_tool(self, tool: str, fs: str) -> str:
         path = self._external_tools.get(tool)
@@ -583,8 +625,12 @@ class Extractor:
 
     def h_squashfs(self, art: Artifact) -> list[Artifact]:
         tool = self._need_tool("unsquashfs", "SquashFS")
+        if not self.in_container and not _unsquashfs_safe(tool):
+            raise UnsupportedFormat("SquashFS detected but the host unsquashfs is older than 4.5.1 (symlink "
+                                    "traversal fixes); use the container sandbox to extract it")
         out = self._out_dir(art)
         dest = out / "root"
+        self._tree_roots[art.id] = (out, True)
         self._run_tool(art, [tool, "-no-xattrs", "-ignore-errors", "-quiet", "-no-progress", "-d", str(dest),
                              str(self.path_of(art.id))], out)
         self._sanitize_tree(art, out)
@@ -593,62 +639,183 @@ class Extractor:
         return self._register_tree(art, root)
 
     def h_ext(self, art: Artifact) -> list[Artifact]:
+        """ext2/3/4 via debugfs, without 'rdump'.
+
+        rdump materialises symlinks and then writes later entries *through* them (a crafted image with
+        duplicate directory entries can write outside the extraction root).  Instead the tree is listed
+        with 'ls -p' and each regular file is written with 'dump' to a path we created and confined.
+        """
         tool = self._need_tool("debugfs", "ext2/3/4 filesystem")
         out = self._out_dir(art)
         dest = out / "root"
         dest.mkdir()
-        self._run_tool(art, [tool, "-R", f"rdump / {dest}", str(self.path_of(art.id))], out)
-        self._sanitize_tree(art, out)
-        self._ext_metadata(art, tool, dest)
+        self._tree_roots[art.id] = (dest, False)
+        files = self._ext_list(art, tool)
         self._record_fs(art, "ext", dest, image_artifact=art.id)
+        planned: list[tuple[str, Path, int, dict]] = []
+        reserved = 0
+        over_budget = None
+        for path, mode, uid, gid, size in files:
+            try:
+                target = _confined(dest, safe_member_path(path))
+            except UnsafePath as exc:
+                self.result.warnings.append(f"{art.name}: rejected member {path!r}: {exc}")
+                continue
+            if size > self.limits.max_file_bytes:
+                self.result.warnings.append(f"{art.name}: {path} skipped ({size} bytes exceeds per-file limit)")
+                self.result.limits_hit.append("max_file_bytes")
+                continue
+            if reserved + size > self.budget.remaining_bytes or self.budget.files_created + len(planned) >= self.limits.max_files:
+                over_budget = f"ext image content exceeds remaining extraction budget at {path}"
+                break
+            if target.exists():
+                self.result.warnings.append(f"{art.name}: duplicate entry {path!r} skipped")
+                continue
+            reserved += size
+            planned.append((path, target, size, {"mode": mode & 0o7777, "uid": uid, "gid": gid}))
+        seen_targets: set[str] = set()
+        batch: list[str] = []
+        todo = []
+        for path, target, size, meta in planned:
+            if str(target) in seen_targets:
+                continue
+            seen_targets.add(str(target))
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+            except (FileExistsError, NotADirectoryError):
+                self.result.warnings.append(f"{art.name}: rejected member {path!r}: path collision")
+                continue
+            batch.append(f'dump "{path}" "{target}"\n')
+            todo.append((target, size, meta))
+        for i in range(0, len(batch), 2000):
+            self._debugfs(art, tool, batch[i:i + 2000])
+        for target, _size, meta in todo:
+            try:
+                st = target.lstat()
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                target.unlink()
+                continue
+            os.chmod(target, 0o644)
+            self.budget.charge_file()
+            self.budget.charge_bytes(st.st_size, file_total=st.st_size)
+            self._note_meta(target, **meta)
+        if over_budget:
+            raise LimitExceeded(over_budget)
         return self._register_tree(art, dest)
 
-    def _ext_metadata(self, art: Artifact, tool: str, dest: Path) -> None:
-        """Recover original mode/uid/gid (rdump drops setuid bits) via 'debugfs ls -p'."""
-        dirs = ["/"] + sorted("/" + str(p.relative_to(dest)) for p in dest.rglob("*") if p.is_dir())
-        dirs = [d for d in dirs if '"' not in d and "\n" not in d][:5000]
+    def _debugfs(self, art: Artifact, tool: str, commands: list[str]) -> str:
         cmdfile = self.work_dir / f".debugfs_{art.id}.cmd"
-        cmdfile.write_text("".join(f'ls -p "{d}"\n' for d in dirs))
+        cmdfile.write_text("".join(commands))
+        limit_file = self.limits.max_file_bytes
+        cpu = self.limits.tool_timeout_s
+
+        def preexec() -> None:  # pragma: no cover - runs in child
+            resource.setrlimit(resource.RLIMIT_FSIZE, (limit_file, limit_file))
+            resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 5))
+
         try:
             proc = subprocess.run([tool, "-f", str(cmdfile), str(self.path_of(art.id))], capture_output=True,
-                                  timeout=self.limits.tool_timeout_s, stdin=subprocess.DEVNULL)
-        except (subprocess.SubprocessError, OSError) as exc:
-            self.result.warnings.append(f"{art.name}: could not read ext metadata ({exc})")
-            return
+                                  timeout=self.limits.tool_timeout_s, stdin=subprocess.DEVNULL, preexec_fn=preexec)
+        except subprocess.TimeoutExpired:
+            raise LimitExceeded(f"debugfs timed out after {self.limits.tool_timeout_s}s") from None
         finally:
             cmdfile.unlink(missing_ok=True)
-        current = None
-        recovered = 0
-        for line in proc.stdout.decode("utf-8", "replace").splitlines():
-            if line.startswith("debugfs: ls -p "):
-                current = line[len("debugfs: ls -p "):].strip().strip('"')
-                continue
-            parts = line.split("/")
-            if current is None or len(parts) < 7 or parts[0] != "":
-                continue
-            try:
-                mode, uid, gid = int(parts[2], 8), int(parts[3]), int(parts[4])
-            except ValueError:
-                continue
-            name = parts[5]
-            if name in (".", "..") or not stat.S_ISREG(mode):
-                continue
-            p = dest / current.lstrip("/") / name
-            if str(p) in self._pending_meta:
-                self._pending_meta[str(p)] = {"mode": mode & 0o7777, "uid": uid, "gid": gid}
-                recovered += 1
-        art.details["metadata_recovered"] = recovered
+        return proc.stdout.decode("utf-8", "replace")
+
+    def _ext_list(self, art: Artifact, tool: str) -> list[tuple[str, int, int, int, int]]:
+        """Breadth-first listing via 'ls -p'. Returns regular files as (path, mode, uid, gid, size)."""
+        files: list[tuple[str, int, int, int, int]] = []
+        seen_dirs: set[str] = set()
+        level = ["/"]
+        depth = 0
+        entries = 0
+        while level and depth <= MAX_PATH_DEPTH:
+            out = self._debugfs(art, tool, [f'ls -p "{d}"\n' for d in level])
+            nxt: list[str] = []
+            current = None
+            for line in out.splitlines():
+                if line.startswith("debugfs: ls -p "):
+                    current = line[len("debugfs: ls -p "):].strip()
+                    if len(current) >= 2 and current[0] == current[-1] == '"':
+                        current = current[1:-1]
+                    continue
+                parts = line.split("/")
+                if current is None or len(parts) < 7 or parts[0] != "":
+                    continue
+                try:
+                    ino, mode, uid, gid = int(parts[1]), int(parts[2], 8), int(parts[3]), int(parts[4])
+                    size = int(parts[6]) if parts[6] else 0
+                except ValueError:
+                    continue
+                name = parts[5]
+                if name in (".", "..", ""):
+                    continue
+                path = (current.rstrip("/") + "/" + name)
+                if any(c in name for c in '"\\\n\r') or not name.isprintable():
+                    self.result.warnings.append(f"{art.name}: entry with unsupported characters skipped: {name!r}")
+                    continue
+                entries += 1
+                if entries > self.limits.max_files:
+                    self.result.limits_hit.append("max_files")
+                    return files
+                if stat.S_ISDIR(mode):
+                    key = f"{ino}"
+                    if key not in seen_dirs:
+                        seen_dirs.add(key)
+                        nxt.append(path)
+                elif stat.S_ISREG(mode):
+                    files.append((path, mode, uid, gid, size))
+                elif stat.S_ISLNK(mode):
+                    self._record_link(art, path, "symlink", None)
+                else:
+                    kind = "device" if (stat.S_ISCHR(mode) or stat.S_ISBLK(mode)) else "fifo"
+                    self._record_link(art, path, kind, None)
+            level = nxt[:20000]
+            depth += 1
+        return files
 
     def h_fat(self, art: Artifact) -> list[Artifact]:
         tool = self._need_tool("mcopy", "FAT filesystem")
         out = self._out_dir(art)
         dest = out / "root"
         dest.mkdir()
+        self._tree_roots[art.id] = (dest, True)
         self._run_tool(art, [tool, "-s", "-n", "-p", "-i", str(self.path_of(art.id)), "::/", str(dest)], out,
                        env={"MTOOLS_SKIP_CHECK": "1"})
         self._sanitize_tree(art, out)
         self._record_fs(art, "fat", dest, image_artifact=art.id)
         return self._register_tree(art, dest)
+
+    def _container_only(self, tool: str, fs: str) -> str:
+        path = self._need_tool(tool, fs)
+        if not self.in_container:
+            raise UnsupportedFormat(f"{fs} detected; '{tool}' is only run inside the container sandbox because it "
+                                    "may follow links it creates (scan ran without container isolation)")
+        return path
+
+    def h_ubi(self, art: Artifact) -> list[Artifact]:
+        tool = self._container_only("ubireader_extract_files", "UBI/UBIFS image")
+        out = self._out_dir(art)
+        dest = out / "root"
+        self._tree_roots[art.id] = (out, True)
+        self._run_tool(art, [tool, "-k", "-o", str(dest), str(self.path_of(art.id))], out)
+        self._sanitize_tree(art, out)
+        root = _single_child_root(dest)
+        self._record_fs(art, "ubifs", root, image_artifact=art.id)
+        return self._register_tree(art, root)
+
+    def h_jffs2(self, art: Artifact) -> list[Artifact]:
+        tool = self._container_only("jefferson", "JFFS2 image")
+        out = self._out_dir(art)
+        dest = out / "root"
+        self._tree_roots[art.id] = (out, True)
+        self._run_tool(art, [tool, "-d", str(dest), str(self.path_of(art.id))], out)
+        self._sanitize_tree(art, out)
+        root = dest if dest.exists() else out
+        self._record_fs(art, "jffs2", root, image_artifact=art.id)
+        return self._register_tree(art, root)
 
     def h_unsupported(self, art: Artifact) -> list[Artifact]:
         raise UnsupportedFormat(f"{art.format_description}: unpacking this format is not supported yet")
@@ -715,6 +882,49 @@ class _Bounded:
         data = self.fp.read(size)
         self.left -= len(data)
         return data
+
+
+LZMA_MEMLIMIT = 256 * 1024**2
+
+
+class _LzmaReader:
+    """Streaming xz/lzma reader with a decoder memory limit (huge dictionary sizes are rejected)."""
+
+    def __init__(self, path: Path, fmt: int) -> None:
+        self.fp = path.open("rb")
+        self.fmt = fmt
+        self.d = lzma.LZMADecompressor(format=fmt, memlimit=LZMA_MEMLIMIT)
+        self.pending = b""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.fp.close()
+
+    def read(self, size: int = -1) -> bytes:
+        while True:
+            if self.d.eof:
+                if self.fmt != lzma.FORMAT_XZ:
+                    return b""
+                rest = self.d.unused_data + self.pending
+                self.pending = b""
+                if not rest.strip(b"\0"):
+                    rest += self.fp.read(64 * 1024)
+                    if not rest.strip(b"\0"):
+                        return b""
+                self.d = lzma.LZMADecompressor(format=self.fmt, memlimit=LZMA_MEMLIMIT)  # concatenated stream
+                self.pending = rest
+            if self.d.needs_input:
+                data = self.pending or self.fp.read(64 * 1024)
+                self.pending = b""
+                if not data:
+                    raise EOFError("truncated LZMA stream")
+            else:
+                data = b""
+            out = self.d.decompress(data, COPY_CHUNK)
+            if out:
+                return out
 
 
 class _GzipMemberReader:
@@ -830,6 +1040,37 @@ def _carve_length(fp: BinaryIO, off: int, kind: str, size: int) -> int | None:
     return None
 
 
+def _single_child_root(dest: Path) -> Path:
+    """ubi_reader writes <dest>/<image-seq>/<volume>/...; descend while there is exactly one directory."""
+    root = dest
+    for _ in range(3):
+        if not root.is_dir():
+            return dest if dest.exists() else dest.parent
+        kids = list(root.iterdir())
+        if len(kids) == 1 and kids[0].is_dir() and not (root / "etc").exists():
+            root = kids[0]
+        else:
+            break
+    return root
+
+
+_UNSQUASHFS_OK: dict[str, bool] = {}
+
+
+def _unsquashfs_safe(tool: str) -> bool:
+    """unsquashfs < 4.5.1 is affected by symlink traversal (CVE-2021-40153/CVE-2021-41072)."""
+    if tool not in _UNSQUASHFS_OK:
+        import re
+        try:
+            out = subprocess.run([tool, "-version"], capture_output=True, timeout=10).stdout.decode("ascii", "replace")
+        except (subprocess.SubprocessError, OSError):
+            out = ""
+        m = re.search(r"version (\d+)\.(\d+)(?:\.(\d+))?", out)
+        ver = tuple(int(x or 0) for x in m.groups()) if m else (0, 0, 0)
+        _UNSQUASHFS_OK[tool] = ver >= (4, 5, 1)
+    return _UNSQUASHFS_OK[tool]
+
+
 def _dir_size(path: Path) -> int:
     total = 0
     for dirpath, _d, files in os.walk(path):
@@ -860,8 +1101,9 @@ HANDLERS: dict[str, Callable[[Extractor, Artifact], list[Artifact]]] = {
     "squashfs": Extractor.h_squashfs,
     "ext": Extractor.h_ext,
     "fat": Extractor.h_fat,
-    "ubi": Extractor.h_unsupported,
-    "jffs2": Extractor.h_unsupported,
+    "ubi": Extractor.h_ubi,
+    "ubifs": Extractor.h_ubi,
+    "jffs2": Extractor.h_jffs2,
 }
 
 __all__ = ["Extractor", "Artifact", "ExtractionResult", "safe_member_path", "UnsafePath"]

@@ -50,6 +50,7 @@ FORMAT_DESCRIPTIONS = {
     "cpio": "cpio archive",
     "uimage": "U-Boot legacy uImage",
     "ubi": "UBI flash image",
+    "ubifs": "UBIFS filesystem image",
     "jffs2": "JFFS2 filesystem image",
     "cortexm_raw": "Raw ARM Cortex-M flash image",
     "romfs": "ROMFS image (NuttX/Linux romfs)",
@@ -62,7 +63,7 @@ FORMAT_DESCRIPTIONS = {
 }
 
 CONTAINER_FORMATS = {"zip", "tar", "gzip", "bzip2", "xz", "lzma", "ihex", "px4", "apj", "fw_json",
-                     "squashfs", "ext", "fat", "cpio", "uimage", "dfu", "romfs", "disk_image"}
+                     "squashfs", "ext", "fat", "cpio", "uimage", "dfu", "romfs", "disk_image", "ubi", "ubifs", "jffs2"}
 
 
 def _fmt(name: str, **details) -> FormatInfo:
@@ -102,6 +103,8 @@ def detect_format_bytes(head: bytes, size: int) -> FormatInfo:
         return _fmt("uimage")
     if head[:4] == b"UBI#":
         return _fmt("ubi")
+    if head[:4] == b"\x31\x18\x10\x06":
+        return _fmt("ubifs")
     if head[:2] in (b"\x85\x19", b"\x19\x85"):
         return _fmt("jffs2")
     if head[:8] == b"-rom1fs-":

@@ -13,8 +13,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: System tools used by extraction/fixtures
-        run: sudo apt-get update && sudo apt-get install -y squashfs-tools e2fsprogs e2tools mtools cpio
-      - run: python -m pip install -r backend/requirements-dev.txt
+        run: sudo apt-get update && sudo apt-get install -y squashfs-tools e2fsprogs e2tools mtools cpio mtd-utils
+      - run: python -m pip install -r backend/requirements-dev.txt ubi_reader==0.8.16 jefferson==0.4.8
       - run: ruff check dfa tests
         working-directory: backend
       - run: python -m pytest -q

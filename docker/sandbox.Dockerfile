@@ -13,7 +13,9 @@ RUN CGO_ENABLED=0 GOBIN=/out go install github.com/cruise-automation/fwanalyzer/
 FROM ubuntu:24.04
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      python3 python3-pyelftools squashfs-tools e2fsprogs e2tools mtools cpio \
+      python3 python3-pyelftools python3-pip squashfs-tools e2fsprogs e2tools mtools cpio \
+ && pip install --no-cache-dir --break-system-packages "ubi_reader==0.8.16" "jefferson==0.4.8" \
+ && apt-get purge -y python3-pip && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --uid 10001 --create-home --shell /usr/sbin/nologin analyzer \
  && ln -s /usr/bin/python3 /usr/local/bin/python
@@ -22,6 +24,6 @@ COPY --from=fwanalyzer /out/fwanalyzer /usr/local/bin/fwanalyzer
 WORKDIR /opt/dfa
 COPY backend/dfa/__init__.py dfa/__init__.py
 COPY backend/dfa/core dfa/core
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/opt/dfa
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/opt/dfa DFA_IN_SANDBOX=1
 USER analyzer
 CMD ["python", "-m", "dfa.core.analyze", "--help"]

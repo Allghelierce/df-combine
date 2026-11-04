@@ -120,13 +120,13 @@ def run_analysis(input_path: Path, original_name: str, work_dir: Path, settings:
             "-v", f"{_host_path(input_path, settings)}:/in/firmware:ro",
             "-v", f"{_host_path(work_dir, settings)}:/work:rw",
             settings.sandbox_image,
-            "python", "-m", "dfa.core.analyze", "--input", "/in/firmware", "--name", safe_name,
+            "python", "-m", "dfa.core.analyze", "--input", "/in/firmware", f"--name={safe_name}",
             "--work", "/work", "--limits", limits,
         ]
         preexec = None
         env = None
     else:
-        cmd = [sys.executable, "-m", "dfa.core.analyze", "--input", str(input_path), "--name", safe_name,
+        cmd = [sys.executable, "-m", "dfa.core.analyze", "--input", str(input_path), f"--name={safe_name}",
                "--work", str(work_dir), "--limits", limits]
         mem = _mem_bytes(settings.sandbox_memory)
         cpu = settings.sandbox_timeout_s

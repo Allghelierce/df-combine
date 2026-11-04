@@ -265,7 +265,7 @@ def create_app(settings: Settings | None = None, start_worker: bool | None = Non
             if path.startswith("api/"):
                 raise HTTPException(404)
             f = (dist / path).resolve()
-            if path and f.is_file() and str(f).startswith(str(dist.resolve())):
+            if path and f.is_file() and f.is_relative_to(dist.resolve()):
                 return FileResponse(f)
             return FileResponse(dist / "index.html")
 

@@ -51,9 +51,13 @@ class AdapterContext:
     log: Callable[[str], None] = lambda msg: None
 
     def artifact_path(self, art: dict) -> Path:
+        """Resolve a manifest path. The manifest is produced inside the sandbox, so it is not trusted."""
         if art["path"] == "<input>":
             return self.input_path
-        return self.work_dir / art["path"]
+        p = (self.work_dir / art["path"]).resolve()
+        if not p.is_relative_to(self.work_dir.resolve()):
+            raise ValueError(f"manifest path escapes the work directory: {art['path']!r}")
+        return p
 
     def tool_dir(self, tool: str) -> Path:
         d = self.work_dir / "tools" / tool

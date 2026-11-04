@@ -206,3 +206,97 @@ def test_ext_preserves_original_modes(fixtures, tmp_path):
     assert cloud.mode == 0o666
     # ...but on disk nothing is setuid/world-writable
     assert not (ex.path_of(bb.id).stat().st_mode & 0o4000)
+
+
+# ---------------- regressions for the security review findings ----------------
+def test_ext_duplicate_entry_cannot_write_through_symlink(tmp_path):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("original\n")
+    img = factory.ext_duplicate_entry_attack(tmp_path / "evil.img", victim)
+    if img is None:
+        pytest.skip("mke2fs unavailable")
+    ex, res = extract(img, tmp_path / "w")
+    assert victim.read_text() == "original\n"
+    assert all_files_inside(tmp_path / "w")
+    assert any(link.kind == "symlink" for link in res.links)
+
+
+def test_unexpected_errors_are_contained(tmp_path):
+    # Truncated GPT header used to raise struct.error and abort the whole scan.
+    gpt = bytearray(520)
+    gpt[510:512] = b"\x55\xaa"
+    gpt[512:520] = b"EFI PART"
+    p = tmp_path / "gpt_short.img"
+    p.write_bytes(bytes(gpt))
+    zp = tmp_path / "outer.zip"
+    with zipfile.ZipFile(zp, "w") as zf:
+        zf.writestr("disk.img", bytes(gpt))
+        zf.writestr("etc/shadow", "root::0:0:::\n")
+    ex, res = extract(zp, tmp_path / "w")
+    inner = next(a for a in res.artifacts if a.name == "/disk.img")
+    assert inner.extraction == "failed"
+    assert any(a.name == "/etc/shadow" for a in res.artifacts)
+
+
+def test_lzma_huge_dictionary_is_rejected_not_fatal(tmp_path):
+    import lzma
+    # xz stream whose LZMA2 filter requests a 1.5 GiB dictionary.
+    data = lzma.compress(b"x" * 1000, format=lzma.FORMAT_XZ,
+                         filters=[{"id": lzma.FILTER_LZMA2, "dict_size": 1536 * 1024 * 1024}])
+    p = tmp_path / "bigdict.xz"
+    p.write_bytes(data)
+    ex, res = extract(p, tmp_path / "w")
+    assert res.artifacts[0].extraction == "failed"
+    assert "LZMAError" in res.artifacts[0].extraction_note or "Memory" in res.artifacts[0].extraction_note
+
+
+def test_concatenated_xz_streams(tmp_path):
+    import lzma
+    p = tmp_path / "multi.xz"
+    p.write_bytes(lzma.compress(b"first-") + lzma.compress(b"second"))
+    ex, res = extract(p, tmp_path / "w")
+    assert ex.path_of(res.artifacts[1].id).read_bytes() == b"first-second"
+
+
+def test_partial_results_survive_a_bad_trailing_member(tmp_path):
+    p = tmp_path / "collide.zip"
+    with zipfile.ZipFile(p, "w") as zf:
+        zf.writestr("etc/shadow", "root::0:0:::\n")
+        zf.writestr("x", "file")
+        zf.writestr("x/y", "collides with file x")
+    ex, res = extract(p, tmp_path / "w")
+    assert res.artifacts[0].extraction == "ok"
+    assert {"/etc/shadow", "/x"} <= {a.name for a in res.artifacts}
+    assert any("collision" in w for w in res.warnings)
+
+    bomb = tmp_path / "bombtail.zip"
+    with zipfile.ZipFile(bomb, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("etc/shadow", "root::0:0:::\n")
+        zf.writestr("zeros.bin", b"\0" * (8 * 1024 * 1024))
+    ex, res = extract(bomb, tmp_path / "w2", max_ratio=20, ratio_min_bytes=1024 * 1024)
+    assert res.artifacts[0].extraction == "partial"
+    assert any(a.name == "/etc/shadow" for a in res.artifacts)
+
+
+def test_link_following_unpackers_refused_outside_container(tmp_path, monkeypatch):
+    monkeypatch.delenv("DFA_IN_SANDBOX", raising=False)
+    p = tmp_path / "fs.jffs2"
+    p.write_bytes(b"\x85\x19" + b"\0" * 64)
+    ex = Extractor(tmp_path / "w", Limits())
+    ex._external_tools["jefferson"] = "/bin/true"
+    res = ex.run(p, "fs.jffs2")
+    assert res.artifacts[0].extraction == "unsupported"
+    assert "container sandbox" in res.artifacts[0].extraction_note
+
+
+@pytest.mark.parametrize("key", ["ubi", "jffs2"])
+def test_ubi_jffs2_extraction_in_container_mode(fixtures, tmp_path, monkeypatch, key):
+    import shutil as sh
+    tool = {"ubi": "ubireader_extract_files", "jffs2": "jefferson"}[key]
+    if key not in fixtures or not sh.which(tool):
+        pytest.skip(f"{key} fixture or {tool} unavailable")
+    monkeypatch.setenv("DFA_IN_SANDBOX", "1")
+    ex, res = extract(fixtures[key], tmp_path / "w")
+    names = {a.name for a in res.artifacts}
+    assert "/etc/shadow" in names, (res.warnings, names)
+    assert all_files_inside(tmp_path / "w")

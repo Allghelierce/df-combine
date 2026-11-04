@@ -211,3 +211,24 @@ def test_compare_releases(client, settings, fixtures, tmp_path):
     assert any(c["name"] == "busybox" and c["change"] == "changed" for c in d["components"])
     assert d["summary"]["unchanged"] > 5  # same issues in renamed archive still match
     assert client.get("/api/compare", params={"base": v1["id"], "target": "nope"}).status_code == 404
+
+
+def test_dash_prefixed_filename(client, settings, fixtures):
+    s = upload(client, fixtures["px4"], name="-fw.px4")
+    process_all(settings)
+    assert client.get(f"/api/scans/{s['id']}").json()["status"] == "completed"
+
+
+def test_spa_route_does_not_serve_sibling_dirs(settings, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from dfa.main import create_app
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<html>app</html>")
+    (tmp_path / "dist-old").mkdir()
+    (tmp_path / "dist-old" / "secret.txt").write_text("SECRET")
+    monkeypatch.setenv("DFA_FRONTEND_DIST", str(dist))
+    with TestClient(create_app(settings, start_worker=False)) as c:
+        r = c.get("/%2e%2e/dist-old/secret.txt")
+        assert "SECRET" not in r.text

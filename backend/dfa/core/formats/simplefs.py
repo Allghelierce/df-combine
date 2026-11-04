@@ -263,6 +263,8 @@ def parse_partitions(fp: BinaryIO, total_size: int) -> tuple[str, list[Partition
 def _parse_gpt(fp: BinaryIO, total_size: int) -> list[Partition]:
     fp.seek(512)
     hdr = fp.read(92)
+    if len(hdr) < 92:
+        raise FormatError("truncated GPT header")
     entries_lba, n_entries, entry_size = struct.unpack("<QII", hdr[72:88])
     if entry_size < 128 or entry_size > 1024 or n_entries > 256:
         raise FormatError("unsupported GPT header values")
