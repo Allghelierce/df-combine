@@ -22,7 +22,7 @@ from pathlib import Path
 from .extract import Artifact, Extractor
 from .findings import Finding, dedupe
 from .formats.elfinfo import inspect_elf
-from .identify import PlatformAccumulator, file_entropy, scan_file_for_platform
+from .identify import PlatformAccumulator, file_entropy, parse_ardupilot_descriptor, scan_file_for_platform
 from .limits import Limits
 from .scanners import binaries, components, configs, drone, secrets
 from .scanners.base import ScanContext, build_display_paths
@@ -58,7 +58,7 @@ def categorize(art: Artifact, elf: dict | None, ctx: ScanContext) -> str:
         return "firmware_image"
     if art.format in ("squashfs", "ext", "fat", "romfs", "disk_image", "ubi", "jffs2"):
         return "filesystem_image"
-    if art.format in ("zip", "tar", "gzip", "bzip2", "xz", "cpio"):
+    if art.format in ("zip", "tar", "gzip", "bzip2", "xz", "lzma", "cpio"):
         return "archive"
     if art.format in ("px4", "apj", "fw_json", "ihex", "dfu", "uimage"):
         return "firmware_container"
@@ -130,6 +130,13 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
             for _, s in (ctx.strings(a) if a.format != "text" else
                          enumerate((ctx.text(a) or "").splitlines()[:20000])):
                 acc.feed_string(s)
+    ap_desc = None
+    for a in arts:
+        if a.format == "cortexm_raw" and ap_desc is None:
+            with ex.path_of(a.id).open("rb") as fp:
+                ap_desc = parse_ardupilot_descriptor(fp.read(4 * 1024**2), a.size)
+            if ap_desc:
+                acc.hint("ArduPilot", f"ArduPilot app descriptor at {ap_desc['offset']}")
     for a in arts:
         if a.format == "px4":
             acc.hint("PX4", "PX4 firmware container magic 'PX4FWv1'")
@@ -169,12 +176,15 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
         manifest["scanner_runs"].append({"name": "builtin:components", "status": "failed", "findings": 0,
                                          "error": f"{type(exc).__name__}: {exc}"})
     findings += _identification_findings(ctx, arts, platforms)
+    findings += _archive_anomaly_findings(ctx, result)
 
     # ---- identification summary --------------------------------------------
     root = arts[0]
     arch, bits, endian, os_hint = _primary_arch(arts, ctx)
     primary = platforms[0] if platforms else None
     board_id = container_meta.get("board_id")
+    if board_id is None and ap_desc and "board_id" in ap_desc:
+        board_id = ap_desc["board_id"]
     ident = {
         "format": root.format,
         "format_description": root.format_description,
@@ -194,6 +204,7 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
         "board_id": board_id,
         "board_hint": BOARD_IDS.get(board_id) if isinstance(board_id, int) else None,
         "container_metadata": container_meta,
+        "ardupilot_descriptor": ap_desc,
         "details": root.details,
     }
     cats = Counter(ctx.category.values())
@@ -277,6 +288,47 @@ def _identification_findings(ctx: ScanContext, arts: list[Artifact], platforms) 
                 rule_id=f"extraction-{a.extraction}", affected_component=ctx.where(a),
                 remediation="Review the artifact manually or install the missing unpacker.",
                 evidence=[Evidence("string", a.extraction_note or "")]))
+    return out
+
+
+def _archive_anomaly_findings(ctx: ScanContext, result) -> list[Finding]:
+    """Archive constructs that only make sense as an attack (zip-slip style) - flagged, never followed."""
+    import posixpath
+
+    from .findings import Classification as C
+    from .findings import Confidence as K
+    from .findings import Evidence
+    from .findings import Severity as S
+    out: list[Finding] = []
+    traversal = [w for w in result.warnings if "path traversal" in w or "absolute (drive) path" in w]
+    escaping = []
+    for link in result.links:
+        if link.kind == "symlink" and link.target and not link.target.startswith("/"):
+            base = posixpath.dirname(link.path.lstrip("/"))
+            if posixpath.normpath(posixpath.join(base, link.target)).startswith(".."):
+                escaping.append(link)
+    if traversal:
+        out.append(Finding(
+            title=f"Archive contains path-traversal entries ({len(traversal)})",
+            description="One or more archive members use '..' or drive-letter paths that would be written outside "
+                        "the extraction directory by a naive unpacker (zip-slip). They were rejected. In a firmware "
+                        "update package this indicates tampering or an attempt to exploit the device's updater.",
+            severity=S.high, classification=C.detected, confidence=K.high, source_tool="builtin:extract",
+            rule_id="archive-path-traversal", affected_component=ctx.where(ctx.artifacts[0]),
+            remediation="Do not install this package. Ensure the on-device updater validates member paths.",
+            evidence=[Evidence("path", w[:200]) for w in traversal[:20]], cwe="CWE-22",
+            references=["https://cwe.mitre.org/data/definitions/22.html"], tags=["archive", "tampering"]))
+    if escaping:
+        out.append(Finding(
+            title=f"Symlinks pointing outside their archive ({len(escaping)})",
+            description="Relative symlinks resolve outside the archive root. Combined with later members written "
+                        "through the link, this is a classic arbitrary-file-write technique against updaters. "
+                        "The links were recorded but not created.",
+            severity=S.medium, classification=C.suspicious, confidence=K.medium, source_tool="builtin:extract",
+            rule_id="archive-escaping-symlink", affected_component=ctx.where(ctx.artifacts[0]),
+            remediation="Inspect the package origin; reject archives containing escaping links.",
+            evidence=[Evidence("path", f"{link.path} -> {link.target}") for link in escaping[:20]], cwe="CWE-59",
+            tags=["archive", "tampering"]))
     return out
 
 

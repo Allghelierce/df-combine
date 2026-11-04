@@ -58,6 +58,7 @@ export interface Identification {
   board_id: number | null;
   board_hint: string | null;
   container_metadata: Record<string, unknown>;
+  ardupilot_descriptor?: Record<string, string | number> | null;
   details: Record<string, unknown>;
 }
 

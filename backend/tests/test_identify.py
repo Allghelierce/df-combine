@@ -114,3 +114,13 @@ def test_unknown_random_blob(fixtures, run_analysis):
     m = run_analysis(fixtures["random"])
     assert m["identification"]["platform"] == "Unknown"
     assert any(f["rule_id"] == "high-entropy-unknown" for f in m["findings"])
+
+
+def test_ardupilot_descriptor(fixtures, run_analysis):
+    i = run_analysis(fixtures["apj_bin"])["identification"]
+    d = i["ardupilot_descriptor"]
+    assert d["git_hash"] == "deadbeef" and d["version"] == "4.5" and d["board_id"] == 9
+    assert i["board_id"] == 9 and i["board_hint"]
+    from dfa.core.identify import AP_DESCRIPTOR_SIG, parse_ardupilot_descriptor
+    unfilled = parse_ardupilot_descriptor(b"x" * 10 + AP_DESCRIPTOR_SIG + b"\0" * 40, 100)
+    assert "note" in unfilled

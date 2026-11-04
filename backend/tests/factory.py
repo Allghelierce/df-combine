@@ -121,7 +121,8 @@ def ardupilot_image() -> bytes:
     strings = ["ArduCopter V4.5.7 (deadbeef)", "ChibiOS: 0123abcd", "AP_HAL", "PreArm: Compass not calibrated",
                "SYSID_THISMAV", "ARMING_CHECK", "@PARAM/defaults.parm"]
     defaults_gz = gzip.compress(AP_DEFAULTS, mtime=0)
-    app_desc = bytes([0x40, 0xA2, 0xE4, 0xF1, 0x64, 0x68, 0x91, 0x06]) + b"\x00" * 24
+    app_desc = bytes([0x40, 0xA2, 0xE4, 0xF1, 0x64, 0x68, 0x91, 0x06]) + struct.pack(
+        "<IIIIBBH", 0x11111111, 0x22222222, 64 * 1024, 0xDEADBEEF, 4, 5, 9) + b"\x00" * 8
     return cortexm_image(strings, flash_base=0x0800_4000, embedded=[app_desc, defaults_gz])
 
 

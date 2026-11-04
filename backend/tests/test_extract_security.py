@@ -167,3 +167,42 @@ def test_dfuse_parse(tmp_path):
     assert child.details["load_address"] == "0x8000000"
     assert ex.path_of(child.id).read_bytes() == payload
     assert res.artifacts[0].details["usb_vid"] == "0483"
+
+
+def test_lzma_alone_payload(tmp_path):
+    import lzma
+    p = tmp_path / "kernel.lzma"
+    p.write_bytes(lzma.compress(b"Linux version 3.10.14 (builder@x) #1\n" * 50, format=lzma.FORMAT_ALONE))
+    ex, res = extract(p, tmp_path / "w")
+    assert res.artifacts[0].format == "lzma" and res.artifacts[0].extraction == "ok"
+    assert b"Linux version" in ex.path_of(res.artifacts[1].id).read_bytes()
+
+
+def test_traversal_and_escaping_links_are_findings(fixtures, run_analysis, tmp_path):
+    m = run_analysis(fixtures["zip_slip"])
+    assert any(f["rule_id"] == "archive-path-traversal" for f in m["findings"])
+    p = tmp_path / "esc.tar"
+    with tarfile.open(p, "w") as tf:
+        ti = tarfile.TarInfo("a/evil")
+        ti.type = tarfile.SYMTYPE
+        ti.linkname = "../../../etc"
+        tf.addfile(ti)
+        ti = tarfile.TarInfo("a/ok")
+        ti.type = tarfile.SYMTYPE
+        ti.linkname = "../b"
+        tf.addfile(ti)
+    m = run_analysis(p)
+    f = next(f for f in m["findings"] if f["rule_id"] == "archive-escaping-symlink")
+    assert "a/evil" in f["evidence"][0]["value"] and len(f["evidence"]) == 1
+
+
+def test_ext_preserves_original_modes(fixtures, tmp_path):
+    if "ext4" not in fixtures:
+        pytest.skip("mkfs.ext4 unavailable")
+    ex, res = extract(fixtures["ext4"], tmp_path / "w")
+    bb = next(a for a in res.artifacts if a.name == "/bin/busybox")
+    assert bb.mode == 0o4755
+    cloud = next(a for a in res.artifacts if a.name == "/etc/app/cloud.conf")
+    assert cloud.mode == 0o666
+    # ...but on disk nothing is setuid/world-writable
+    assert not (ex.path_of(bb.id).stat().st_mode & 0o4000)

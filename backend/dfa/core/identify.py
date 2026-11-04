@@ -57,10 +57,11 @@ FORMAT_DESCRIPTIONS = {
     "dfu": "DfuSe (STM32 DFU) firmware file",
     "text": "Text file",
     "raw": "Unrecognised binary data",
+    "lzma": "LZMA (alone/legacy) compressed data",
     "empty": "Empty file",
 }
 
-CONTAINER_FORMATS = {"zip", "tar", "gzip", "bzip2", "xz", "ihex", "px4", "apj", "fw_json",
+CONTAINER_FORMATS = {"zip", "tar", "gzip", "bzip2", "xz", "lzma", "ihex", "px4", "apj", "fw_json",
                      "squashfs", "ext", "fat", "cpio", "uimage", "dfu", "romfs", "disk_image"}
 
 
@@ -121,6 +122,8 @@ def detect_format_bytes(head: bytes, size: int) -> FormatInfo:
         return _fmt("fw_json")
     if looks_like_ihex(head):
         return _fmt("ihex")
+    if _looks_like_lzma_alone(head):
+        return _fmt("lzma")
     vt = analyze_vector_table(head)
     if vt is not None:
         return _fmt("cortexm_raw", initial_sp=hex(vt.initial_sp),
@@ -128,6 +131,17 @@ def detect_format_bytes(head: bytes, size: int) -> FormatInfo:
     if _is_text(head):
         return _fmt("text")
     return _fmt("raw")
+
+
+def _looks_like_lzma_alone(head: bytes) -> bool:
+    """Legacy .lzma header: props byte, power-of-two dictionary size, 64-bit size (or -1)."""
+    if len(head) < 13 or head[0] >= 225 or head[0] not in (0x5D, 0x6D, 0x5E):
+        return False
+    dict_size = struct.unpack_from("<I", head, 1)[0]
+    size = struct.unpack_from("<Q", head, 5)[0]
+    if dict_size < 1 << 12 or dict_size > 1 << 30 or dict_size & (dict_size - 1):
+        return False
+    return size == 0xFFFF_FFFF_FFFF_FFFF or 0 < size < 1 << 34
 
 
 def _plausible_mbr(head: bytes, size: int) -> bool:
@@ -376,3 +390,26 @@ def parse_uimage_header(head: bytes) -> dict | None:
             "os": os_, "arch": UIMAGE_ARCH.get(arch, f"id {arch}"), "image_type": itype,
             "compression": {0: "none", 1: "gzip", 2: "bzip2", 3: "lzma", 4: "lzo", 5: "lz4", 6: "zstd"}.get(comp, str(comp)),
             "name": name}
+
+
+AP_DESCRIPTOR_SIG = bytes([0x40, 0xA2, 0xE4, 0xF1, 0x64, 0x68, 0x91, 0x06])
+
+
+def parse_ardupilot_descriptor(data: bytes, file_size: int) -> dict | None:
+    """Parse ArduPilot's app_descriptor (written by the build's post-processing step).
+
+    Layout: sig[8], image_crc1 u32, image_crc2 u32, image_size u32, git_hash u32,
+    version_major u8, version_minor u8, board_id u16, reserved[8].  Fields are only
+    reported when plausible; an unfilled descriptor (all zeros) is reported as present only.
+    """
+    i = data.find(AP_DESCRIPTOR_SIG)
+    if i < 0 or i + 36 > len(data):
+        return None
+    crc1, crc2, size, git, vmaj, vmin, board = struct.unpack_from("<IIIIBBH", data, i + 8)
+    out: dict = {"offset": hex(i)}
+    if size and size <= file_size and vmaj < 20:
+        out.update({"image_size": size, "git_hash": f"{git:08x}", "version": f"{vmaj}.{vmin}",
+                    "board_id": board, "crc1": f"{crc1:08x}", "crc2": f"{crc2:08x}"})
+    else:
+        out["note"] = "descriptor present but not populated/plausible"
+    return out

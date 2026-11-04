@@ -190,11 +190,9 @@ See [docs/TOOLS.md](docs/TOOLS.md) for per-tool validation status. In short:
   instance.
 * **FwAnalyzer**'s ext2/3/4 backend crashes with stock e2tools; the adapter
   falls back to directory mode (without permission checks) and says so.
-* Not unpacked yet: UBI/UBIFS, JFFS2, LZMA/LZ4/LZO/zstd uImage payloads, 7z/RAR,
+* Not unpacked yet: UBI/UBIFS, JFFS2, LZ4/LZO/zstd payloads, 7z/RAR,
   encrypted/signed vendor containers (e.g. DJI), Android sparse images. These
   are identified and reported as "not fully analysed" findings.
-* ext2/3/4 extraction (`debugfs rdump`) does not preserve setuid bits, so
-  setuid detection on ext images relies on FwAnalyzer image mode.
 * Outdated-component detection is version-string based against a small
   offline knowledge base (`as_of` dated); backported fixes are not detected,
   hence all such findings are `unverified`. No live CVE feed is queried.

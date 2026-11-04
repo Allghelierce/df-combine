@@ -268,6 +268,19 @@ function Overview({ scan }: { scan: Scan }) {
                 </ul>
               </details>
             )}
+            {ident.ardupilot_descriptor && (
+              <details className="candidates">
+                <summary>ArduPilot app descriptor</summary>
+                <dl className="kv two-col mono small">
+                  {Object.entries(ident.ardupilot_descriptor).map(([k, v]) => (
+                    <div key={k} className="kv-row">
+                      <dt>{k}</dt>
+                      <dd>{String(v)}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </details>
+            )}
             {Object.keys(ident.container_metadata ?? {}).length > 0 && (
               <details className="candidates">
                 <summary>Container metadata</summary>

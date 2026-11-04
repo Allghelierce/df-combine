@@ -398,6 +398,9 @@ class Extractor:
     def h_xz(self, art: Artifact) -> list[Artifact]:
         return self._decompress(art, lambda p: lzma.open(p, "rb"), (".xz", ".txz"))
 
+    def h_lzma(self, art: Artifact) -> list[Artifact]:
+        return self._decompress(art, lambda p: lzma.open(p, "rb", format=lzma.FORMAT_ALONE), (".lzma", ".lz"))
+
     def h_ihex(self, art: Artifact) -> list[Artifact]:
         src = self.path_of(art.id)
         if art.size > 256 * 1024**2:
@@ -596,8 +599,45 @@ class Extractor:
         dest.mkdir()
         self._run_tool(art, [tool, "-R", f"rdump / {dest}", str(self.path_of(art.id))], out)
         self._sanitize_tree(art, out)
+        self._ext_metadata(art, tool, dest)
         self._record_fs(art, "ext", dest, image_artifact=art.id)
         return self._register_tree(art, dest)
+
+    def _ext_metadata(self, art: Artifact, tool: str, dest: Path) -> None:
+        """Recover original mode/uid/gid (rdump drops setuid bits) via 'debugfs ls -p'."""
+        dirs = ["/"] + sorted("/" + str(p.relative_to(dest)) for p in dest.rglob("*") if p.is_dir())
+        dirs = [d for d in dirs if '"' not in d and "\n" not in d][:5000]
+        cmdfile = self.work_dir / f".debugfs_{art.id}.cmd"
+        cmdfile.write_text("".join(f'ls -p "{d}"\n' for d in dirs))
+        try:
+            proc = subprocess.run([tool, "-f", str(cmdfile), str(self.path_of(art.id))], capture_output=True,
+                                  timeout=self.limits.tool_timeout_s, stdin=subprocess.DEVNULL)
+        except (subprocess.SubprocessError, OSError) as exc:
+            self.result.warnings.append(f"{art.name}: could not read ext metadata ({exc})")
+            return
+        finally:
+            cmdfile.unlink(missing_ok=True)
+        current = None
+        recovered = 0
+        for line in proc.stdout.decode("utf-8", "replace").splitlines():
+            if line.startswith("debugfs: ls -p "):
+                current = line[len("debugfs: ls -p "):].strip().strip('"')
+                continue
+            parts = line.split("/")
+            if current is None or len(parts) < 7 or parts[0] != "":
+                continue
+            try:
+                mode, uid, gid = int(parts[2], 8), int(parts[3]), int(parts[4])
+            except ValueError:
+                continue
+            name = parts[5]
+            if name in (".", "..") or not stat.S_ISREG(mode):
+                continue
+            p = dest / current.lstrip("/") / name
+            if str(p) in self._pending_meta:
+                self._pending_meta[str(p)] = {"mode": mode & 0o7777, "uid": uid, "gid": gid}
+                recovered += 1
+        art.details["metadata_recovered"] = recovered
 
     def h_fat(self, art: Artifact) -> list[Artifact]:
         tool = self._need_tool("mcopy", "FAT filesystem")
@@ -807,6 +847,7 @@ HANDLERS: dict[str, Callable[[Extractor, Artifact], list[Artifact]]] = {
     "gzip": Extractor.h_gzip,
     "bzip2": Extractor.h_bzip2,
     "xz": Extractor.h_xz,
+    "lzma": Extractor.h_lzma,
     "ihex": Extractor.h_ihex,
     "px4": Extractor.h_fw_json,
     "apj": Extractor.h_fw_json,
