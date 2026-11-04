@@ -97,3 +97,34 @@ def test_clean_text_has_no_findings(tmp_path, run_analysis):
     p.write_text("This is a harmless release note for a flight controller.\nNo secrets here.\n")
     m = run_analysis(p)
     assert m["findings"] == []
+
+
+def _scan_tree(tmp_path, files, run_analysis):
+    import tarfile
+    root = tmp_path / "tree"
+    for rel, content in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+    out = tmp_path / "t.tar"
+    with tarfile.open(out, "w") as tf:
+        tf.add(root, arcname=".")
+    return {f["rule_id"]: f for f in run_analysis(out)["findings"]}
+
+
+def test_stopping_telnet_is_not_enabling(tmp_path, run_analysis):
+    r = _scan_tree(tmp_path, {"etc/init.d/S99secure": "#!/bin/sh\nkillall telnetd\n"}, run_analysis)
+    assert "telnetd-enabled" not in r
+    r = _scan_tree(tmp_path / "b", {"etc/init.d/S50telnet": "#!/bin/sh\n/usr/sbin/telnetd -p 23\n"}, run_analysis)
+    assert "telnetd-enabled" in r
+
+
+def test_more_credentials(tmp_path, run_analysis):
+    r = _scan_tree(tmp_path, {
+        "etc/wpa_supplicant/wpa_supplicant.conf": 'network={\n ssid="GCS"\n psk="supersecret99"\n}\n',
+        "etc/wireguard/wg0.conf": "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\nAddress = 10.0.0.2/24\n",
+        "root/.netrc": "machine updates.example.test login ci password hunter2\n",
+        "root/.aws/credentials": "[default]\naws_access_key_id = X\naws_secret_access_key = Y\n",
+    }, run_analysis)
+    assert {"wpa-supplicant-psk", "wireguard-private-key", "credential-file"} <= set(r)
+    assert "supersecret99" not in str(r) and "yAnz5TF+lXXJte14tji3zlMNq" not in str(r)

@@ -78,6 +78,12 @@ def scan(ctx: ScanContext) -> list[Finding]:
                         cwe="CWE-798"))
             if base == "hostapd.conf" or base.endswith("hostapd.conf"):
                 out += _hostapd_findings(ctx, art, text)
+            if base.startswith("wpa_supplicant") and base.endswith(".conf"):
+                out += _wpa_supplicant_findings(ctx, art, text)
+            if base.endswith(".conf") and "[Interface]" in text and "PrivateKey" in text:
+                out += _wireguard_findings(ctx, art, text)
+            if base in CREDENTIAL_FILES or path.endswith("/.aws/credentials"):
+                out += _credential_file(ctx, art, text, base)
             out += _assignment_findings(ctx, art, text)
             out += _token_findings(ctx, art, ((0, ln) for ln in text.splitlines()), in_binary=False)
         else:
@@ -234,6 +240,59 @@ def _hostapd_findings(ctx: ScanContext, art, text: str) -> list[Finding]:
             remediation="Use WPA2-CCMP or WPA3-SAE.", evidence=[Evidence("config", "wpa=0 / wep_key*", path)],
             cwe="CWE-326", tags=["wireless"]))
     return out
+
+
+CREDENTIAL_FILES = {".netrc": "netrc machine credentials", ".git-credentials": "Git credentials",
+                    "credentials": "cloud credentials", ".pgpass": "PostgreSQL passwords",
+                    ".my.cnf": "MySQL client credentials"}
+
+
+def _wpa_supplicant_findings(ctx: ScanContext, art, text: str) -> list[Finding]:
+    path = ctx.fs_path(art)
+    hits = re.findall(r'^\s*psk\s*=\s*"?([^"\n]{8,63})"?\s*$', text, re.M)
+    if not hits:
+        return []
+    return [Finding(
+        title="Static Wi-Fi client passphrase in wpa_supplicant configuration",
+        description=(f"{len(hits)} network PSK(s) are stored in the image. Anyone with the firmware learns the "
+                     "credentials of the network the drone/companion joins (often the operator's GCS network)."),
+        severity=S.medium, classification=C.detected, confidence=K.high, source_tool=TOOL,
+        rule_id="wpa-supplicant-psk", affected_component=ctx.where(art),
+        remediation="Provision Wi-Fi credentials per deployment instead of baking them into the image.",
+        evidence=[Evidence("config", f"psk={redact(h)}", path) for h in hits[:5]], cwe="CWE-798",
+        tags=["credentials", "wireless"])]
+
+
+def _wireguard_findings(ctx: ScanContext, art, text: str) -> list[Finding]:
+    path = ctx.fs_path(art)
+    m = re.search(r"^\s*PrivateKey\s*=\s*([A-Za-z0-9+/]{42,44}=?)\s*$", text, re.M)
+    if not m:
+        return []
+    return [Finding(
+        title="WireGuard private key embedded in image",
+        description="A WireGuard interface private key is shipped in the firmware. Every unit shares the VPN "
+                    "identity; anyone holding the image can impersonate devices on the VPN (often the telemetry "
+                    "or remote-control backhaul).",
+        severity=S.high, classification=C.detected, confidence=K.high, source_tool=TOOL,
+        rule_id="wireguard-private-key", affected_component=ctx.where(art),
+        remediation="Generate per-device WireGuard keys at provisioning; rotate the shipped key.",
+        evidence=[Evidence("config", f"PrivateKey = {redact(m.group(1), 4)}", path)], cwe="CWE-321",
+        tags=["credentials", "crypto", "network"])]
+
+
+def _credential_file(ctx: ScanContext, art, text: str, base: str) -> list[Finding]:
+    path = ctx.fs_path(art)
+    if not text.strip():
+        return []
+    label = CREDENTIAL_FILES.get(base, "cloud credentials")
+    if base == "credentials" and "aws_secret_access_key" not in text and "/.aws/" not in path:
+        return []
+    return [Finding(
+        title=f"Credential file left in image ({label})", description=f"'{path}' stores {label} in clear text.",
+        severity=S.high, classification=C.detected, confidence=K.medium, source_tool=TOOL,
+        rule_id="credential-file", affected_component=ctx.where(art),
+        remediation="Remove developer/build credentials from the image and rotate them.",
+        evidence=[Evidence("path", path)], cwe="CWE-798", tags=["credentials"])]
 
 
 def _assignment_findings(ctx: ScanContext, art, text: str) -> list[Finding]:

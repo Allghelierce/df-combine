@@ -128,6 +128,10 @@ SERVICE_RULES = [
 ]
 
 
+STOP_RE = re.compile(r"\b(?:kill|killall|pkill|start-stop-daemon\s+--stop|stop|disable|rm|mask)\b[^\n]*"
+                     r"\b(?:u?telnetd|dropbear|getty|adbd|gdbserver|tftp|ftp)\b")
+
+
 def _services(ctx: ScanContext, art, text: str) -> list[Finding]:
     out = []
     path = ctx.fs_path(art)
@@ -139,6 +143,8 @@ def _services(ctx: ScanContext, art, text: str) -> list[Finding]:
             if rule == "telnetd-enabled" and "telnetd-shell-no-auth" in hit_rules:
                 continue
             if pat.search(line):
+                if STOP_RE.search(line):
+                    continue  # e.g. "killall telnetd" - stopping a service is not enabling it
                 hit_rules.add(rule)
                 out.append(_f(title, desc + " Static configuration only: whether the service actually runs "
                               "on the deployed device was not verified.", sev, C.suspicious, K.medium, rule,

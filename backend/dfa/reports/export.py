@@ -115,7 +115,8 @@ def pdf_report(scan: Scan) -> bytes:
 
     sev = scan.severity_counts or {}
     cls = scan.classification_counts or {}
-    summ = Table([[_p(s.upper(), small) for s in SEVERITY_ORDER] + [_p(c, small) for c in cls],
+    white = ParagraphStyle("w", parent=small, textColor=colors.white, fontName="Helvetica-Bold")
+    summ = Table([[_p(s.upper(), white) for s in SEVERITY_ORDER] + [_p(c, small) for c in cls],
                   [_p(sev.get(s, 0), body) for s in SEVERITY_ORDER] + [_p(v, body) for v in cls.values()]])
     style = [("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#c5ced8")), ("ALIGN", (0, 0), (-1, -1), "CENTER")]
     for i, s in enumerate(SEVERITY_ORDER):
@@ -159,7 +160,9 @@ def pdf_report(scan: Scan) -> bytes:
                           for e in (f.evidence or [])[:8])
         rows = [
             ("Classification", CLASSIFICATION_LABELS.get(f.classification, f.classification)
-             + f"; confidence: {f.confidence}"),
+             + f"; confidence: {f.confidence}"
+             + "".join(f"; corroborated by {t.split(':', 1)[1]}" for t in (f.tags or [])
+                       if t.startswith("corroborated-by:"))),
             ("Source", f"{f.source_tool} ({f.rule_id})" + (f" - {f.cwe}" if f.cwe else "")),
             ("Component", f.affected_component), ("Description", f.description), ("Remediation", f.remediation),
         ]
