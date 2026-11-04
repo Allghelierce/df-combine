@@ -365,6 +365,12 @@ def generate_all(dest: Path) -> dict[str, Path]:
     if ext:
         out["ext4"] = ext
         out["disk_img"] = mbr_disk(ext, dest / "companion_sdcard.img")
+    # A "2.0" release of the companion image: some issues fixed, one new.
+    (rootdir / "etc/shadow").write_text("root:!:19000:0:99999:7:::\npilot:!:19000:0:99999:7:::\n")
+    (rootdir / "etc/inittab").write_text("::sysinit:/etc/init.d/rcS\n")
+    (rootdir / "bin/busybox").write_text("\x00BusyBox v1.36.1 (2024-01-01) multi-call binary.\x00", encoding="latin-1")
+    (rootdir / "etc/app/debug.conf").write_text("admin_password=letmein\n")
+    out["tar_gz_v2"] = tar_gz(rootdir, dest / "companion_rootfs_v2.tar.gz")
     elf = rootdir / "usr/bin/flightd"
     if elf.read_bytes()[:4] == b"\x7fELF":
         out["elf"] = dest / "flightd.elf"

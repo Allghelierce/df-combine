@@ -16,7 +16,7 @@ drone platforms can be added.
 | **Extraction** | Recursive, with path-traversal/symlink/device protection and size/count/depth/ratio budgets. Carves embedded ROMFS (PX4 init scripts), gzip streams (ArduPilot ROMFS files), SquashFS, uImage, cpio and ELF objects from raw images. Partition tables are split into partitions. |
 | **Scanning** | Built-in: hardcoded credentials, private keys, tokens, `/etc/shadow` issues, Wi-Fi PSKs, insecure services (telnet, root SSH, autologin…), PX4 circuit breakers / ArduPilot safety parameters, MAVLink exposure (mavlink-router, MAVProxy), ELF hardening (NX/PIE/RELRO/canary), dangerous imports, suspicious strings, outdated components (offline knowledge base). External: **FwAnalyzer**, **cwe_checker**, **FACT** through modular adapters. |
 | **Normalisation** | One schema for every tool: severity, classification, confidence, evidence, affected component, source tool, CWE, remediation. Duplicates across tools are merged and credited (`corroborated-by:<tool>`). |
-| **Reporting** | Live dashboard (progress, findings, severity breakdown, metadata, inventory, components, activity log), JSON and PDF export, searchable scan history, re-scan. |
+| **Reporting** | Live dashboard (progress, findings, severity breakdown, metadata, inventory, components, activity log), JSON and PDF export, searchable scan history, re-scan, and **release comparison** (new / resolved / severity-changed findings and component version changes between two scans). |
 
 ### Honest findings
 Every finding has a **classification**:
@@ -125,6 +125,7 @@ OpenAPI docs at `/api/docs`. Main endpoints:
 * `GET /api/scans/{id}/artifacts` – extracted inventory and recorded links
 * `GET /api/scans/{id}/report.json`, `GET /api/scans/{id}/report.pdf`
 * `POST /api/scans/{id}/rescan`, `DELETE /api/scans/{id}`
+* `GET /api/compare?base={id}&target={id}` – diff two completed scans
 * `GET /api/tools`, `GET /api/stats`, `GET /api/config`, `GET /api/health`
 
 ## Architecture

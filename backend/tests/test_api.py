@@ -182,3 +182,32 @@ def test_stale_recovery(settings, client, fixtures):
     assert recover_stale(settings) == 1
     with session_scope() as db:
         assert db.get(Scan, s["id"]).status == "queued"
+
+
+def test_compare_releases(client, settings, fixtures, tmp_path):
+    import shutil
+    import tarfile
+
+    import factory
+    v1 = upload(client, fixtures["tar_gz"], name="companion-1.0.tar.gz")
+    root = tmp_path / "v2"
+    factory.companion_rootfs(root)
+    (root / "etc/shadow").write_text("root:!:19000:0:99999:7:::\n")          # fixed
+    (root / "etc/inittab").write_text("::sysinit:/etc/init.d/rcS\n")          # telnet removed
+    (root / "bin/busybox").write_text("\x00BusyBox v1.36.1 (2024) multi-call binary.\x00")  # upgraded
+    (root / "etc/app/debug.conf").write_text("admin_password=letmein\n")     # new issue
+    out = tmp_path / "companion-2.0.tar.gz"
+    with tarfile.open(out, "w:gz") as tf:
+        tf.add(root, arcname=".")
+    shutil.rmtree(root)
+    v2 = upload(client, out)
+    process_all(settings)
+    r = client.get("/api/compare", params={"base": v1["id"], "target": v2["id"]})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    resolved = {f["rule_id"] for f in d["resolved"]}
+    assert {"empty-password", "telnetd-shell-no-auth", "outdated-busybox"} <= resolved
+    assert any("admin_password" in str(f["evidence"]) for f in d["new"])
+    assert any(c["name"] == "busybox" and c["change"] == "changed" for c in d["components"])
+    assert d["summary"]["unchanged"] > 5  # same issues in renamed archive still match
+    assert client.get("/api/compare", params={"base": v1["id"], "target": "nope"}).status_code == 404

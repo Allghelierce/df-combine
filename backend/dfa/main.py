@@ -247,6 +247,14 @@ def create_app(settings: Settings | None = None, start_worker: bool | None = Non
         return Response(pdf_report(scan), media_type="application/pdf", headers={
             "Content-Disposition": f'attachment; filename="dfa-report-{scan_id[:8]}.pdf"'})
 
+    @app.get("/api/compare")
+    def compare_scans(base: str, target: str, db: Session = Depends(get_session)):
+        from .compare import compare
+        a, b = _get(db, base), _get(db, target)
+        if a.status != "completed" or b.status != "completed":
+            raise HTTPException(409, "both scans must be completed")
+        return compare(a, b)
+
     # ------------------------------------------------------------- frontend
     dist = Path(os.environ.get("DFA_FRONTEND_DIST", Path(__file__).resolve().parents[2] / "frontend" / "dist"))
     if dist.is_dir():

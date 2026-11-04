@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
 import { Icon } from "./components/ui";
 import { api, AppConfig, getApiKey, setApiKey } from "./lib/api";
+import Compare from "./pages/Compare";
 import Dashboard from "./pages/Dashboard";
 import History from "./pages/History";
 import ScanDetail from "./pages/ScanDetail";
@@ -76,6 +77,7 @@ export default function App() {
           <Route path="/scans" element={<History />} />
           <Route path="/scans/:id" element={<ScanDetail />} />
           <Route path="/tools" element={<Tools />} />
+          <Route path="/compare" element={<Compare />} />
           <Route path="*" element={<div className="empty">Page not found.</div>} />
         </Routes>
       </main>

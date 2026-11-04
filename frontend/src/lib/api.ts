@@ -218,7 +218,20 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (await res.json()) as T;
 }
 
+export interface Comparison {
+  base: Scan;
+  target: Scan;
+  new: Finding[];
+  resolved: Finding[];
+  severity_changed: (Finding & { previous_severity: Severity })[];
+  unchanged: Finding[];
+  components: { name: string; before: string[]; after: string[]; change: "added" | "removed" | "changed" }[];
+  summary: Record<string, number>;
+}
+
 export const api = {
+  compare: (base: string, target: string) =>
+    request<Comparison>(`/api/compare?base=${encodeURIComponent(base)}&target=${encodeURIComponent(target)}`),
   config: () => request<AppConfig>("/api/config"),
   stats: () => request<Stats>("/api/stats"),
   tools: () => request<{ tools: ToolStatus[] }>("/api/tools"),

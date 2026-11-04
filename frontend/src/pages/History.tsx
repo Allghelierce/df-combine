@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { MiniSeverity } from "../components/charts";
 import { Empty, ErrorBox, Panel, StatusBadge, usePolling } from "../components/ui";
 import { api, Scan } from "../lib/api";
@@ -14,6 +14,16 @@ export default function History() {
   const [status, setStatus] = useState("");
   const [page, setPage] = useState(0);
   const [error, setError] = useState<unknown>(null);
+  const [selected, setSelected] = useState<Scan[]>([]);
+  const navigate = useNavigate();
+
+  function toggle(s: Scan) {
+    setSelected((cur) => (cur.some((x) => x.id === s.id) ? cur.filter((x) => x.id !== s.id) : [...cur, s].slice(-2)));
+  }
+  function compareSelected() {
+    const [a, b] = [...selected].sort((x, y) => x.created_at.localeCompare(y.created_at));
+    navigate(`/compare?base=${a.id}&target=${b.id}`);
+  }
 
   const load = useCallback(() => {
     api
@@ -37,8 +47,11 @@ export default function History() {
       <header className="page-head">
         <div>
           <h1>Scan history</h1>
-          <p className="muted">{total} scan(s). Search by file name or SHA-256.</p>
+          <p className="muted">{total} scan(s). Search by file name or SHA-256. Select two completed scans to compare releases.</p>
         </div>
+        <button className="btn" disabled={selected.length !== 2} onClick={compareSelected}>
+          Compare selected ({selected.length}/2)
+        </button>
       </header>
       <ErrorBox error={error} />
       <Panel>
@@ -73,6 +86,7 @@ export default function History() {
           <table className="table">
             <thead>
               <tr>
+                <th aria-label="Select" />
                 <th>Firmware</th>
                 <th>SHA-256</th>
                 <th>Platform / arch</th>
@@ -87,6 +101,15 @@ export default function History() {
                 const r = riskLabel(s.risk_score);
                 return (
                   <tr key={s.id}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${s.original_filename} for comparison`}
+                        disabled={s.status !== "completed"}
+                        checked={selected.some((x) => x.id === s.id)}
+                        onChange={() => toggle(s)}
+                      />
+                    </td>
                     <td>
                       <Link to={`/scans/${s.id}`} className="strong">
                         {s.original_filename}
