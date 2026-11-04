@@ -20,12 +20,12 @@ import json
 import shutil
 from pathlib import Path
 
+from ..containers import JobError, JobRejected, get_runner
 from ..core.findings import Classification as C
 from ..core.findings import Confidence as K
 from ..core.findings import Evidence, Finding
 from ..core.findings import Severity as S
-from ..toolexec import ToolExecutor
-from .base import AdapterContext, AdapterResult, ToolAdapter
+from .base import AdapterContext, AdapterResult, ToolAdapter, run_cmd
 
 FS_TYPES = {"ext": "extfs", "squashfs": "squashfs", "fat": "vfatfs", "cpio": "cpiofs"}
 BAD_FILES = [
@@ -53,9 +53,20 @@ class FwAnalyzerAdapter(ToolAdapter):
     def enabled(self) -> bool:
         return self.settings.fwanalyzer_enabled
 
-    def _locate(self, ex: ToolExecutor | None = None) -> tuple[str | None, str]:
-        ex = ex or ToolExecutor(self.settings)
-        return ex.locate("fwanalyzer", self.settings.fwanalyzer_bin)
+    def _locate(self) -> tuple[str | None, str]:
+        """('sandbox', detail) when the sandbox image bundles FwAnalyzer, ('local', ...) for a host binary."""
+        if self.settings.fwanalyzer_bin:
+            return "local", f"{self.settings.fwanalyzer_bin} on the worker host (NOT container-isolated)"
+        if self.settings.sandbox_mode != "local":
+            runner = get_runner(self.settings)
+            caps = runner.capabilities()
+            if caps.get("sandbox_tools", {}).get("fwanalyzer"):
+                return "sandbox", (f"inside sandbox image {self.settings.sandbox_image} via {runner.kind} "
+                                   "(no network, read-only)")
+        local = shutil.which("fwanalyzer")
+        if local:
+            return "local", f"{local} on the worker host (NOT container-isolated)"
+        return None, "'fwanalyzer' not found in the sandbox image or on PATH"
 
     def status(self):
         how, detail = self._locate()
@@ -83,26 +94,30 @@ class FwAnalyzerAdapter(ToolAdapter):
                 targets.append({"kind": "image", "fstype": fstype, "artifact": art, "fallback_dir": fallback})
             elif fs["type"] in ("tar", "zip", "romfs") and _looks_like_rootfs(ctx.work_dir / fs["root"]):
                 targets.append({"kind": "dir", "fstype": "dirfs", "artifact": art, "fallback_dir": fallback})
+            elif fs["type"] in ("cromfs", "romfs") and _looks_like_nuttx_etc(ctx.work_dir / fs["root"]):
+                # NuttX ROM filesystem (PX4 /etc): FwAnalyzer cannot read CROMFS images itself, so it runs in
+                # directory mode over the safely extracted tree with a PX4/NuttX rule set.
+                targets.append({"kind": "dir", "fstype": "dirfs", "artifact": art, "fallback_dir": fallback,
+                                "profile": "nuttx"})
         if not targets:
-            return [], ("no Linux root filesystem was found (FwAnalyzer analyses Linux filesystem images; it does "
-                        "not apply to flight-controller MCU firmware such as PX4/ArduPilot binaries)")
+            return [], ("no Linux root filesystem or NuttX ROM filesystem was found (FwAnalyzer checks filesystem "
+                        "contents; raw MCU code without an embedded filesystem is out of its scope)")
         return targets[:4], f"{len(targets)} filesystem(s)"
 
     def run(self, ctx: AdapterContext, targets: list) -> AdapterResult:
         out_dir = ctx.tool_dir(self.name)
-        ex = ToolExecutor(self.settings, ctx.work_dir, ctx.input_path)
-        how, _ = self._locate(ex)
+        how, _ = self._locate()
         if how is None:
             return AdapterResult("unavailable", "fwanalyzer disappeared between status check and run")
-        b = "fwanalyzer" if how == "sandbox" else (self.settings.fwanalyzer_bin or shutil.which("fwanalyzer") or "fwanalyzer")
-        runner = (ex, how)
+        b = self.settings.fwanalyzer_bin or shutil.which("fwanalyzer") or "fwanalyzer"
+        runner = (ctx, how)
         findings: list[Finding] = []
         runs = []
         for i, t in enumerate(targets):
             art = t["artifact"]
             report, mode, note = None, t["fstype"], None
             if t["kind"] == "image":
-                report, err = self._run_one(runner, b, out_dir, i, t["fstype"], ctx.artifact_path(art),
+                report, err = self._run_one(runner, b, out_dir, i, t["fstype"], art,
                                             ctx.work_dir / t["fallback_dir"], perms=True)
                 if report is None:
                     note = f"image mode ({t['fstype']}) failed: {err}; fell back to dirfs on extracted tree"
@@ -110,7 +125,8 @@ class FwAnalyzerAdapter(ToolAdapter):
             if report is None:
                 mode = "dirfs"
                 report, err = self._run_one(runner, b, out_dir, i, "dirfs", ctx.work_dir / t["fallback_dir"],
-                                            ctx.work_dir / t["fallback_dir"], perms=False)
+                                            ctx.work_dir / t["fallback_dir"], perms=False,
+                                            profile=t.get("profile", "linux"))
                 if report is None:
                     runs.append({"target": art["display_path"], "status": "failed", "error": err, "note": note})
                     continue
@@ -129,14 +145,28 @@ class FwAnalyzerAdapter(ToolAdapter):
             msg = "; ".join(r.get("error", "") for r in runs)[:800]
         return AdapterResult(status, msg, findings, str(out_dir), {"runs": runs, "execution": how})
 
-    def _run_one(self, runner: tuple[ToolExecutor, str], b: str, out_dir: Path, i: int, fstype: str, target: Path,
-                 tree: Path, perms: bool) -> tuple[dict | None, str]:
+    def _run_one(self, runner: tuple[AdapterContext, str], b: str, out_dir: Path, i: int, fstype: str,
+                 target: Path | dict, tree: Path, perms: bool, profile: str = "linux") -> tuple[dict | None, str]:
+        """``target`` is an artifact dict (filesystem image) or a directory (dirfs)."""
+        ctx, how = runner
         cfg = out_dir / f"config_{i}_{fstype}.toml"
-        cfg.write_text(build_config(fstype, tree, perms))
+        cfg.write_text(build_config(fstype, tree, perms, profile))
         out = out_dir / f"report_{i}_{fstype}.json"
-        ex, how = runner
-        rc, stdout, stderr, _ = ex.run(how, [b, "-cfg", str(cfg), "-in", str(target), "-out", str(out)],
-                                       timeout=self.settings.fwanalyzer_timeout_s, writable=[out_dir])
+        out.unlink(missing_ok=True)
+        if how == "sandbox":
+            ctarget = ctx.container_path(target) if isinstance(target, dict) else ctx.container_path_of(target)
+            try:
+                res = get_runner(self.settings).run("fwanalyzer", ctx.scan_id, {
+                    "config": ctx.container_path_of(cfg), "target": ctarget, "out": ctx.container_path_of(out)})
+            except (JobError, JobRejected) as exc:
+                return None, f"sandbox job failed: {exc}"
+            rc, stdout, stderr = res.exit_code, res.stdout, res.stderr
+            if res.killed_reason:
+                return None, res.killed_reason
+        else:
+            host_target = ctx.artifact_path(target) if isinstance(target, dict) else target
+            rc, stdout, stderr, _ = run_cmd([b, "-cfg", str(cfg), "-in", str(host_target), "-out", str(out)],
+                                            timeout=self.settings.fwanalyzer_timeout_s)
         (out_dir / f"stderr_{i}_{fstype}.log").write_text((stdout + stderr)[-20000:])
         if rc != 0 or not out.exists():
             first = (stderr or stdout).strip().splitlines()[:1]
@@ -155,7 +185,42 @@ def _toml_str(s: str) -> str:
     return json.dumps(s)  # JSON string escaping is valid TOML basic-string escaping
 
 
-def build_config(fstype: str, tree: Path, perms: bool) -> str:
+PX4_RULES = [
+    ("cbrk", r"^\s*param\s+set(-default)?\s+CBRK_(IO_SAFETY\s+22027|SUPPLY_CHK\s+894281|USB_CHK\s+197848|"
+             r"AIRSPD_CHK\s+162128)\b", "PX4 safety circuit breaker set to its disable value"),
+    ("mavbcast", r"^\s*param\s+set(-default)?\s+MAV_BROADCAST\s+1\b", "PX4 MAVLink broadcast enabled"),
+    ("apsafety", r"^\s*(ARMING_CHECK|BRD_SAFETYENABLE|BRD_SAFETY_DEFLT)[\s,=]+0(\.0+)?\s*$",
+     "ArduPilot safety parameter disabled"),
+]
+
+
+def _looks_like_nuttx_etc(d: Path) -> bool:
+    return d.is_dir() and ((d / "init.d").is_dir() or (d / "etc" / "init.d").is_dir())
+
+
+def _nuttx_config(tree: Path) -> list[str]:
+    lines = ["[GlobalConfig]", 'FsType = "dirfs"', "DigestImage = false", "",
+             "[GlobalFileChecks]", "Suid = false", "WorldWrite = false",
+             'BadFiles = ["**/*.pem", "**/*.key", "**/id_rsa", "**/id_ed25519"]', ""]
+    n = 0
+    for p in sorted(tree.rglob("*")):
+        if not p.is_file() or p.stat().st_size == 0 or p.stat().st_size > 2 * 1024 * 1024:
+            continue
+        rel = "/" + str(p.relative_to(tree))
+        if '"' in rel or "\\" in rel or p.suffix in (".xz", ".bin", ".json", ".gz"):
+            continue
+        for key, regex, desc in PX4_RULES:
+            n += 1
+            lines += [f'[FileContent."{key}_{n}"]', f"File = {_toml_str(rel)}", f"RegEx = {_toml_str(regex)}",
+                      "RegExLineByLine = true", "Match = true", f"Desc = {_toml_str(desc)}", ""]
+        if n > 3000:
+            break
+    return lines
+
+
+def build_config(fstype: str, tree: Path, perms: bool, profile: str = "linux") -> str:
+    if profile == "nuttx":
+        return "\n".join(_nuttx_config(tree)) + "\n"
     lines = ["[GlobalConfig]", f"FsType = {_toml_str(fstype)}", "DigestImage = true", "",
              "[GlobalFileChecks]", f"Suid = {'true' if perms else 'false'}", "SuidAllowedList = []",
              f"WorldWrite = {'true' if perms else 'false'}",
@@ -186,6 +251,12 @@ def _classify(msg: str, path: str, perms: bool) -> tuple[str, S, str, str]:
             if pat in msg:
                 return "fwa-bad-file", sev, title, "CWE-200"
         return "fwa-bad-file", S.medium, "Disallowed file present", "CWE-200"
+    if "circuit breaker" in m:
+        return "fwa-px4-cbrk", S.low, "PX4 safety circuit breaker disabled", "CWE-1188"
+    if "mavlink broadcast" in m:
+        return "fwa-px4-mav-broadcast", S.low, "PX4 MAVLink broadcast enabled", "CWE-319"
+    if "ardupilot safety parameter" in m:
+        return "fwa-ap-safety", S.low, "ArduPilot safety parameter disabled", "CWE-1188"
     if "empty password" in m:
         return "fwa-empty-password", S.critical if "line: root::" in msg else S.high, "Account with empty password", "CWE-258"
     if "permitemptypasswords" in m or "sshd allows empty" in m:

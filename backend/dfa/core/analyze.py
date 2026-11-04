@@ -56,7 +56,7 @@ def categorize(art: Artifact, elf: dict | None, ctx: ScanContext) -> str:
         return "executable"
     if art.format in ("cortexm_raw",):
         return "firmware_image"
-    if art.format in ("squashfs", "ext", "fat", "romfs", "disk_image", "ubi", "ubifs", "jffs2"):
+    if art.format in ("squashfs", "ext", "fat", "romfs", "cromfs", "disk_image", "ubi", "ubifs", "jffs2"):
         return "filesystem_image"
     if art.format in ("zip", "tar", "gzip", "bzip2", "xz", "lzma", "cpio"):
         return "archive"
@@ -117,6 +117,25 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
                 a.details["elf_error"] = str(exc)[:200]
         ctx.category[a.id] = categorize(a, ctx.elf.get(a.id), ctx)
 
+    for a in arts:  # load address of raw MCU images (needed for disassembly / bare-metal analysis)
+        if a.format == "cortexm_raw":
+            from .formats.cortexm import analyze_vector_table, estimate_flash_base
+            with ex.path_of(a.id).open("rb") as fp:
+                data = fp.read(16 * 1024**2)
+            vt = analyze_vector_table(data)
+            if vt:
+                a.details["initial_sp"] = hex(vt.initial_sp)
+                a.details["reset_handler"] = hex(vt.reset_handler)
+            if "load_address" in a.details:
+                a.details["flash_base"] = a.details["load_address"]
+                a.details["flash_base_source"] = "container metadata"
+            else:
+                est = estimate_flash_base(data)
+                if est:
+                    a.details["flash_base"] = hex(est[0])
+                    a.details["flash_base_source"] = est[1]["method"]
+                    a.details["flash_base_scores"] = est[1]["candidates"]
+
     progress("platform detection")
     acc = PlatformAccumulator()
     budget = PLATFORM_SCAN_BUDGET
@@ -135,8 +154,10 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
         if a.format == "cortexm_raw" and ap_desc is None:
             with ex.path_of(a.id).open("rb") as fp:
                 ap_desc = parse_ardupilot_descriptor(fp.read(4 * 1024**2), a.size)
-            if ap_desc:
-                acc.hint("ArduPilot", f"ArduPilot app descriptor at {ap_desc['offset']}")
+            if ap_desc and "board_id" in ap_desc:  # only a populated descriptor is evidence
+                acc.hint("ArduPilot", f"populated ArduPilot app descriptor at {ap_desc['offset']}")
+            elif ap_desc:
+                ap_desc = None
     for a in arts:
         if a.format == "px4":
             acc.hint("PX4", "PX4 firmware container magic 'PX4FWv1'")

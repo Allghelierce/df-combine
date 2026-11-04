@@ -128,3 +128,24 @@ def test_more_credentials(tmp_path, run_analysis):
     }, run_analysis)
     assert {"wpa-supplicant-psk", "wireguard-private-key", "credential-file"} <= set(r)
     assert "supersecret99" not in str(r) and "yAnz5TF+lXXJte14tji3zlMNq" not in str(r)
+
+
+def test_aggregate_repeated_findings():
+    from dfa.core.findings import Classification, Confidence, Evidence, Finding, Severity, aggregate
+    fs = [Finding("Power supply check disabled", "d", Severity.low, Classification.detected, Confidence.high,
+                  "builtin:drone", "px4-cbrk_supply_chk", f"fw.px4 > image.bin > etc.cromfs > /init.d/airframes/{n}",
+                  "r", [Evidence("config", "param set CBRK_SUPPLY_CHK 894281", f"/init.d/airframes/{n}:3")])
+          for n in ("a", "b", "c", "d")]
+    other = Finding("x", "d", Severity.high, Classification.detected, Confidence.high, "builtin:secrets", "r2", "y", "r")
+    out = aggregate(fs + [other])
+    assert len(out) == 2
+    agg = next(f for f in out if f.rule_id == "px4-cbrk_supply_chk")
+    assert agg.title.endswith("(4 files)") and len(agg.evidence) == 4
+    assert agg.affected_component.startswith("fw.px4 > image.bin > etc.cromfs")
+
+
+def test_simulation_airframe_is_informational(tmp_path, run_analysis):
+    r = _scan_tree(tmp_path, {"etc/init.d/airframes/1100_rc_quad_x_sih.hil": "param set-default CBRK_SUPPLY_CHK 894281\n",
+                              "etc/init.d/rc.uuv_defaults": "param set-default CBRK_SUPPLY_CHK 894281\n"}, run_analysis)
+    assert r["px4-cbrk_supply_chk-sim"]["severity"] == "info"
+    assert r["px4-cbrk_supply_chk"]["severity"] == "low"

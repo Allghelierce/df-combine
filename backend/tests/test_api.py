@@ -130,22 +130,9 @@ def test_malicious_archive_scan_completes(client, settings, fixtures):
     assert any("traversal" in w for w in d["extraction_summary"]["warnings"])
 
 
-def test_api_key(settings, fixtures):
-    from fastapi.testclient import TestClient
-
-    from dfa.main import create_app
-    settings.api_key = "s3cret"
-    with TestClient(create_app(settings, start_worker=False)) as c:
-        assert c.get("/api/health").status_code == 200
-        assert c.get("/api/scans").status_code == 401
-        assert c.get("/api/scans", headers={"X-API-Key": "s3cret"}).status_code == 200
-
-
-def test_inprocess_worker_thread(settings, fixtures):
-    from fastapi.testclient import TestClient
-
-    from dfa.main import create_app
-    with TestClient(create_app(settings, start_worker=True)) as c:
+def test_inprocess_worker_thread(make_client, fixtures):
+    c = make_client(start_worker=True)
+    if True:
         s = upload(c, fixtures["px4"])
         for _ in range(120):
             d = c.get(f"/api/scans/{s['id']}").json()
@@ -230,7 +217,7 @@ def test_spa_route_does_not_serve_sibling_dirs(settings, tmp_path, monkeypatch):
     (tmp_path / "dist-old" / "secret.txt").write_text("SECRET")
     monkeypatch.setenv("DFA_FRONTEND_DIST", str(dist))
     with TestClient(create_app(settings, start_worker=False)) as c:
-        r = c.get("/%2e%2e/dist-old/secret.txt")
+        r = c.get("/%2e%2e/dist-old/secret.txt")  # SPA route is public by design (static assets only)
         assert "SECRET" not in r.text
 
 

@@ -59,6 +59,16 @@ class AdapterContext:
             raise ValueError(f"manifest path escapes the work directory: {art['path']!r}")
         return p
 
+    def container_path(self, art: dict) -> str:
+        """Path of an artifact inside sandbox/tool containers (/in/firmware or /work/...)."""
+        if art["path"] == "<input>":
+            return "/in/firmware"
+        return self.container_path_of(self.artifact_path(art))
+
+    def container_path_of(self, p: Path) -> str:
+        rel = p.resolve().relative_to(self.work_dir.resolve())
+        return "/work/" + str(rel)
+
     def tool_dir(self, tool: str) -> Path:
         d = self.work_dir / "tools" / tool
         d.mkdir(parents=True, exist_ok=True)

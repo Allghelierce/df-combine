@@ -11,7 +11,7 @@ from ..limits import Limits
 
 # Formats whose content is covered by their extracted children once unpacked.
 UNPACKED_CONTAINERS = {"zip", "tar", "gzip", "bzip2", "xz", "lzma", "squashfs", "ext", "fat", "cpio",
-                       "romfs", "disk_image", "ubi", "ubifs", "jffs2", "dfu", "uimage", "px4", "apj", "fw_json", "ihex"}
+                       "romfs", "cromfs", "disk_image", "ubi", "ubifs", "jffs2", "dfu", "uimage", "px4", "apj", "fw_json", "ihex"}
 
 TEXT_SUFFIXES = (".conf", ".cfg", ".ini", ".txt", ".sh", ".param", ".params", ".parm", ".json",
                  ".yaml", ".yml", ".xml", ".py", ".lua", ".service", ".rules", ".env", ".properties")

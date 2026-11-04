@@ -123,6 +123,7 @@ export interface Scan {
   events?: ScanEvent[];
   finding_count?: number;
   previous_scans_same_hash?: number;
+  can_modify?: boolean;
 }
 
 export interface Artifact {
@@ -161,7 +162,8 @@ export interface AppConfig {
   sandbox_mode: string;
   sandbox_detail: string;
   worker_mode: string;
-  auth_required: boolean;
+  auth_mode: string;
+  role: "admin" | "analyst" | "viewer";
 }
 
 export interface Stats {
@@ -172,28 +174,27 @@ export interface Stats {
   platforms: Record<string, number>;
 }
 
-const KEY_STORAGE = "dfa_api_key";
+/** Session auth uses an HttpOnly cookie; state-changing requests carry this header (CSRF protection). */
+const CSRF = { "X-DFA-CSRF": "1" };
 
-export function getApiKey(): string | null {
-  try {
-    return localStorage.getItem(KEY_STORAGE);
-  } catch {
-    return null;
-  }
+function headers(method = "GET"): HeadersInit {
+  return method === "GET" || method === "HEAD" ? {} : CSRF;
 }
 
-export function setApiKey(key: string | null): void {
-  try {
-    if (key) localStorage.setItem(KEY_STORAGE, key);
-    else localStorage.removeItem(KEY_STORAGE);
-  } catch {
-    /* storage unavailable */
-  }
+export interface User {
+  id: number;
+  username: string;
+  role: "admin" | "analyst" | "viewer";
+  disabled: boolean;
+  created_at: string | null;
+  last_login_at: string | null;
 }
 
-function headers(): HeadersInit {
-  const key = getApiKey();
-  return key ? { "X-API-Key": key } : {};
+export interface Me {
+  user: User | null;
+  role: "admin" | "analyst" | "viewer";
+  via: string;
+  auth_mode: string;
 }
 
 export class ApiError extends Error {
@@ -203,7 +204,14 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(path, { ...init, headers: { ...headers(), ...(init.headers ?? {}) } });
+  const res = await fetch(path, {
+    credentials: "same-origin",
+    ...init,
+    headers: { ...headers(init.method ?? "GET"), ...(init.body && !(init.body instanceof FormData) ? { "Content-Type": "application/json" } : {}), ...(init.headers ?? {}) },
+  });
+  if (res.status === 401 && !path.startsWith("/api/auth/")) {
+    window.dispatchEvent(new Event("dfa:unauthorized"));
+  }
   if (!res.ok) {
     let detail = res.statusText;
     try {
@@ -230,6 +238,26 @@ export interface Comparison {
 }
 
 export const api = {
+  authStatus: () => request<{ auth_mode: string; setup_required: boolean }>("/api/auth/status"),
+  me: () => request<Me>("/api/auth/me"),
+  login: (username: string, password: string) =>
+    request<{ user: User }>("/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
+  logout: () => request<{ status: string }>("/api/auth/logout", { method: "POST" }),
+  users: () => request<{ items: User[] }>("/api/users"),
+  createUser: (username: string, password: string, role: string) =>
+    request<User>("/api/users", { method: "POST", body: JSON.stringify({ username, password, role }) }),
+  updateUser: (id: number, patch: Partial<{ role: string; disabled: boolean; password: string }>) =>
+    request<User>(`/api/users/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  tokens: () =>
+    request<{ items: { id: number; label: string; created_at: string; expires_at: string | null; last_used_at: string | null }[] }>(
+      "/api/auth/tokens",
+    ),
+  createToken: (label: string, days: number) =>
+    request<{ token: string; id: number; expires_at: string }>("/api/auth/tokens", {
+      method: "POST",
+      body: JSON.stringify({ label, days }),
+    }),
+  revokeToken: (id: number) => request<void>(`/api/auth/tokens/${id}`, { method: "DELETE" }),
   compare: (base: string, target: string) =>
     request<Comparison>(`/api/compare?base=${encodeURIComponent(base)}&target=${encodeURIComponent(target)}`),
   config: () => request<AppConfig>("/api/config"),
@@ -253,8 +281,8 @@ export const api = {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", "/api/scans");
-      const key = getApiKey();
-      if (key) xhr.setRequestHeader("X-API-Key", key);
+      xhr.withCredentials = true;
+      xhr.setRequestHeader("X-DFA-CSRF", "1");
       xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(Math.round((100 * e.loaded) / e.total));
       xhr.onload = () => {
         let body: { detail?: string } & Partial<Scan> = {};
@@ -274,7 +302,7 @@ export const api = {
   },
 
   async download(id: string, kind: "json" | "pdf"): Promise<void> {
-    const res = await fetch(`/api/scans/${encodeURIComponent(id)}/report.${kind}`, { headers: headers() });
+    const res = await fetch(`/api/scans/${encodeURIComponent(id)}/report.${kind}`, { credentials: "same-origin" });
     if (!res.ok) throw new ApiError(res.status, `Report download failed (HTTP ${res.status})`);
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);

@@ -38,7 +38,16 @@ from typing import BinaryIO
 
 from .formats import px4json
 from .formats.ihex import parse_ihex
-from .formats.simplefs import FormatError, iter_cpio, iter_romfs, parse_dfuse, parse_partitions, romfs_size
+from .formats.simplefs import (
+    FormatError,
+    cromfs_header,
+    iter_cpio,
+    iter_cromfs,
+    iter_romfs,
+    parse_dfuse,
+    parse_partitions,
+    romfs_size,
+)
 from .identify import FormatInfo, detect_format, parse_uimage_header
 from .limits import ExtractionBudget, LimitExceeded, Limits
 
@@ -498,6 +507,22 @@ class Extractor:
         self._record_fs(art, "romfs", out)
         return self._register_tree(art, out)
 
+    def h_cromfs(self, art: Artifact) -> list[Artifact]:
+        import io
+        src = self.path_of(art.id)
+        out = self._out_dir(art)
+        with src.open("rb") as fp:
+            hdr = cromfs_header(fp.read(20), art.size)
+            if hdr:
+                art.details.update({"cromfs_" + k: v for k, v in hdr.items()})
+            for e, data in iter_cromfs(fp, 0, art.size, self.limits.max_files, self.limits.max_file_bytes):
+                if e.kind == "file" and data is not None:
+                    self._materialize_entry(art, out, io.BytesIO(data), e)
+                elif e.kind != "dir":
+                    self._record_link(art, e.name, e.kind, None)
+        self._record_fs(art, "cromfs", out)
+        return self._register_tree(art, out)
+
     def _materialize_entry(self, art: Artifact, out: Path, fp: BinaryIO, e) -> None:
         if e.kind == "dir":
             return
@@ -832,6 +857,8 @@ class Extractor:
                 if any(o <= off < o + ln for o, ln, _ in found):
                     continue
                 length = _carve_length(fp, off, kind, art.size)
+                if length and kind in ("gz", "xz"):
+                    length = _stream_length(fp, off, kind, self.limits.max_file_bytes)
                 if length:
                     found.append((off, length, kind))
                 if len(found) >= self.limits.max_carves_per_file:
@@ -845,14 +872,15 @@ class Extractor:
                 name = f"carved_{off:08x}.{kind}"
                 dest = out / name
                 fp.seek(off)
-                if kind == "gz":
+                if kind in ("gz", "xz"):
+                    reader = _GzipMemberReader(fp) if kind == "gz" else _XzStreamReader(fp)
                     try:
-                        self._write_stream(_GzipMemberReader(fp), dest, compressed_size=max(length, 1), label=name)
-                    except (zlib.error, EOFError) as exc:
+                        self._write_stream(reader, dest, compressed_size=max(length, 1), label=name)
+                    except (zlib.error, lzma.LZMAError, EOFError) as exc:
                         dest.unlink(missing_ok=True)
-                        self.result.warnings.append(f"{art.name}: gzip stream at {off:#x} invalid ({exc})")
+                        self.result.warnings.append(f"{art.name}: {kind} stream at {off:#x} invalid ({exc})")
                         continue
-                    name = name[:-3] + ".gunzipped"
+                    name = name[: -len(kind) - 1] + (".gunzipped" if kind == "gz" else ".unxz")
                     new = dest.with_name(name)
                     dest.rename(new)
                     dest = new
@@ -927,6 +955,59 @@ class _LzmaReader:
                 return out
 
 
+class _XzStreamReader:
+    """Decompress exactly one xz stream starting at the current position (memory-limited)."""
+
+    def __init__(self, fp: BinaryIO) -> None:
+        self.fp = fp
+        self.d = lzma.LZMADecompressor(format=lzma.FORMAT_XZ, memlimit=LZMA_MEMLIMIT)
+
+    def read(self, size: int = -1) -> bytes:
+        while not self.d.eof:
+            if self.d.needs_input:
+                data = self.fp.read(64 * 1024)
+                if not data:
+                    raise EOFError("truncated xz stream")
+            else:
+                data = b""
+            out = self.d.decompress(data, COPY_CHUNK)
+            if out:
+                return out
+        return b""
+
+
+def _stream_length(fp: BinaryIO, off: int, kind: str, max_out: int) -> int | None:
+    """Compressed length of the gzip/xz stream at ``off`` (test-decode, output discarded and capped)."""
+    fp.seek(off)
+    if kind == "gz":
+        d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    else:
+        d = lzma.LZMADecompressor(format=lzma.FORMAT_XZ, memlimit=LZMA_MEMLIMIT)
+    consumed = 0
+    produced = 0
+    try:
+        while True:
+            if kind == "xz" and not d.needs_input:
+                chunk = b""
+            else:
+                chunk = fp.read(64 * 1024)
+                if not chunk:
+                    return None
+            consumed += len(chunk)
+            out = d.decompress(chunk, COPY_CHUNK)
+            produced += len(out)
+            if kind == "gz":
+                while d.unconsumed_tail and produced <= max_out:
+                    out = d.decompress(d.unconsumed_tail, COPY_CHUNK)
+                    produced += len(out)
+            if produced > max_out:
+                return None
+            if d.eof:
+                return consumed - len(d.unused_data)
+    except (zlib.error, lzma.LZMAError, EOFError, MemoryError):
+        return None
+
+
 class _GzipMemberReader:
     """Decompress exactly one gzip member starting at the current position."""
 
@@ -955,6 +1036,8 @@ CARVE_MAGICS = {
     b"\x1f\x8b\x08": "gz",
     b"\x27\x05\x19\x56": "uimage",
     b"-rom1fs-": "romfs",
+    b"CROM": "cromfs",
+    b"\xfd7zXZ\x00": "xz",
     b"070701": "cpio",
     b"\x7fELF": "elf",
 }
@@ -1011,6 +1094,11 @@ def _carve_length(fp: BinaryIO, off: int, kind: str, size: int) -> int | None:
     if kind == "romfs":
         n = romfs_size(head)
         return n if n and 32 <= n <= size - off else None
+    if kind == "cromfs":
+        hdr = cromfs_header(head, size - off)
+        return hdr["fsize"] if hdr else None
+    if kind == "xz":
+        return size - off  # upper bound; the reader stops at the end of the stream
     if kind == "gz":
         flags = head[3] if len(head) > 3 else 0xFF
         if flags & 0xE0:
@@ -1096,6 +1184,7 @@ HANDLERS: dict[str, Callable[[Extractor, Artifact], list[Artifact]]] = {
     "uimage": Extractor.h_uimage,
     "cpio": Extractor.h_cpio,
     "romfs": Extractor.h_romfs,
+    "cromfs": Extractor.h_cromfs,
     "dfu": Extractor.h_dfu,
     "disk_image": Extractor.h_disk_image,
     "squashfs": Extractor.h_squashfs,

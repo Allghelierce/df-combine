@@ -18,19 +18,50 @@ def fixtures(tmp_path_factory) -> dict[str, Path]:
 
 @pytest.fixture()
 def settings(tmp_path) -> Settings:
+    # Real external tools (cwe_checker, Ghidra) are exercised in test_real_tools.py; the generic
+    # pipeline/API tests point them at a non-existent image so they report "unavailable" quickly.
     return Settings(data_dir=tmp_path / "data", sandbox_mode="local", fact_url=None,
-                    cwe_checker_image="dfa-test/nonexistent-cwe-checker:none", worker_mode="external",
+                    cwe_checker_image="dfa-test/nonexistent-cwe-checker:none",
+                    ghidra_image="dfa-test/nonexistent-ghidra:none", worker_mode="external",
                     max_upload_mb=64)
 
 
+ADMIN_PASSWORD = "correct-horse-battery-staple"
+
+
+def login(c, username="admin", password=ADMIN_PASSWORD):
+    r = c.post("/api/auth/login", json={"username": username, "password": password})
+    assert r.status_code == 200, r.text
+    c.headers["X-DFA-CSRF"] = "1"  # cookie-authenticated state-changing requests need the CSRF header
+    return r.json()
+
+
 @pytest.fixture()
-def client(settings):
+def make_client(settings):
+    """Factory for authenticated TestClients (bootstrap admin)."""
     from fastapi.testclient import TestClient
 
     from dfa.main import create_app
-    app = create_app(settings, start_worker=False)
-    with TestClient(app) as c:
-        yield c
+    settings.bootstrap_admin = "admin"
+    settings.bootstrap_admin_password = ADMIN_PASSWORD
+    clients = []
+
+    def _make(start_worker: bool = False, authenticate: bool = True):
+        c = TestClient(create_app(settings, start_worker=start_worker))
+        c.__enter__()
+        clients.append(c)
+        if authenticate:
+            login(c)
+        return c
+
+    yield _make
+    for c in clients:
+        c.__exit__(None, None, None)
+
+
+@pytest.fixture()
+def client(make_client):
+    return make_client()
 
 
 @pytest.fixture()

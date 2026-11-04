@@ -18,6 +18,7 @@ from pathlib import Path
 from .formats.cortexm import analyze_vector_table
 from .formats.ihex import looks_like_ihex
 from .formats.px4json import looks_like_container
+from .formats.simplefs import cromfs_header
 
 HEAD_BYTES = 64 * 1024
 
@@ -54,6 +55,7 @@ FORMAT_DESCRIPTIONS = {
     "jffs2": "JFFS2 filesystem image",
     "cortexm_raw": "Raw ARM Cortex-M flash image",
     "romfs": "ROMFS image (NuttX/Linux romfs)",
+    "cromfs": "NuttX CROMFS image (LZF-compressed ROM filesystem)",
     "disk_image": "Partitioned disk image (MBR/GPT)",
     "dfu": "DfuSe (STM32 DFU) firmware file",
     "text": "Text file",
@@ -65,7 +67,7 @@ FORMAT_DESCRIPTIONS = {
 }
 
 CONTAINER_FORMATS = {"zip", "tar", "gzip", "bzip2", "xz", "lzma", "ihex", "px4", "apj", "fw_json",
-                     "squashfs", "ext", "fat", "cpio", "uimage", "dfu", "romfs", "disk_image", "ubi", "ubifs", "jffs2"}
+                     "squashfs", "ext", "fat", "cpio", "uimage", "dfu", "romfs", "cromfs", "disk_image", "ubi", "ubifs", "jffs2"}
 
 
 def _fmt(name: str, **details) -> FormatInfo:
@@ -111,6 +113,8 @@ def detect_format_bytes(head: bytes, size: int) -> FormatInfo:
         return _fmt("jffs2")
     if head[:8] == b"-rom1fs-":
         return _fmt("romfs")
+    if head[:4] == b"CROM" and cromfs_header(head, size):
+        return _fmt("cromfs")
     if head[:4] == b"IM*H":
         return _fmt("dji_imah", **_imah_details(head))
     if head[:4] == b"PLF!":
@@ -266,9 +270,10 @@ PLATFORMS: list[PlatformSignature] = [
     PlatformSignature(
         name="ArduPilot",
         family="flight-controller",
+        # Note: the 8-byte app-descriptor signature is NOT used here - it also occurs as a constant in
+        # PX4 builds; a *populated* descriptor is added as a hint by the analysis stage instead.
         strong=[b"APJFWv1", b"ArduCopter V", b"ArduPlane V", b"ArduRover V", b"ArduSub V",
-                b"AntennaTracker V", b"AP_Periph", b"Blimp V",
-                bytes([0x40, 0xA2, 0xE4, 0xF1, 0x64, 0x68, 0x91, 0x06])],  # AP app descriptor
+                b"AntennaTracker V", b"AP_Periph", b"Blimp V"],
         weak=[b"ArduPilot", b"ChibiOS", b"AP_HAL", b"ARMING_CHECK", b"SYSID_THISMAV",
               b"@PARAM", b"PreArm:", b"ArduCopter", b"ArduPlane"],
         version_patterns=[

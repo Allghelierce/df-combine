@@ -12,7 +12,7 @@ from sqlalchemy import delete
 from .adapters.base import AdapterContext
 from .adapters.registry import get_adapters
 from .config import Settings
-from .core.findings import SEVERITY_ORDER, Finding, correlate, dedupe
+from .core.findings import SEVERITY_ORDER, Finding, aggregate, correlate, dedupe
 from .db import session_scope
 from .models import FindingRow, Scan, ScanEvent, ToolRun
 from .sandbox import SandboxError, run_analysis
@@ -118,13 +118,25 @@ def process_scan(scan_id: str, settings: Settings) -> None:
         t0 = now()
         r = ad.execute(ctx)
         findings += r.findings
+        extra = [c for c in (r.details or {}).get("components", []) if c.get("name")]
+        if extra:
+            merged = {(c["name"], c.get("version", "")): c for c in manifest.get("components", [])}
+            for c in extra:
+                key = (c["name"], c.get("version", ""))
+                if key in merged:
+                    merged[key]["sources"] = list(dict.fromkeys(merged[key].get("sources", []) + c["sources"]))[:8]
+                else:
+                    merged[key] = c
+            manifest["components"] = sorted(merged.values(), key=lambda c: (c["name"], c.get("version", "")))
+            with session_scope() as s:
+                s.get(Scan, scan_id).components = manifest["components"]
         _store_tool_run(scan_id, ad.name, ad.display_name, r.status, r.message, t0, len(r.findings),
                         r.raw_output_path, r.details)
         level = "info" if r.status in ("completed", "skipped") else "warning"
         log_event(scan_id, f"tool:{ad.name}", f"{ad.display_name}: {r.status} - {r.message}", level, progress=pct)
 
     # ---- stage 3: normalise + persist ----
-    final = [f.to_dict() for f in dedupe(correlate(findings))]
+    final = [f.to_dict() for f in dedupe(aggregate(correlate(findings)))]
     sev = Counter(f["severity"] for f in final)
     cls = Counter(f["classification"] for f in final)
     with session_scope() as s:

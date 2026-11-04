@@ -145,12 +145,16 @@ export default function ScanDetail() {
           <button className="btn ghost" disabled={!!busy || running} onClick={() => act("json")}>
             Export JSON
           </button>
-          <button className="btn ghost" disabled={running || !!busy} onClick={() => act("rescan")}>
-            Re-scan
-          </button>
-          <button className="btn danger ghost" disabled={scan.status === "running" || !!busy} onClick={() => act("delete")}>
-            Delete
-          </button>
+          {scan.can_modify !== false && (
+            <>
+              <button className="btn ghost" disabled={running || !!busy} onClick={() => act("rescan")}>
+                Re-scan
+              </button>
+              <button className="btn danger ghost" disabled={scan.status === "running" || !!busy} onClick={() => act("delete")}>
+                Delete
+              </button>
+            </>
+          )}
         </div>
       </header>
       <ErrorBox error={error} />

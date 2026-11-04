@@ -57,7 +57,14 @@ def test_cwe_checker_plan(settings, tmp_path):
     assert [t["artifact"]["id"] for t in targets] == [2, 1]
     raw = {"extraction": {"artifacts": [{"id": 0, "name": "image.bin", "format": "cortexm_raw", "size": 10}]}}
     targets, reason = ad.plan(ctx_for(settings, raw, tmp_path))
-    assert targets == [] and "bare-metal" in reason
+    assert targets == [] and "load address" in reason
+    raw["extraction"]["artifacts"][0]["details"] = {"flash_base": "0x8008000", "initial_sp": "0x2002b962"}
+    targets, _ = ad.plan(ctx_for(settings, raw, tmp_path))
+    assert targets[0]["bare_metal"] == {"processor_id": "ARM:LE:32:Cortex", "flash_base_address": "0x8008000",
+                                        "ram_base_address": "0x20000000", "ram_size": "0x30000"}
+    settings.cwe_checker_bare_metal = False
+    targets, reason = ad.plan(ctx_for(settings, raw, tmp_path))
+    assert targets == [] and "bare-metal mode is disabled" in reason
 
 
 def test_cwe_checker_unavailable_execute(settings, tmp_path):
@@ -95,7 +102,24 @@ def test_fwanalyzer_config_escaping(tmp_path):
 def test_fwanalyzer_not_applicable_to_mcu(settings, tmp_path):
     ad = fwanalyzer.FwAnalyzerAdapter(settings)
     targets, reason = ad.plan(ctx_for(settings, {"extraction": {"artifacts": [], "filesystems": []}}, tmp_path))
-    assert not targets and "PX4" in reason
+    assert not targets and "NuttX" in reason
+
+
+def test_fwanalyzer_nuttx_profile(settings, tmp_path):
+    etc = tmp_path / "files" / "00002_x.cromfs.d"
+    (etc / "init.d" / "airframes").mkdir(parents=True)
+    (etc / "init.d" / "rcS").write_text("param set-default CBRK_SUPPLY_CHK 894281\n")
+    (etc / "init.d" / "airframes" / "1000_x").write_text("param set MAV_BROADCAST 1\n")
+    man = {"extraction": {"artifacts": [{"id": 2, "name": "carved.cromfs", "display_path": "fw > carved.cromfs",
+                                         "format": "cromfs", "path": "files/x"}],
+                          "filesystems": [{"artifact_id": 2, "type": "cromfs", "root": "files/00002_x.cromfs.d"}]}}
+    targets, _ = fwanalyzer.FwAnalyzerAdapter(settings).plan(ctx_for(settings, man, tmp_path))
+    assert targets and targets[0]["profile"] == "nuttx"
+    cfg = fwanalyzer.build_config("dirfs", etc, False, "nuttx")
+    assert 'File = "/init.d/rcS"' in cfg and "CBRK_" in cfg and "Suid = false" in cfg
+    rule, sev, title, _ = fwanalyzer._classify(
+        "RegEx check failed, for: cbrk_1 : PX4 safety circuit breaker set to its disable value : line: x", "/x", False)
+    assert rule == "fwa-px4-cbrk"
 
 
 @pytest.mark.skipif(not shutil.which("fwanalyzer"), reason="fwanalyzer binary not installed")
@@ -134,7 +158,10 @@ class FakeFact:
             self.uploaded = json.loads(request.content)
             return httpx.Response(200, json={"uid": "abc_123"})
         if request.url.path == "/rest/firmware/abc_123":
-            return httpx.Response(200, json={"firmware": {"meta_data": {}, "analysis": {
+            # shape verified against a real FACT 4.x instance (summary = {label: [uids]}, unpacker always present)
+            return httpx.Response(200, json={"firmware": {"meta_data": {"total_files_in_firmware": 7}, "analysis": {
+                "unpacker": {"summary": {"unpacked": ["abc_123"]}},
+                "software_components": {"summary": {"BusyBox 1.31.1": ["uid9"], "OpenSSL 1.0.2k": ["uid8"]}},
                 "crypto_material": {"summary": {"SshRsaPrivateKeyBlock": ["uid1", "uid2"]}},
                 "users_and_passwords": {"summary": {"root:unix": ["uid3"]}},
                 "cve_lookup": {"summary": {"OpenSSL 1.0.1e (CRITICAL)": ["uid4"]}},
@@ -147,6 +174,7 @@ class FakeFact:
 def test_fact_adapter_with_mock(settings, tmp_path, monkeypatch):
     settings.fact_url = "http://fact.test"
     settings.fact_poll_s = 0
+    settings.fact_timeout_s = 20
     fake = FakeFact()
     ad = fact.FactAdapter(settings)
     monkeypatch.setattr(ad, "_client", lambda: httpx.Client(base_url="http://fact.test",
@@ -159,6 +187,8 @@ def test_fact_adapter_with_mock(settings, tmp_path, monkeypatch):
     titles = [f.title for f in res.findings]
     assert any("SshRsaPrivateKeyBlock" in t for t in titles)
     assert any("Canary disabled" in t for t in titles) and not any("NX enabled" in t for t in titles)
+    assert {"name": "busybox", "version": "1.31.1"}.items() <= res.details["components"][0].items()
+    assert "7 file(s)" in res.message
     cve = next(f for f in res.findings if f.rule_id == "fact-cve_lookup")
     assert cve.severity.value == "high" and cve.classification.value == "unverified"
 
