@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     cwe_checker_memory: str = "4g"
     cwe_checker_bare_metal: bool = True  # raw Cortex-M images (PX4/ArduPilot); experimental upstream
 
+    # Offline vulnerability database (python -m dfa.vulndb update); default <data_dir>/vulndb.sqlite
+    vulndb_path: str | None = None
+
     # Ghidra headless (the cwe_checker image ships Ghidra 11.x at /opt/ghidra)
     ghidra_enabled: bool = True
     ghidra_image: str = "fkiecad/cwe_checker:latest"

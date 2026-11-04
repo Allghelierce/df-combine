@@ -40,6 +40,7 @@ class Scan(Base):
     identification: Mapped[dict | None] = mapped_column(JSON)
     extraction_summary: Mapped[dict | None] = mapped_column(JSON)
     components: Mapped[list | None] = mapped_column(JSON)
+    packages: Mapped[dict | None] = mapped_column(JSON)  # package-manager inventory (+ matched vulnerabilities)
     severity_counts: Mapped[dict | None] = mapped_column(JSON)
     classification_counts: Mapped[dict | None] = mapped_column(JSON)
     risk_score: Mapped[int | None] = mapped_column(Integer)

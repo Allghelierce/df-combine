@@ -24,7 +24,7 @@ from .findings import Finding, dedupe
 from .formats.elfinfo import inspect_elf
 from .identify import PlatformAccumulator, file_entropy, parse_ardupilot_descriptor, scan_file_for_platform
 from .limits import Limits
-from .scanners import binaries, components, configs, drone, secrets
+from .scanners import binaries, components, configs, drone, packages, secrets
 from .scanners.base import ScanContext, build_display_paths
 
 MANIFEST_VERSION = 1
@@ -177,6 +177,18 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
         if p.version and p.confidence in ("high", "medium"):
             comps.append(components.Component(name=p.name.lower(), version=p.version, sources=["platform signature"],
                                               method="platform-signature"))
+
+    st = time.monotonic()
+    try:
+        pkg_inv = packages.inventory(ctx)
+        manifest["scanner_runs"].append({"name": "builtin:packages", "status": "completed",
+                                         "findings": 0, "duration_s": round(time.monotonic() - st, 3),
+                                         "packages": len(pkg_inv["packages"])})
+    except Exception as exc:  # noqa: BLE001
+        pkg_inv = {"distro": None, "managers": [], "packages": []}
+        manifest["scanner_runs"].append({"name": "builtin:packages", "status": "failed", "findings": 0,
+                                         "error": f"{type(exc).__name__}: {exc}"})
+    manifest["packages"] = pkg_inv
 
     findings: list[Finding] = []
     for name, fn in SCANNERS:

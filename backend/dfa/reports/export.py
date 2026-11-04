@@ -36,6 +36,7 @@ def scan_to_dict(scan: Scan, include_findings: bool = True) -> dict:
         "finished_at": _iso(scan.finished_at), "original_filename": scan.original_filename, "size": scan.size,
         "sha256": scan.sha256, "isolation": scan.isolation, "identification": scan.identification,
         "extraction_summary": scan.extraction_summary, "components": scan.components or [],
+        "packages": _packages_summary(scan.packages),
         "severity_counts": scan.severity_counts, "classification_counts": scan.classification_counts,
         "risk_score": scan.risk_score,
     }
@@ -43,6 +44,14 @@ def scan_to_dict(scan: Scan, include_findings: bool = True) -> dict:
         d["findings"] = [finding_to_dict(f) for f in sorted(scan.findings, key=lambda f: (f.severity_rank, f.title))]
         d["tool_runs"] = [tool_run_to_dict(t) for t in scan.tool_runs]
     return d
+
+
+def _packages_summary(p: dict | None) -> dict | None:
+    if not p:
+        return None
+    pk = p.get("packages", [])
+    return {"distro": p.get("distro"), "managers": p.get("managers", []), "count": len(pk),
+            "vulnerable": sum(1 for x in pk if x.get("vulnerabilities"))}
 
 
 def finding_to_dict(f) -> dict:

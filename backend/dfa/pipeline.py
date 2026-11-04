@@ -97,6 +97,7 @@ def process_scan(scan_id: str, settings: Settings) -> None:
             "categories": manifest["inventory"]["categories"], "isolation_detail": res.isolation,
         }
         scan.components = manifest["components"]
+        scan.packages = manifest.get("packages")
         scan.manifest_path = str(work / "manifest.json")
     iso_mode = res.isolation.split(":")[0]
     for run in manifest["scanner_runs"]:
@@ -106,6 +107,40 @@ def process_scan(scan_id: str, settings: Settings) -> None:
     findings = [Finding.from_dict(f) for f in manifest["findings"]]
     log_event(scan_id, "sandbox", f"Isolated analysis finished in {res.duration_s}s ({res.isolation}); "
                                   f"{len(ex['artifacts'])} artifacts, {len(findings)} built-in findings", progress=65)
+
+    # ---- stage 2a: vulnerability intelligence (offline OSV database) ----
+    t0 = now()
+    from .vulndb import UPSTREAM, open_db
+    db = open_db(settings)
+    if db is None:
+        _store_tool_run(scan_id, "osv", "Vulnerability database (OSV)", "unavailable",
+                        "No offline vulnerability database. Build it with 'python -m dfa.vulndb update --download' "
+                        "(Debian, Alpine and upstream GIT data from osv.dev); the built-in version baseline was used "
+                        "instead.", t0)
+    else:
+        from .vulnmatch import match as vuln_match
+        try:
+            vfindings, vstats = vuln_match(manifest, db, name)
+        except Exception as exc:  # noqa: BLE001
+            _store_tool_run(scan_id, "osv", "Vulnerability database (OSV)", "failed", f"{type(exc).__name__}: {exc}", t0)
+        else:
+            # the offline OSV data supersedes the small built-in baseline for the components it covers
+            findings = [f for f in findings if not (f.source_tool == "builtin:components"
+                                                    and f.rule_id.removeprefix("outdated-") in UPSTREAM)]
+            findings += vfindings
+            ds = ", ".join(f"{k.split(':', 1)[1]} {v[:10]}" for k, v in vstats["dataset"].items()
+                           if k.startswith("dataset:"))
+            note = (f"; no OSV data for package managers: {', '.join(vstats['unmatched_managers'])}"
+                    if vstats["unmatched_managers"] else "")
+            _store_tool_run(scan_id, "osv", "Vulnerability database (OSV)", "completed",
+                            f"checked {vstats['packages_checked']} distro packages and {vstats['components_checked']} "
+                            f"upstream components: {vstats['affected']} affected, {vstats['vulnerabilities']} "
+                            f"vulnerabilities (datasets: {ds}){note}", t0, len(vfindings), details=vstats)
+            with session_scope() as s:
+                sc = s.get(Scan, scan_id)
+                sc.components = manifest["components"]
+                sc.packages = manifest.get("packages")
+            (work / "manifest.json").write_text(json.dumps(manifest, indent=1, default=str))
 
     # ---- stage 2: external tool adapters ----
     adapters = get_adapters(settings)

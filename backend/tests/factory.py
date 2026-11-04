@@ -443,3 +443,35 @@ def ext_duplicate_entry_attack(out: Path, victim: Path) -> Path | None:
     out.write_bytes(bytes(data))
     shutil.rmtree(src)
     return out
+
+
+def cromfs(files: dict[str, bytes]) -> bytes:
+    """Minimal NuttX CROMFS volume (uncompressed LZF type-0 blocks) containing /init.d/<files>.
+
+    As in real volumes (verified against PX4 v1.17 images), cv_root points to the first entry of
+    the root directory list; directory nodes point (cn_child) to their first entry.
+    """
+    import struct as st
+    items = list(files.items())
+    n_nodes = 1 + len(items)
+    nodes_end = 20 + 20 * n_nodes
+    name_table, blob = {}, bytearray()
+    for n in ["init.d"] + [k for k, _ in items]:
+        name_table[n] = nodes_end + len(blob)
+        blob += n.encode() + b"\x00"
+    data_off = nodes_end + len(blob)
+    blocks, block_off = bytearray(), {}
+    for k, v in items:
+        block_off[k] = data_off + len(blocks)
+        for i in range(0, len(v), 512):
+            chunk = v[i:i + 512]
+            blocks += b"ZV\x00" + st.pack(">H", len(chunk)) + chunk
+    fsize = data_off + len(blocks)
+    out = bytearray(st.pack("<IHHIII", 0x4D4F5243, n_nodes, len(items), 20, fsize, 512))
+    out += st.pack("<HHIIII", 0o40555, 0, name_table["init.d"], 0, 0, 40)  # root list: one directory
+    for i, (k, v) in enumerate(items):
+        peer = 40 + 20 * (i + 1) if i + 1 < len(items) else 0
+        out += st.pack("<HHIIII", 0o100444, 0, name_table[k], len(v), peer, block_off[k])
+    out += blob + blocks
+    assert len(out) == fsize
+    return bytes(out)

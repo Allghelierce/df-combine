@@ -41,6 +41,7 @@ def init_engine(url: str) -> Engine:
 # Additive schema migrations for databases created by earlier versions (create_all never alters tables).
 MIGRATIONS: list[tuple[str, str, str]] = [
     ("scans", "owner_id", "ALTER TABLE scans ADD COLUMN owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL"),
+    ("scans", "packages", "ALTER TABLE scans ADD COLUMN packages JSON"),
 ]
 
 

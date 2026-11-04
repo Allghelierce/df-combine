@@ -41,6 +41,10 @@ FINGERPRINTS: list[tuple[str, re.Pattern]] = [
 ]
 
 
+DOC_PATHS = re.compile(r"(/share/(doc|man|info|locale|common-licenses)/|/(copyright|changelog[^/]*|NEWS|"
+                       r"README[^/]*|LICEN[SC]E[^/]*|COPYING[^/]*)$)", re.I)
+
+
 @dataclass
 class Component:
     name: str
@@ -89,6 +93,9 @@ def load_kb() -> dict:
 def fingerprint(ctx: ScanContext) -> list[Component]:
     found: dict[tuple[str, str], Component] = {}
     for art in ctx.content_artifacts():
+        fsp = ctx.fs_path(art)
+        if DOC_PATHS.search(fsp):
+            continue  # licences/changelogs mention arbitrary versions ("version 2.23" in glibc's copyright)
         if art.format in ("text",):
             text = ctx.text(art) or ""
             lines = text.splitlines()[:20_000]

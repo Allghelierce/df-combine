@@ -460,6 +460,15 @@ def create_app(settings: Settings | None = None, start_worker: bool | None = Non
         return Response(body, media_type="application/json", headers={
             "Content-Disposition": f'attachment; filename="dfa-report-{scan_id[:8]}.json"'})
 
+    @app.get("/api/scans/{scan_id}/sbom.cdx.json")
+    def sbom(scan_id: str, p: Principal = Depends(current_principal), db: Session = Depends(get_session)):
+        from .reports.sbom import cyclonedx
+        scan = _get(db, scan_id, p)
+        if scan.status != "completed":
+            raise HTTPException(409, "the SBOM is available once the scan has completed")
+        return Response(json.dumps(cyclonedx(scan), indent=1), media_type="application/vnd.cyclonedx+json",
+                        headers={"Content-Disposition": f'attachment; filename="dfa-sbom-{scan_id[:8]}.cdx.json"'})
+
     @app.get("/api/scans/{scan_id}/report.pdf")
     def report_pdf(scan_id: str, p: Principal = Depends(current_principal), db: Session = Depends(get_session)):
         scan = _get(db, scan_id, p)
