@@ -5,6 +5,7 @@ img2simg) rather than by our own writers, so the parsers are checked against rea
 """
 import gzip
 import io
+import random
 import shutil
 import struct
 import subprocess
@@ -181,3 +182,115 @@ def test_dji_imah_plaintext_only(tmp_path):
     p2.write_bytes(_imah([(b"0000", b"\x99" * 64, 0x00)], b"UFIE"))
     ex, res = _extract(p2, tmp_path / "w2")
     assert res.artifacts[0].extraction == "unsupported" and "not decrypted" in res.artifacts[0].extraction_note
+
+
+def test_arch_guess_on_raw_code(tmp_path, run_analysis):
+    import os
+
+    from dfa.core.formats.arch import guess_architecture
+    arm = (b"\x00\x48\x2d\xe9" + os.urandom(28) + b"\x1e\xff\x2f\xe1" + os.urandom(28)) * 200
+    g = guess_architecture(arm)
+    assert g and g.architecture == "ARM (32-bit)"
+    mips = (b"\x27\xbd\xff\xe0" + os.urandom(24) + b"\x03\xe0\x00\x08" + os.urandom(28)) * 200
+    assert guess_architecture(mips).architecture == "MIPS" and guess_architecture(mips).endianness == "big"
+    assert guess_architecture(os.urandom(1 << 20)) is None
+    p = tmp_path / "blob.bin"
+    p.write_bytes(b"\x01" * 64 + mips)
+    m = run_analysis(p)
+    assert m["identification"]["architecture"].startswith("MIPS")
+
+
+def test_arch_guess_never_fires_on_random_data():
+    from dfa.core.formats.arch import guess_architecture
+    rnd = random.Random(1234)
+    for size in (4096, 65536, 1 << 20, 3 << 20):
+        for _ in range(3):
+            assert guess_architecture(rnd.randbytes(size)) is None
+
+
+def test_esp32_image(tmp_path, run_analysis):
+    from tests.factory import esp_app_desc, esp_image, xtensa_code
+    drom = esp_app_desc("remoteid", "1.2.0", "v4.4.2") + b"Hello from flash" * 64
+    img = esp_image([(0x3F400020, drom), (0x3FFB0000, b"\x00" * 512), (0x400D0020, xtensa_code(300))],
+                    chip_id=0, hash_appended=True)
+    p = tmp_path / "remoteid.bin"
+    p.write_bytes(img)
+    assert detect_format(p).format == "esp_image"
+    m = run_analysis(p)
+    ident = m["identification"]
+    assert ident["architecture"] == "Xtensa (ESP32)" and ident["platform"] == "Espressif"
+    root = m["extraction"]["artifacts"][0]
+    assert root["details"]["checksum_valid"] is True and root["details"]["sha256_valid"] is True
+    assert root["details"]["esp_app"]["project_name"] == "remoteid"
+    comps = {(c["name"], c["version"]) for c in m["components"]}
+    assert ("esp-idf", "4.4.2") in comps and ("remoteid", "1.2.0") in comps
+    segs = [a for a in m["extraction"]["artifacts"] if a["name"].startswith("segment")]
+    assert len(segs) == 3
+    code = next(a for a in segs if a["details"]["load_address"] == "0x400d0020")
+    assert code["details"]["arch_guess"]["architecture"] == "Xtensa"
+
+
+def test_esp_image_with_bad_checksum_is_flagged(tmp_path, run_analysis):
+    from tests.factory import esp_image, xtensa_code
+    img = bytearray(esp_image([(0x400D0020, xtensa_code(10))], chip_id=9))
+    img[40] ^= 0xFF  # tamper with code; the stored checksum no longer matches
+    p = tmp_path / "tampered.bin"
+    p.write_bytes(bytes(img))
+    assert detect_format(p).format == "esp_image"  # exact layout still identifies it
+    m = run_analysis(p)
+    root = m["extraction"]["artifacts"][0]
+    assert root["details"]["esp_chip"] == "ESP32-S3" and root["details"]["checksum_valid"] is False
+    assert any("checksum mismatch" in w for w in m["extraction"]["warnings"])
+
+
+def test_esp_flash_dump(tmp_path, run_analysis):
+    from tests.factory import esp_app_desc, esp_flash_dump, esp_image, esp_partition_table, xtensa_code
+    boot = esp_image([(0x3FFF0000, b"\x01" * 64), (0x40078000, xtensa_code(20))], entry=0x40080400)
+    app = esp_image([(0x3F400020, esp_app_desc("elrs-rx", "3.4.0", "v4.4.6-dirty")),
+                     (0x400D0020, xtensa_code(100))])
+    table = esp_partition_table([("nvs", 1, 2, 0x9000, 0x5000, 0), ("otadata", 1, 0, 0xE000, 0x2000, 0),
+                                 ("app0", 0, 0x10, 0x10000, 0x100000, 0), ("app1", 0, 0x11, 0x110000, 0x100000, 1),
+                                 ("spiffs", 1, 0x82, 0x210000, 0x10000, 0)])
+    nvs = b"\xfe\xff\xff\xff" + bytes(28) + b"wifi.sta.ssid\0" * 8
+    p = tmp_path / "flash.bin"
+    p.write_bytes(esp_flash_dump(boot, table, {0x9000: nvs, 0x10000: app, 0x110000: b"\x55" * 4096},
+                                 size=0x220000))
+    assert detect_format(p).format == "esp_flash"
+    m = run_analysis(p)
+    arts = m["extraction"]["artifacts"]
+    root = arts[0]
+    assert [x["label"] for x in root["details"]["partitions"]] == ["nvs", "otadata", "app0", "app1", "spiffs"]
+    assert root["details"]["partition_table_md5_valid"] is True
+    notes = " | ".join(root["details"]["partition_notes"])
+    assert "app1: flash-encrypted partition, not analysed" in notes and "spiffs: erased" in notes
+    names = {a["name"]: a for a in arts}
+    assert names["bootloader.bin"]["format"] == "esp_image"
+    assert names["02_app0.app-ota_0.bin"]["format"] == "esp_image"
+    assert names["02_app0.app-ota_0.bin"]["details"]["esp_app"]["project_name"] == "elrs-rx"
+    assert "00_nvs.data-nvs.bin" in names and not any("app1" in n for n in names)
+    assert ("esp-idf", "4.4.6-dirty") in {(c["name"], c["version"]) for c in m["components"]}
+
+
+def test_esp8266_image_followed_by_app(tmp_path, run_analysis):
+    from tests.factory import esp_image
+    eboot = esp_image([(0x4010F000, b"\x0d\xf0\x12\xc1\xf0\x00" * 100)], entry=0x4010F29C, chip_id=None)
+    app = esp_image([(0x40201010, b"\x0d\xf0" * 2000), (0x3FFE8000, b"\x00" * 256)], entry=0x40100004,
+                    chip_id=None)
+    data = eboot + b"\xaa" * (0x1000 - len(eboot)) + app
+    p = tmp_path / "arduino.bin"
+    p.write_bytes(data)
+    m = run_analysis(p)
+    arts = m["extraction"]["artifacts"]
+    assert arts[0]["details"]["esp_chip"] == "ESP8266"
+    second = next(a for a in arts if a["name"] == "trailing@0x1000.bin")
+    assert second["format"] == "esp_image" and second["details"]["esp_chip"] == "ESP8266"
+    assert len(second["details"]["segments"]) == 2
+
+
+def test_esp_partition_table_file(tmp_path):
+    from tests.factory import esp_partition_table
+    p = tmp_path / "partitions.bin"
+    p.write_bytes(esp_partition_table([("factory", 0, 0, 0x10000, 0x100000, 0)])[:64])
+    info = detect_format(p)
+    assert info.format == "esp_partition_table" and info.details["partitions"][0]["subtype"] == "factory"
+    assert info.details["md5_valid"] is True

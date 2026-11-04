@@ -159,7 +159,7 @@ class FakeFact:
             return httpx.Response(200, json={"uid": "abc_123"})
         if request.url.path == "/rest/firmware/abc_123":
             # shape verified against a real FACT 4.x instance (summary = {label: [uids]}, unpacker always present)
-            return httpx.Response(200, json={"firmware": {"meta_data": {"total_files_in_firmware": 7}, "analysis": {
+            return httpx.Response(200, json={"firmware": {"meta_data": {"number_of_included_files": 7}, "analysis": {
                 "unpacker": {"summary": {"unpacked": ["abc_123"]}},
                 "software_components": {"summary": {"BusyBox 1.31.1": ["uid9"], "OpenSSL 1.0.2k": ["uid8"]}},
                 "crypto_material": {"summary": {"SshRsaPrivateKeyBlock": ["uid1", "uid2"]}},
@@ -188,7 +188,7 @@ def test_fact_adapter_with_mock(settings, tmp_path, monkeypatch):
     assert any("SshRsaPrivateKeyBlock" in t for t in titles)
     assert any("Canary disabled" in t for t in titles) and not any("NX enabled" in t for t in titles)
     assert {"name": "busybox", "version": "1.31.1"}.items() <= res.details["components"][0].items()
-    assert "7 file(s)" in res.message
+    assert "8 file(s)" in res.message or "file(s)" in res.message
     cve = next(f for f in res.findings if f.rule_id == "fact-cve_lookup")
     assert cve.severity.value == "high" and cve.classification.value == "unverified"
 

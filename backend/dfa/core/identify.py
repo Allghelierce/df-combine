@@ -15,6 +15,7 @@ from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from .formats import esp
 from .formats.cortexm import analyze_vector_table
 from .formats.ihex import looks_like_ihex
 from .formats.more import cramfs_offset
@@ -69,12 +70,16 @@ FORMAT_DESCRIPTIONS = {
     "cramfs": "CramFS filesystem image",
     "erofs": "EROFS filesystem image",
     "android_sparse": "Android sparse image",
+    "esp_image": "Espressif (ESP32/ESP8266) application image",
+    "esp_flash": "Espressif flash dump (bootloader + partition table)",
+    "esp_partition_table": "Espressif ESP-IDF partition table",
     "dji_imah": "DJI IM*H signed/encrypted firmware module",
     "parrot_plf": "Parrot PLF firmware container",
     "empty": "Empty file",
 }
 
 CONTAINER_FORMATS = {"zip", "tar", "gzip", "bzip2", "xz", "lzma", "zstd", "lz4", "lz4_legacy", "lzop", "cramfs",
+                     "esp_image", "esp_flash",
                      "erofs", "android_sparse", "parrot_plf", "dji_imah", "ihex", "px4", "apj", "fw_json",
                      "squashfs", "ext", "fat", "cpio", "uimage", "dfu", "romfs", "cromfs", "disk_image", "ubi", "ubifs", "jffs2"}
 
@@ -160,6 +165,12 @@ def detect_format_bytes(head: bytes, size: int) -> FormatInfo:
         return _fmt("ihex")
     if _looks_like_lzma_alone(head):
         return _fmt("lzma")
+    if esp.looks_like_flash_dump(head):
+        return _fmt("esp_flash")
+    if head[:1] == b"\xe9" and esp.image_header_plausible(head, size):
+        return _fmt("esp_image")
+    if head[:2] == b"\xaa\x50" and size <= esp.PARTITION_TABLE_MAX and (pt := esp.parse_partition_table(head)):
+        return _fmt("esp_partition_table", partitions=pt["partitions"], md5_valid=pt["md5_valid"])
     vt = analyze_vector_table(head)
     if vt is not None:
         return _fmt("cortexm_raw", initial_sp=hex(vt.initial_sp),
@@ -331,6 +342,13 @@ PLATFORMS: list[PlatformSignature] = [
         family="vendor-proprietary",
         strong=[b"PLF!", b"parrot_bebop", b"Parrot Bebop", b"Parrot ANAFI"],
         weak=[b"Parrot", b"parrot"],
+        version_patterns=[],
+    ),
+    PlatformSignature(
+        name="Espressif",
+        family="embedded-peripheral",  # e.g. Remote ID modules, RC-link receivers, telemetry bridges
+        strong=[],  # image structures are added as hints by the analysis stage
+        weak=[b"esp_image", b"ESP-IDF", b"nvs_flash", b"esp_ota_", b"ets_printf", b"esp_partition"],
         version_patterns=[],
     ),
     PlatformSignature(

@@ -13,24 +13,30 @@ from datetime import UTC, datetime
 from .. import __version__
 from ..models import Scan
 
-# component name -> (CPE vendor, CPE product) for components identified from version strings
-CPE_MAP = {
-    "openssl": ("openssl", "openssl"), "busybox": ("busybox", "busybox"), "linux": ("linux", "linux_kernel"),
+# component name -> (CPE vendor, CPE product[, CPE part]) for components identified from version strings
+CPE_MAP: dict[str, tuple[str, ...]] = {
+    "openssl": ("openssl", "openssl"), "busybox": ("busybox", "busybox"), "linux": ("linux", "linux_kernel", "o"),
     "dropbear": ("dropbear_ssh_project", "dropbear_ssh"), "dnsmasq": ("thekelleys", "dnsmasq"),
     "openssh": ("openbsd", "openssh"), "zlib": ("zlib", "zlib"), "glibc": ("gnu", "glibc"),
     "uclibc": ("uclibc-ng_project", "uclibc-ng"), "mbedtls": ("arm", "mbed_tls"), "lighttpd": ("lighttpd", "lighttpd"),
     "libcurl": ("haxx", "libcurl"), "hostapd": ("w1.fi", "hostapd"), "wpa_supplicant": ("w1.fi", "wpa_supplicant"),
-    "sqlite": ("sqlite", "sqlite"), "u-boot": ("denx", "u-boot"), "nuttx": ("apache", "nuttx"),
+    "sqlite": ("sqlite", "sqlite"), "u-boot": ("denx", "u-boot"), "nuttx": ("apache", "nuttx", "o"),
     "px4": ("dronecode", "px4_drone_autopilot"), "ardupilot": ("ardupilot", "ardupilot"),
     "freertos": ("amazon", "freertos"), "chibios": ("chibios", "chibios\\/rt"),
+    "esp-idf": ("espressif", "esp-idf"), "zephyr": ("zephyrproject", "zephyr", "o"),
 }
+# component name -> purl for upstream projects identified from version strings / descriptors
+PURL_MAP = {"esp-idf": "pkg:github/espressif/esp-idf", "zephyr": "pkg:github/zephyrproject-rtos/zephyr",
+            "freertos": "pkg:github/freertos/freertos-kernel", "ardupilot": "pkg:github/ardupilot/ardupilot",
+            "px4": "pkg:github/px4/px4-autopilot", "nuttx": "pkg:github/apache/nuttx"}
 
 
 def _cpe(name: str, version: str) -> str | None:
     vp = CPE_MAP.get(name)
     if not vp or not version:
         return None
-    return f"cpe:2.3:a:{vp[0]}:{vp[1]}:{version}:*:*:*:*:*:*:*"
+    part = vp[2] if len(vp) > 2 else "a"
+    return f"cpe:2.3:{part}:{vp[0]}:{vp[1]}:{version}:*:*:*:*:*:*:*"
 
 
 def cyclonedx(scan: Scan) -> dict:
@@ -64,13 +70,18 @@ def cyclonedx(scan: Scan) -> dict:
         add_vulns(ref, p.get("vulnerabilities", []))
     for c in scan.components or []:
         ref = f"component:{c['name']}@{c.get('version', '')}"
-        entry = {"type": "framework" if c["name"] in ("px4", "ardupilot", "nuttx", "chibios", "freertos") else "library",
+        framework = c["name"] in ("px4", "ardupilot", "nuttx", "chibios", "freertos", "esp-idf", "zephyr")
+        entry = {"type": "framework" if framework else "library",
                  "bom-ref": ref, "name": c["name"], "version": c.get("version") or "",
                  "properties": [{"name": "dfa:method", "value": c.get("method", "string-match")}] +
                                [{"name": "dfa:found-in", "value": s} for s in c.get("sources", [])[:5]]}
+        if c.get("variant"):
+            entry["properties"].append({"name": "dfa:variant", "value": c["variant"]})
         cpe = _cpe(c["name"], c.get("version", ""))
         if cpe:
             entry["cpe"] = cpe
+        if c["name"] in PURL_MAP and c.get("version"):
+            entry["purl"] = f"{PURL_MAP[c['name']]}@{c['version']}"
         components.append(entry)
         add_vulns(ref, c.get("vulnerabilities", []))
     return {

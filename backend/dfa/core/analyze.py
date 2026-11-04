@@ -61,7 +61,7 @@ def categorize(art: Artifact, elf: dict | None, ctx: ScanContext) -> str:
         return "filesystem_image"
     if art.format in ("zip", "tar", "gzip", "bzip2", "xz", "lzma", "zstd", "lz4", "lz4_legacy", "lzop", "cpio"):
         return "archive"
-    if art.format in ("px4", "apj", "fw_json", "ihex", "dfu", "uimage", "parrot_plf", "dji_imah"):
+    if art.format in ("px4", "apj", "fw_json", "ihex", "dfu", "uimage", "parrot_plf", "dji_imah", "esp_image", "esp_flash"):
         return "firmware_container"
     if art.format == "text":
         text = ctx.text(art) or ""
@@ -118,6 +118,13 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
                 a.details["elf_error"] = str(exc)[:200]
         ctx.category[a.id] = categorize(a, ctx.elf.get(a.id), ctx)
 
+    from .formats.arch import guess_architecture
+    for a in arts:  # instruction set of headerless code blobs
+        if a.format == "raw" and a.size >= 4096 and a.extraction in (None, "ok"):
+            with ex.path_of(a.id).open("rb") as fp:
+                g = guess_architecture(fp.read(8 * 1024**2))
+            if g:
+                a.details["arch_guess"] = g.to_dict()
     for a in arts:  # load address of raw MCU images (needed for disassembly / bare-metal analysis)
         if a.format == "cortexm_raw":
             from .formats.cortexm import analyze_vector_table, estimate_flash_base
@@ -168,6 +175,10 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
             acc.hint("DJI", "DJI 'IM*H' module header")
         elif a.format == "parrot_plf":
             acc.hint("Parrot", "Parrot 'PLF!' container header")
+        elif a.format == "esp_image" and a.details.get("checksum_valid"):
+            app = a.details.get("esp_app")
+            acc.hint("Espressif", f"{a.details.get('esp_chip')} application image with a valid checksum"
+                     + (f" (ESP-IDF project '{app.get('project_name')}')" if app else ""))
     platforms = acc.results()
 
     progress("components")
@@ -177,7 +188,16 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
     for p in platforms[:2]:
         if p.version and p.confidence in ("high", "medium"):
             comps.append(components.Component(name=p.name.lower(), version=p.version, sources=["platform signature"],
-                                              method="platform-signature"))
+                                              method="platform-signature", variant=p.vehicle))
+    for a in arts:  # ESP-IDF application descriptors name the SDK version and the application itself
+        app = a.details.get("esp_app") or {}
+        if app.get("idf_version"):
+            components.merge(comps, components.Component(
+                name="esp-idf", version=app["idf_version"].removeprefix("v"), sources=[ctx.where(a)],
+                method="esp_app_desc"))
+        if app.get("project_name") and app.get("version"):
+            components.merge(comps, components.Component(
+                name=app["project_name"], version=app["version"], sources=[ctx.where(a)], method="esp_app_desc"))
 
     st = time.monotonic()
     try:
@@ -295,6 +315,13 @@ def _primary_arch(arts: list[Artifact], ctx: ScanContext) -> tuple[str | None, i
     any_elf = Counter((e["arch"], e["bits"], e["endianness"], e["os_hint"]) for e in ctx.elf.values())
     if any_elf:
         return any_elf.most_common(1)[0][0]
+    for a in arts:
+        if a.details.get("esp_architecture"):
+            return f"{a.details['esp_architecture']} ({a.details['esp_chip']})", 32, "little", "bare-metal"
+    guesses = sorted((a for a in arts if a.details.get("arch_guess")), key=lambda a: -a.size)
+    if guesses:
+        g = guesses[0].details["arch_guess"]
+        return f"{g['architecture']} (opcode heuristic)", g["bits"], g["endianness"], None
     return None, None, None, None
 
 

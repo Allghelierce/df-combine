@@ -15,7 +15,7 @@ DISTRO_SOURCE = {"glibc": ("glibc", "eglibc"), "openssl": ("openssl", "openssl1.
                  "dnsmasq": ("dnsmasq",), "sqlite": ("sqlite3",), "libcurl": ("curl",), "curl": ("curl",),
                  "mbedtls": ("mbedtls",), "hostapd": ("wpa", "hostapd"), "wpa_supplicant": ("wpa",),
                  "lighttpd": ("lighttpd",), "u-boot": ("u-boot",), "uclibc": ("uclibc", "uclibc-ng"),
-                 "libpcap": ("libpcap",)}
+                 "libpcap": ("libpcap",), "freertos": ("freertos",), "zephyr": ("zephyr",)}
 
 SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4, None: 2}
 
@@ -89,7 +89,7 @@ def match(manifest: dict, db: VulnDB, where: str) -> tuple[list[Finding], dict]:
             stats["superseded"].append(f"{name} {ver}")
             continue
         stats["components_checked"] += 1
-        ms = _sort(db.match_upstream(name, ver))
+        ms = _sort(db.match_upstream(name, ver, comp.get("variant")))
         comp["vulnerabilities"] = [_vuln_entry(m) for m in ms[:200]]
         if not ms:
             continue

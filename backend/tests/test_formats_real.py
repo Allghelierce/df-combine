@@ -156,3 +156,92 @@ def test_real_px4_extraction(run_analysis):
     assert {"/init.d/rcS", "/extras/px4_io-v2_default.bin"} <= names
     assert any(a["format"] == "cromfs" for a in arts)
     assert "ArduPilot" not in [c["name"] for c in i["platform_candidates"]]
+
+
+def test_upstream_tag_mapping():
+    from dfa.vulndb import _ardupilot_tags, _describe_base, _repo_key
+    assert _describe_base("5.0-beta1-427-g4532e6e0b2-dirty") == "5.0-beta1"
+    assert _describe_base("5.0-beta1-427-g4532e6e0b2-dirt") == "5.0-beta1"  # esp_app_desc_t truncates to 31 chars
+    assert _describe_base("4.4.2") == "4.4.2"
+    assert _ardupilot_tags("4.6.2", "ArduCopter") == ["Copter-4.6.2", "ArduCopter-4.6.2"]
+    assert "Plane-4.6.2" in _ardupilot_tags("4.6.2", None)
+    assert _repo_key("https://github.com/apache/nuttx") == "nuttx"
+    assert _repo_key("https://github.com/apache/nuttx-apps") is None  # different project, different tags
+    assert _repo_key("https://git.busybox.net/busybox") == "busybox"
+    assert _repo_key("https://github.com/espressif/esp-idf.git") == "esp-idf"
+
+
+def test_vulndb_vehicle_and_describe_matching(tmp_path):
+    from dfa.vulndb import VulnDB, update
+    from dfa.vulnmatch import match
+    _osv_zip(tmp_path / "Debian.zip", [])
+    _osv_zip(tmp_path / "Alpine.zip", [])
+    _osv_zip(tmp_path / "GIT.zip", [
+        {"id": "CVE-2099-1000", "summary": "plane-only release tag",
+         "affected": [{"ranges": [{"type": "GIT", "repo": "https://github.com/ardupilot/ardupilot", "events": []}],
+                       "versions": ["Plane-4.6.3", "Copter-4.6.2"]}]},
+        {"id": "CVE-2099-1001", "summary": "idf bug",
+         "affected": [{"ranges": [{"type": "GIT", "repo": "https://github.com/espressif/esp-idf", "events": []}],
+                       "versions": ["v5.0-beta1"]}]},
+        {"id": "CVE-2099-1002", "summary": "apps bug",
+         "affected": [{"ranges": [{"type": "GIT", "repo": "https://github.com/apache/nuttx-apps", "events": []}],
+                       "versions": ["nuttx-12.0.0"]}]},
+    ])
+    update(tmp_path / "v.sqlite", tmp_path)
+    db = VulnDB(tmp_path / "v.sqlite")
+
+    def rules(components):
+        fs, _ = match({"components": components}, db, "fw")
+        return {f.rule_id: f.references for f in fs}
+
+    assert rules([{"name": "ardupilot", "version": "4.6.3", "variant": "ArduCopter"}]) == {}  # Copter-4.6.3 not listed
+    assert "CVE-2099-1000" in rules([{"name": "ardupilot", "version": "4.6.3", "variant": "ArduPlane"}])[
+        "osv-upstream-ardupilot"]
+    assert "osv-upstream-ardupilot" in rules([{"name": "ardupilot", "version": "4.6.3"}])  # vehicle unknown
+    assert "CVE-2099-1001" in rules([{"name": "esp-idf", "version": "5.0-beta1-427-g4532e6e0b2-dirty"}])[
+        "osv-upstream-esp-idf"]
+    assert rules([{"name": "nuttx", "version": "12.0.0"}]) == {}  # nuttx-apps records are not NuttX releases
+
+
+ESP = REAL / "esp"
+
+
+@pytest.mark.skipif(not (ESP / "esp_idf_blink_esp32s2.bin").exists(),
+                    reason="esptool sample images not fetched (scripts/fetch_real_firmware.py)")
+def test_real_espressif_images():
+    from dfa.core.formats.esp import parse_esp_image
+    from dfa.core.identify import detect_format
+    expect = {"bootloader_esp32.bin": ("ESP32", "Xtensa", None), "bootloader_esp32c3.bin": ("ESP32-C3", "RISC-V", True),
+              "esp8266_deepsleep.bin": ("ESP8266", "Xtensa", None),
+              "esp_idf_blink_esp32s2.bin": ("ESP32-S2", "Xtensa", True)}
+    for name, (chip, arch, sha) in expect.items():
+        data = (ESP / name).read_bytes()
+        assert detect_format(ESP / name).format == "esp_image", name
+        info = parse_esp_image(data)
+        assert (info["chip"], info["architecture"], info["checksum_valid"], info.get("sha256_valid")) == \
+            (chip, arch, True, sha), name
+    app = parse_esp_image((ESP / "esp_idf_blink_esp32s2.bin").read_bytes())["app"]
+    assert app["project_name"] == "blink" and app["idf_version"] == "v5.0-beta1-427-g4532e6e0b2-dirt"
+    pt = detect_format(ESP / "partitions_singleapp.bin")
+    assert pt.format == "esp_partition_table"
+    assert [(p["label"], p["subtype"]) for p in pt.details["partitions"]] == \
+        [("factory", "factory"), ("rfdata", "phy"), ("wifidata", "nvs")]
+
+
+@pytest.mark.skipif(not (ESP / "esp_idf_blink_esp32s2.bin").exists(),
+                    reason="esptool sample images not fetched (scripts/fetch_real_firmware.py)")
+def test_real_esp_flash_layout_pipeline(tmp_path, run_analysis):
+    """A flash layout assembled from real images: bootloader @0x1000, partition table @0x8000, app @0x10000."""
+    d = bytearray(b"\xff" * 0x200000)
+    for off, name in ((0x1000, "bootloader_esp32.bin"), (0x8000, "partitions_singleapp.bin"),
+                      (0x10000, "esp_idf_blink_esp32s2.bin")):
+        blob = (ESP / name).read_bytes()
+        d[off:off + len(blob)] = blob
+    p = tmp_path / "flash.bin"
+    p.write_bytes(bytes(d))
+    m = run_analysis(p)
+    ident = m["identification"]
+    assert ident["format"] == "esp_flash" and ident["platform"] == "Espressif"
+    assert ("esp-idf", "5.0-beta1-427-g4532e6e0b2-dirt") in {(c["name"], c["version"]) for c in m["components"]}
+    code = [a for a in m["extraction"]["artifacts"] if (a["details"].get("arch_guess") or {}).get("architecture")]
+    assert code and all(a["details"]["arch_guess"]["architecture"] == "Xtensa" for a in code)

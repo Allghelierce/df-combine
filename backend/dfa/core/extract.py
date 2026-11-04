@@ -580,6 +580,93 @@ class Extractor:
         self._record_fs(art, "erofs", root, image_artifact=art.id)
         return self._register_tree(art, root)
 
+    def h_esp_image(self, art: Artifact) -> list[Artifact]:
+        from .formats.esp import parse_esp_image
+        src = self.path_of(art.id)
+        if art.size > 64 * 1024**2:
+            raise LimitExceeded("ESP image larger than 64 MiB")
+        data = src.read_bytes()
+        info = parse_esp_image(data)
+        if info is None:
+            raise FormatError("invalid Espressif image segment table")
+        art.details.update({"esp_chip": info["chip"], "entry_point": info["entry"],
+                            "esp_architecture": info["architecture"], "segments": info["segments"],
+                            "checksum_valid": info["checksum_valid"], "image_size": info["image_size"]})
+        for k in ("sha256_valid", "app"):
+            if k in info:
+                art.details["esp_app" if k == "app" else k] = info[k]
+        if info["checksum_valid"] is False:
+            self.result.warnings.append(f"{art.name}: Espressif image checksum mismatch (corrupt or modified)")
+        out = self._out_dir(art)
+        children = []
+        for i, seg in enumerate(info["segments"]):
+            if not seg["size"]:
+                continue
+            name = f"segment{i}_{seg['load_address']}.bin"
+            self._write_bytes(data[seg["offset"]:seg["offset"] + seg["size"]], out / name)
+            c = self._child(art, out / name, name, "decoded")
+            c.details["load_address"] = seg["load_address"]
+            c.details["arch_hint"] = info["architecture"]
+            children.append(c)
+        # Images can be followed by further images (e.g. ESP8266 Arduino builds: eboot, then the app at 0x1000).
+        rest = info["image_size"]
+        while rest < len(data) and data[rest] in (0xFF, 0xAA, 0x00):
+            rest += 1
+        rest -= rest % 16
+        if len(data) - rest >= 64:
+            name = f"trailing@{rest:#x}.bin"
+            self._write_bytes(data[rest:], out / name)
+            c = self._child(art, out / name, name, "carved")
+            c.details["carved_offset"] = hex(rest)
+            children.append(c)
+        return children
+
+    def h_esp_flash(self, art: Artifact) -> list[Artifact]:
+        from .formats import esp
+        src = self.path_of(art.id)
+        out = self._out_dir(art)
+        children = []
+        with src.open("rb") as fp:
+            fp.seek(esp.PARTITION_TABLE_OFFSET)
+            table = esp.parse_partition_table(fp.read(esp.PARTITION_TABLE_MAX))
+            if table is None:
+                raise FormatError("invalid ESP-IDF partition table at 0x8000")
+            art.details["partitions"] = table["partitions"]
+            art.details["partition_table_md5_valid"] = table["md5_valid"]
+            for boot in (0x1000, 0x0):  # ESP32/ESP32-S2 boot from 0x1000, newer chips from 0x0
+                fp.seek(boot)
+                if fp.read(1) == b"\xe9":
+                    fp.seek(boot)
+                    self._write_stream(_Bounded(fp, esp.PARTITION_TABLE_OFFSET - boot), out / "bootloader.bin",
+                                       label="bootloader.bin")
+                    c = self._child(art, out / "bootloader.bin", "bootloader.bin", "partition")
+                    c.details["flash_offset"] = hex(boot)
+                    children.append(c)
+                    break
+            notes = []
+            for i, p in enumerate(table["partitions"]):
+                label = f"{_sanitize_component(p['label']) or 'partition'}"
+                if p["encrypted"]:
+                    notes.append(f"{p['label']}: flash-encrypted partition, not analysed")
+                    continue
+                if p["offset"] >= art.size:
+                    notes.append(f"{p['label']}: beyond the end of the dump")
+                    continue
+                size = min(p["size"], art.size - p["offset"])
+                fp.seek(p["offset"])
+                if _all_erased(fp, size):
+                    notes.append(f"{p['label']}: erased (all 0xFF)")
+                    continue
+                name = f"{i:02d}_{label}.{p['type']}-{p['subtype']}.bin"
+                fp.seek(p["offset"])
+                self._write_stream(_Bounded(fp, size), out / name, label=name)
+                c = self._child(art, out / name, name, "partition")
+                c.details["esp_partition"] = p
+                children.append(c)
+            if notes:
+                art.details["partition_notes"] = notes
+        return children
+
     def h_ihex(self, art: Artifact) -> list[Artifact]:
         src = self.path_of(art.id)
         if art.size > 256 * 1024**2:
@@ -1209,6 +1296,18 @@ def _scan_magics(fp: BinaryIO, size: int, max_hits: int):
         pos += chunk
 
 
+def _all_erased(fp: BinaryIO, size: int) -> bool:
+    left = size
+    while left > 0:
+        chunk = fp.read(min(COPY_CHUNK, left))
+        if not chunk:
+            break
+        if chunk.count(0xFF) != len(chunk):
+            return False
+        left -= len(chunk)
+    return True
+
+
 def _carve_length(fp: BinaryIO, off: int, kind: str, size: int) -> int | None:
     fp.seek(off)
     head = fp.read(128)
@@ -1323,6 +1422,8 @@ HANDLERS: dict[str, Callable[[Extractor, Artifact], list[Artifact]]] = {
     "android_sparse": Extractor.h_android_sparse,
     "parrot_plf": Extractor.h_parrot_plf,
     "dji_imah": Extractor.h_dji_imah,
+    "esp_image": Extractor.h_esp_image,
+    "esp_flash": Extractor.h_esp_flash,
     "ihex": Extractor.h_ihex,
     "px4": Extractor.h_fw_json,
     "apj": Extractor.h_fw_json,

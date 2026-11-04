@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import gzip
+import hashlib
 import io
 import json
 import os
@@ -475,3 +476,54 @@ def cromfs(files: dict[str, bytes]) -> bytes:
     out += blob + blocks
     assert len(out) == fsize
     return bytes(out)
+
+
+# ----------------------------------------------------------------------------- Espressif
+def esp_app_desc(project: str, version: str, idf_ver: str, date: str = "Jan  1 2026", time: str = "12:00:00") -> bytes:
+    """esp_app_desc_t (256 bytes) as ESP-IDF places it at the start of the first flash data segment."""
+    d = struct.pack("<II8x", 0xABCD5432, 0) + version.encode().ljust(32, b"\0") + project.encode().ljust(32, b"\0")
+    d += time.encode().ljust(16, b"\0") + date.encode().ljust(16, b"\0") + idf_ver.encode().ljust(32, b"\0")
+    return (d + hashlib.sha256(project.encode()).digest()).ljust(256, b"\0")
+
+
+def esp_image(segments: list[tuple[int, bytes]], entry: int = 0x40080400, chip_id: int | None = 0,
+              hash_appended: bool = False) -> bytes:
+    """Espressif application image in esptool's layout; ``chip_id=None`` gives the ESP8266 (v1) header."""
+    hdr = bytes([0xE9, len(segments), 2, 0x20]) + struct.pack("<I", entry)
+    if chip_id is not None:
+        hdr += bytes([0xEE, 0, 0, 0]) + struct.pack("<H", chip_id) + bytes(9) + bytes([1 if hash_appended else 0])
+    body, c = b"", 0xEF
+    for addr, data in segments:
+        body += struct.pack("<II", addr, len(data)) + data
+        for b in data:
+            c ^= b
+    img = hdr + body
+    img += b"\0" * (15 - len(img) % 16) + bytes([c])
+    return img + hashlib.sha256(img).digest() if hash_appended else img
+
+
+def esp_partition_table(entries: list[tuple[str, int, int, int, int, int]], md5: bool = True) -> bytes:
+    """ESP-IDF partition table: (label, type, subtype, offset, size, flags) entries."""
+    t = b""
+    for label, typ, sub, off, size, flags in entries:
+        t += b"\xaa\x50" + bytes([typ, sub]) + struct.pack("<II", off, size) + label.encode().ljust(16, b"\0")
+        t += struct.pack("<I", flags)
+    if md5:
+        t += b"\xeb\xeb" + b"\xff" * 14 + hashlib.md5(t, usedforsecurity=False).digest()
+    return t.ljust(0xC00, b"\xff")
+
+
+def esp_flash_dump(bootloader: bytes, table: bytes, parts: dict[int, bytes], size: int = 0x200000,
+                   boot_offset: int = 0x1000) -> bytes:
+    d = bytearray(b"\xff" * size)
+    d[boot_offset:boot_offset + len(bootloader)] = bootloader
+    d[0x8000:0x8000 + len(table)] = table
+    for off, data in parts.items():
+        d[off:off + len(data)] = data
+    return bytes(d)
+
+
+def xtensa_code(n: int = 64) -> bytes:
+    """Bytes with the density of Xtensa windowed-ABI prologues/epilogues found in ESP32 code."""
+    rnd = random.Random(7)
+    return b"".join(b"\x36\x41\x00" + bytes(rnd.randrange(256) for _ in range(13)) + b"\x1d\xf0" for _ in range(n))

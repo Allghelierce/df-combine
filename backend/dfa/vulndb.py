@@ -60,14 +60,33 @@ UPSTREAM: dict[str, tuple[tuple[str, ...], object]] = {
     "nuttx": (("github.com/apache/nuttx", "apache/incubator-nuttx"), lambda v: [f"nuttx-{v}", v]),
     "px4": (("github.com/px4/px4-autopilot", "github.com/PX4/PX4-Autopilot", "github.com/PX4/Firmware"),
             lambda v: [f"v{v}", v]),
+    "ardupilot": (("github.com/ardupilot/ardupilot",), lambda v: _ardupilot_tags(v, None)),
+    "esp-idf": (("github.com/espressif/esp-idf",), lambda v: [f"v{v}", f"v{_describe_base(v)}"]),
+    "freertos": (("github.com/freertos/freertos-kernel",), lambda v: [f"V{v}", f"V{v}-kernel-only", f"v{v}"]),
+    "zephyr": (("github.com/zephyrproject-rtos/zephyr",), lambda v: [f"v{v}", f"zephyr-v{v}"]),
 }
+# ArduPilot tags releases per vehicle ("Copter-4.5.7", "Plane-4.5.7", ...); the detected vehicle selects them.
+_AP_VEHICLE_TAGS = {"ArduCopter": ("Copter", "ArduCopter"), "ArduPlane": ("Plane", "ArduPlane"),
+                    "ArduRover": ("Rover", "APMrover2", "ArduRover"), "ArduSub": ("Sub", "ArduSub"),
+                    "AntennaTracker": ("Tracker", "AntennaTracker"), "Blimp": ("Blimp",), "AP_Periph": ("AP_Periph",)}
+VARIANT_TAGS = {"ardupilot": lambda v, variant: _ardupilot_tags(v, variant)}
+
+
+def _ardupilot_tags(v: str, vehicle: str | None) -> list[str]:
+    prefixes = _AP_VEHICLE_TAGS.get(vehicle or "") or tuple(p for ps in _AP_VEHICLE_TAGS.values() for p in ps)
+    return [f"{p}-{v}" for p in prefixes]
+
+
+def _describe_base(v: str) -> str:
+    """'5.0-beta1-427-g4532e6e0b2-dirty' -> '5.0-beta1' (the release tag a git-describe version builds on)."""
+    return re.sub(r"(?:-\d+-g[0-9a-f]{6,})?(?:-dirty?)?$", "", v)
 _REPO_FRAGMENTS = {frag.lower(): name for name, (frags, _f) in UPSTREAM.items() for frag in frags}
 
 
 def _repo_key(repo: str) -> str | None:
     r = repo.lower().rstrip("/").removesuffix(".git")
     for frag, name in _REPO_FRAGMENTS.items():
-        if frag.lower() in r:
+        if r.endswith(frag) or f"{frag}/" in r:  # whole path components: "apache/nuttx" != "apache/nuttx-apps"
             return name if name not in ("curl",) else "libcurl"
     return None
 
@@ -400,11 +419,12 @@ class VulnDB:
                 return row[0]
         return None
 
-    def match_upstream(self, component: str, version: str) -> list[VulnMatch]:
+    def match_upstream(self, component: str, version: str, variant: str | None = None) -> list[VulnMatch]:
         spec = UPSTREAM.get(component)
         if not spec or not version:
             return []
-        tags = list(dict.fromkeys(spec[1](version)))
+        fn = VARIANT_TAGS.get(component)
+        tags = list(dict.fromkeys(fn(version, variant) if fn else spec[1](version)))
         out = []
         placeholders = ",".join("?" * len(tags))  # only '?' placeholders are interpolated
         q = f"SELECT DISTINCT vuln_id FROM upstream WHERE component=? AND tag IN ({placeholders})"  # noqa: S608

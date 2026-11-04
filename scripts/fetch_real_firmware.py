@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Download legitimate, publicly distributed drone firmware used by the real-firmware tests.
+"""Download legitimate, publicly distributed firmware used by the real-firmware tests.
 
-Only official open-source builds are listed (PX4 Autopilot, BSD-3-Clause, published by the PX4
-project in its public firmware bucket that QGroundControl downloads from). Files are verified
-against pinned SHA-256 hashes; nothing is committed to the repository.
+Only official open-source builds are listed: PX4 Autopilot (BSD-3-Clause, published by the PX4 project in
+the public firmware bucket that QGroundControl downloads from) and the Espressif image fixtures that ship
+with esptool's own test suite (GPL-2.0, tag v4.8.1). Files are verified against pinned SHA-256 hashes;
+nothing is committed to the repository.
 
 Usage: python scripts/fetch_real_firmware.py [dest]   (default: fixtures/real)
 """
@@ -15,8 +16,9 @@ import urllib.request
 from pathlib import Path
 
 BASE = "https://px4-travis.s3.amazonaws.com/Firmware/stable/"
+ESPTOOL = "https://raw.githubusercontent.com/espressif/esptool/v4.8.1/test/images/"
 SAMPLES = {
-    # name: (sha256, size, description)
+    # name: (sha256, size, description[, url])
     "px4_fmu-v5_default.px4": ("b50b275507da4cb0e218c943c2aff5359e3f0914c18f6b563494b925c0a0e403", 1881838,
                                "PX4 v1.17.0 for FMUv5 (Pixhawk 4), official .px4 container"),
     "px4_fmu-v6x_default.px4": ("3206a5f445d85be730a4f6158d8fdd414b9cfab27fa84bbc05c6a6752deac284", 1824468,
@@ -29,20 +31,32 @@ SAMPLES = {
                                "PX4 v1.17.0 FMUv2 unstripped ELF (symbols + DWARF)"),
     "px4_fmu-v5_default.elf": ("4ff1bbb8b9ae1be361b2d5e0993fce4981bacf17373e34f20954bb4c0e219432", 47202280,
                                "PX4 v1.17.0 FMUv5 unstripped ELF (symbols + DWARF)"),
+    "esp/bootloader_esp32.bin": ("914a9797c100fd51a4845c2bfcd9f2206f2a72552c697531090dc6df41e1e90e", 7888,
+                                 "ESP-IDF 2nd-stage bootloader for ESP32 (esptool test fixture)", ESPTOOL),
+    "esp/bootloader_esp32c3.bin": ("ec4834595c67a4d353c2516df35e37f9152bb4de12d4d4671fe35a08b51cc9d5", 17744,
+                                   "ESP-IDF bootloader for ESP32-C3, RISC-V, SHA-256 appended", ESPTOOL),
+    "esp/esp8266_deepsleep.bin": ("ea4ecfa2cf39210dcf0e030cd994952b63dad03b681e4eb0141bf6fc5ebfe902", 297632,
+                                  "Arduino ESP8266 application (eboot + app image)", ESPTOOL),
+    "esp/esp_idf_blink_esp32s2.bin": ("a62c4d60cfab37953fd76124fa93ea5bafa3e2962fd75ad933b2a75b4d941d12", 182368,
+                                      "ESP-IDF v5.0 'blink' application for ESP32-S2", ESPTOOL),
+    "esp/partitions_singleapp.bin": ("88449960589ae349edd5afe868b7ef6a3592fbe79b161c14267d2811f157ec8a", 96,
+                                     "ESP-IDF partition table (single factory app)", ESPTOOL),
 }
 
 
 def fetch(dest: Path, names: list[str] | None = None) -> dict[str, Path]:
     dest.mkdir(parents=True, exist_ok=True)
     out = {}
-    for name, (sha, size, desc) in SAMPLES.items():
+    for name, (sha, size, desc, *url) in SAMPLES.items():
         if names and name not in names:
             continue
         p = dest / name
+        p.parent.mkdir(parents=True, exist_ok=True)
         if not (p.exists() and hashlib.sha256(p.read_bytes()).hexdigest() == sha):
             print(f"downloading {name} ({size:,} bytes) - {desc}")
             tmp = p.with_suffix(p.suffix + ".part")
-            with urllib.request.urlopen(BASE + name, timeout=300) as r, tmp.open("wb") as fp:  # noqa: S310
+            src = (url[0] if url else BASE) + Path(name).name
+            with urllib.request.urlopen(src, timeout=300) as r, tmp.open("wb") as fp:  # noqa: S310
                 while chunk := r.read(1 << 20):
                     fp.write(chunk)
             digest = hashlib.sha256(tmp.read_bytes()).hexdigest()

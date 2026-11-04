@@ -127,15 +127,26 @@ class FactAdapter(ToolAdapter):
                 fs = normalize(fw, ctx.original_name if i == 0 else f"{ctx.original_name} > {Path(t['path']).name}")
                 findings += fs
                 components += fact_components(fw, t["label"])
-                file_types = sorted((fw.get("analysis", {}).get("file_type", {}) or {}).get("summary", {}) or {})
+                analysis = fw.get("analysis", {}) or {}
+                file_types = sorted((analysis.get("file_type", {}) or {}).get("summary", {}) or {})
+                unpack = sorted((analysis.get("unpacker", {}) or {}).get("summary", {}) or {})
+                with_results = sorted(p for p, r in analysis.items()
+                                      if isinstance(r, dict) and r.get("summary") and p not in ("file_type", "unpacker"))
                 submissions.append({"target": t["label"], "uid": uid, "status": "completed",
-                                    "files_analysed": meta.get("total_files_in_firmware"),
-                                    "file_types": file_types[:15], "findings": len(fs)})
+                                    "files_analysed": 1 + int(meta.get("number_of_included_files") or 0),
+                                    "file_types": file_types[:15], "unpacker": unpack, "findings": len(fs),
+                                    "plugins_with_results": with_results})
         ok = len(targets) - failed
-        msg = "; ".join(f"{s['target']}: " + (f"FACT analysed {s.get('files_analysed', '?')} file(s), "
-                                               f"{s.get('findings', 0)} finding(s)" if s["status"] == "completed"
-                                               else s["status"] + (f" ({s.get('error', '')})" if s.get("error") else ""))
-                        for s in submissions)
+        def describe(s: dict) -> str:
+            if s["status"] != "completed":
+                return s["status"] + (f" ({s.get('error', '')})" if s.get("error") else "")
+            text = (f"FACT analysed {s['files_analysed']} file(s) [{', '.join(s['file_types'][:4]) or 'no type'}], "
+                    f"unpacker: {', '.join(s['unpacker']) or 'n/a'}, {s['findings']} finding(s)")
+            if not s["plugins_with_results"]:
+                text += "; no FACT plug-in produced results for this input"
+            return text
+
+        msg = "; ".join(f"{s['target']}: {describe(s)}" for s in submissions)
         return AdapterResult("completed" if ok else ("timeout" if any(s["status"] == "timeout" for s in submissions)
                                                      else "failed"),
                              msg, findings, str(out_dir), {"submissions": submissions, "fact_url": self.settings.fact_url,
