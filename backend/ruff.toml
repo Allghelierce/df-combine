@@ -1,0 +1,18 @@
+line-length = 130
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP", "S"]
+ignore = [
+  "S101",   # assert is fine in tests and internal invariants
+  "S603",   # subprocess without shell: commands are built from fixed argv lists
+  "S607",   # partial executable paths (docker, fwanalyzer) are resolved via PATH by design
+  "S108",   # /tmp paths only appear in tests/fixtures
+  "B008",   # FastAPI dependency injection idiom
+  "UP042",  # str+Enum kept for pydantic/JSON friendliness
+  "S104",   # we *detect* 0.0.0.0 bindings in configs, we never bind
+  "S103",   # 0o755 on extracted directories is intended
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["S", "B", "E501"]

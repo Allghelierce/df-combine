@@ -1,0 +1,47 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: System tools used by extraction/fixtures
+        run: sudo apt-get update && sudo apt-get install -y squashfs-tools e2fsprogs e2tools mtools cpio mtd-utils
+      - run: python -m pip install -r backend/requirements-dev.txt ubi_reader==0.8.16 jefferson==0.4.8
+      - run: ruff check dfa tests
+        working-directory: backend
+      - run: python -m pytest -q
+        working-directory: backend
+
+  frontend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+        working-directory: frontend
+      - run: npx tsc -b --noEmit && npx vitest run && npx vite build
+        working-directory: frontend
+
+  sandbox-image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f docker/sandbox.Dockerfile -t dfa-sandbox:latest .
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y squashfs-tools e2fsprogs
+      - run: python -m pip install -r backend/requirements-dev.txt
+      - name: Docker-isolated sandbox tests
+        run: python -m pytest -q tests/test_sandbox.py
+        working-directory: backend
