@@ -1,0 +1,826 @@
+"""Safe, recursive firmware unpacker.
+
+Security properties (all enforced here, independent of the outer sandbox):
+
+* Member names are normalised and confined to the output directory; absolute
+  paths, ``..`` components, NUL bytes and over-long names are rejected.
+* Symlinks, hardlinks, device nodes and FIFOs are never materialised.  They
+  are recorded in the manifest (``links``) for analysis instead.
+* Every byte written and every file created is charged to an
+  :class:`ExtractionBudget` (total size, per-file size, file count, nesting
+  depth, compression ratio).  Exceeding a limit aborts that container and is
+  reported as a warning; the rest of the analysis continues.
+* Data is streamed - declared sizes in archive headers are never trusted.
+* External unpackers (unsquashfs, debugfs, mtools) run with rlimits, a
+  timeout and a watchdog on the output directory size, and their output tree
+  is sanitised afterwards.
+* Nothing extracted is ever executed.
+"""
+from __future__ import annotations
+
+import bz2
+import hashlib
+import lzma
+import os
+import resource
+import shutil
+import stat
+import struct
+import subprocess
+import tarfile
+import time
+import zipfile
+import zlib
+from dataclasses import asdict, dataclass, field
+from pathlib import Path, PurePosixPath
+from typing import BinaryIO, Callable, Iterable
+
+from .formats import px4json
+from .formats.ihex import IHexError, parse_ihex
+from .formats.simplefs import (FormatError, iter_cpio, iter_romfs, parse_dfuse,
+                               parse_partitions, romfs_size)
+from .identify import FormatInfo, detect_format, parse_uimage_header
+from .limits import ExtractionBudget, LimitExceeded, Limits
+
+COPY_CHUNK = 1024 * 1024
+MAX_NAME = 255
+MAX_PATH_DEPTH = 64
+
+
+class UnsafePath(ValueError):
+    pass
+
+
+@dataclass
+class Artifact:
+    id: int
+    path: str  # relative to the extraction root ("files/..."); "<input>" for the upload
+    name: str
+    size: int
+    sha256: str
+    format: str
+    format_description: str
+    parent_id: int | None
+    depth: int
+    origin: str  # input | extracted | decoded | carved | partition
+    mode: int | None = None  # original permission bits from the container, if known
+    uid: int | None = None
+    gid: int | None = None
+    details: dict = field(default_factory=dict)
+    extraction: str | None = None  # None | "ok" | "partial" | "failed" | "skipped" | "unsupported"
+    extraction_note: str | None = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class LinkRecord:
+    artifact_parent: int
+    path: str
+    kind: str  # symlink | hardlink | device | fifo | socket
+    target: str | None
+
+
+@dataclass
+class ExtractionResult:
+    artifacts: list[Artifact] = field(default_factory=list)
+    links: list[LinkRecord] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    container_metadata: dict = field(default_factory=dict)
+    filesystems: list[dict] = field(default_factory=list)
+    limits_hit: list[str] = field(default_factory=list)
+    stats: dict = field(default_factory=dict)
+
+
+# ----------------------------------------------------------------- helpers
+def safe_member_path(name: str) -> PurePosixPath:
+    """Normalise an archive member name to a safe relative path."""
+    if "\x00" in name:
+        raise UnsafePath("NUL byte in member name")
+    name = name.replace("\\", "/")
+    # Windows drive letters ("C:foo") are treated as absolute.
+    if len(name) >= 2 and name[1] == ":" and name[0].isalpha():
+        raise UnsafePath(f"absolute (drive) path: {name!r}")
+    parts = []
+    for part in name.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            raise UnsafePath(f"path traversal component in {name!r}")
+        if len(part.encode("utf-8", "replace")) > MAX_NAME:
+            raise UnsafePath("member name component too long")
+        parts.append(part)
+    if not parts:
+        raise UnsafePath("empty member name")
+    if len(parts) > MAX_PATH_DEPTH:
+        raise UnsafePath("member path too deep")
+    return PurePosixPath(*parts)
+
+
+def _confined(base: Path, rel: PurePosixPath) -> Path:
+    target = base.joinpath(*rel.parts)
+    base_r = base.resolve()
+    # Parent may not exist yet; resolve the deepest existing ancestor.
+    probe = target
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    if probe.is_symlink():
+        raise UnsafePath("symlink in output path")
+    if not str(probe.resolve()).startswith(str(base_r)):
+        raise UnsafePath("path escapes extraction directory")
+    return target
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fp:
+        for chunk in iter(lambda: fp.read(COPY_CHUNK), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _sanitize_component(name: str) -> str:
+    keep = "".join(c if c.isalnum() or c in "._-" else "_" for c in name)[:80]
+    return keep or "blob"
+
+
+# ----------------------------------------------------------------- extractor
+class Extractor:
+    def __init__(self, work_dir: Path, limits: Limits | None = None,
+                 progress: Callable[[str], None] | None = None) -> None:
+        self.work_dir = work_dir
+        self.root = work_dir / "files"
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.limits = limits or Limits()
+        self.budget = ExtractionBudget(self.limits)
+        self.result = ExtractionResult()
+        self._next_id = 0
+        self._paths: dict[int, Path] = {}
+        self._pending_meta: dict[str, dict] = {}
+        self._progress = progress or (lambda msg: None)
+        self._external_tools = {t: shutil.which(t) for t in ("unsquashfs", "debugfs", "mcopy")}
+
+    # ---- public -----------------------------------------------------------
+    def run(self, input_path: Path, original_name: str) -> ExtractionResult:
+        t0 = time.monotonic()
+        info = detect_format(input_path)
+        root = self._register(input_path, "<input>", original_name, info, None, 0, "input")
+        self._process(root)
+        self.result.stats = {
+            "artifacts": len(self.result.artifacts),
+            "bytes_written": self.budget.bytes_written,
+            "files_created": self.budget.files_created,
+            "duration_s": round(time.monotonic() - t0, 3),
+            "external_tools": {k: bool(v) for k, v in self._external_tools.items()},
+        }
+        return self.result
+
+    def path_of(self, artifact_id: int) -> Path:
+        return self._paths[artifact_id]
+
+    # ---- registration -----------------------------------------------------
+    def _register(self, path: Path, rel: str, name: str, info: FormatInfo, parent: int | None,
+                  depth: int, origin: str, **kw) -> Artifact:
+        art = Artifact(id=self._next_id, path=rel, name=name, size=path.stat().st_size,
+                       sha256=_sha256(path), format=info.format,
+                       format_description=info.description, parent_id=parent, depth=depth,
+                       origin=origin, details=dict(info.details), **kw)
+        self._next_id += 1
+        self._paths[art.id] = path
+        self.result.artifacts.append(art)
+        return art
+
+    def _out_dir(self, art: Artifact) -> Path:
+        d = self.root / f"{art.id:05d}_{_sanitize_component(art.name)}.d"
+        d.mkdir(parents=True, exist_ok=False)
+        return d
+
+    def _rel(self, p: Path) -> str:
+        return str(p.relative_to(self.work_dir))
+
+    # ---- writing ----------------------------------------------------------
+    def _write_stream(self, src: BinaryIO, dest: Path, max_bytes: int | None = None,
+                      compressed_size: int | None = None, label: str = "") -> int:
+        """Copy a stream to ``dest`` while charging the budget."""
+        self.budget.charge_file()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+        written = 0
+        limit = self.limits.max_file_bytes if max_bytes is None else min(max_bytes, self.limits.max_file_bytes)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                while True:
+                    chunk = src.read(COPY_CHUNK)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > limit:
+                        raise LimitExceeded(f"'{label or dest.name}' exceeds per-file size limit ({limit} bytes)")
+                    self.budget.charge_bytes(len(chunk), file_total=written)
+                    if compressed_size is not None:
+                        self.budget.check_ratio(compressed_size, written, label or dest.name)
+                    out.write(chunk)
+        except BaseException:
+            dest.unlink(missing_ok=True)
+            raise
+        return written
+
+    def _write_bytes(self, data: bytes, dest: Path) -> None:
+        import io
+        self._write_stream(io.BytesIO(data), dest)
+
+    def _child(self, parent: Artifact, path: Path, name: str, origin: str, **kw) -> Artifact:
+        info = detect_format(path)
+        return self._register(path, self._rel(path), name, info, parent.id, parent.depth + 1, origin, **kw)
+
+    # ---- recursion --------------------------------------------------------
+    def _process(self, art: Artifact) -> None:
+        handler = HANDLERS.get(art.format)
+        carve = art.format in ("raw", "cortexm_raw") and art.size >= 4096
+        if handler is None and not carve:
+            return
+        if art.depth >= self.limits.max_depth:
+            art.extraction = "skipped"
+            art.extraction_note = f"maximum nesting depth ({self.limits.max_depth}) reached"
+            self.result.warnings.append(f"{art.name}: {art.extraction_note}")
+            self.result.limits_hit.append("max_depth")
+            return
+        self._progress(f"unpacking {art.name} ({art.format})")
+        children: list[Artifact] = []
+        try:
+            if handler is not None:
+                children = handler(self, art)
+            else:
+                children = self._carve(art)
+                if not children:
+                    return
+            art.extraction = "ok"
+        except LimitExceeded as exc:
+            art.extraction = "partial"
+            art.extraction_note = f"limit exceeded: {exc}"
+            self.result.warnings.append(f"{art.name}: {art.extraction_note}")
+            self.result.limits_hit.append(str(exc))
+            children = [a for a in self.result.artifacts if a.parent_id == art.id]
+        except UnsupportedFormat as exc:
+            art.extraction = "unsupported"
+            art.extraction_note = str(exc)
+            self.result.warnings.append(f"{art.name}: {exc}")
+            return
+        except (FormatError, IHexError, px4json.ContainerError, zipfile.BadZipFile, tarfile.TarError,
+                zlib.error, lzma.LZMAError, OSError, EOFError, ValueError, UnsafePath) as exc:
+            art.extraction = "failed"
+            art.extraction_note = f"{type(exc).__name__}: {exc}"
+            self.result.warnings.append(f"{art.name}: extraction failed ({art.extraction_note})")
+            children = [a for a in self.result.artifacts if a.parent_id == art.id]
+        for child in children:
+            if self.budget.files_created > self.limits.max_files:
+                break
+            self._process(child)
+
+    # ---- tree registration for directory-producing handlers --------------
+    def _register_tree(self, parent: Artifact, out_dir: Path) -> list[Artifact]:
+        children = []
+        for dirpath, dirnames, filenames in os.walk(out_dir):
+            dirnames.sort()
+            for fn in sorted(filenames):
+                p = Path(dirpath) / fn
+                if p.is_symlink() or not p.is_file():
+                    continue
+                rel_inside = "/" + str(p.relative_to(out_dir))
+                meta = self._pending_meta.pop(str(p), {})
+                children.append(self._child(parent, p, rel_inside, "extracted", **meta))
+        return children
+
+    def _note_meta(self, path: Path, **meta) -> None:
+        self._pending_meta[str(path)] = meta
+
+    def _record_link(self, parent: Artifact, name: str, kind: str, target: str | None) -> None:
+        if len(self.result.links) < 50_000:
+            self.result.links.append(LinkRecord(parent.id, name, kind, target))
+
+    def _record_fs(self, parent: Artifact, fs_type: str, out_dir: Path, **extra) -> None:
+        self.result.filesystems.append({"artifact_id": parent.id, "type": fs_type,
+                                        "root": self._rel(out_dir), "name": parent.name, **extra})
+
+    # ---- handlers ----------------------------------------------------------
+    def h_zip(self, art: Artifact) -> list[Artifact]:
+        src = self.path_of(art.id)
+        out = self._out_dir(art)
+        with zipfile.ZipFile(src) as zf:
+            infos = zf.infolist()
+            if len(infos) > self.limits.max_files:
+                raise LimitExceeded(f"zip declares {len(infos)} entries (limit {self.limits.max_files})")
+            for zi in infos:
+                mode = (zi.external_attr >> 16) & 0xFFFF
+                if zi.is_dir():
+                    continue
+                if stat.S_ISLNK(mode):
+                    target = zf.read(zi)[:4096].decode("utf-8", "replace") if zi.file_size <= 4096 else None
+                    self._record_link(art, zi.filename, "symlink", target)
+                    continue
+                if zi.flag_bits & 0x1:
+                    self.result.warnings.append(f"{art.name}: encrypted member '{zi.filename}' skipped")
+                    continue
+                try:
+                    rel = safe_member_path(zi.filename)
+                    dest = _confined(out, rel)
+                except UnsafePath as exc:
+                    self.result.warnings.append(f"{art.name}: rejected member {zi.filename!r}: {exc}")
+                    continue
+                if dest.exists():
+                    self.result.warnings.append(f"{art.name}: duplicate member {zi.filename!r} skipped")
+                    continue
+                with zf.open(zi) as member:
+                    self._write_stream(member, dest, compressed_size=max(zi.compress_size, 1),
+                                       label=zi.filename)
+                self._note_meta(dest, mode=(mode & 0o7777) or None)
+        self._record_fs(art, "zip", out)
+        return self._register_tree(art, out)
+
+    def h_tar(self, art: Artifact) -> list[Artifact]:
+        src = self.path_of(art.id)
+        out = self._out_dir(art)
+        with tarfile.open(src, mode="r:") as tf:
+            count = 0
+            for ti in tf:
+                count += 1
+                if count > self.limits.max_files:
+                    raise LimitExceeded(f"tar has more than {self.limits.max_files} entries")
+                if ti.isdir():
+                    continue
+                if ti.issym() or ti.islnk():
+                    self._record_link(art, ti.name, "symlink" if ti.issym() else "hardlink", ti.linkname[:4096])
+                    continue
+                if not ti.isreg():
+                    kind = "device" if (ti.ischr() or ti.isblk()) else "fifo" if ti.isfifo() else "other"
+                    self._record_link(art, ti.name, kind, None)
+                    continue
+                try:
+                    rel = safe_member_path(ti.name)
+                    dest = _confined(out, rel)
+                except UnsafePath as exc:
+                    self.result.warnings.append(f"{art.name}: rejected member {ti.name!r}: {exc}")
+                    continue
+                if dest.exists():
+                    self.result.warnings.append(f"{art.name}: duplicate member {ti.name!r} skipped")
+                    continue
+                fobj = tf.extractfile(ti)
+                if fobj is None:
+                    continue
+                self._write_stream(fobj, dest, label=ti.name)
+                self._note_meta(dest, mode=ti.mode & 0o7777, uid=ti.uid, gid=ti.gid)
+        self._record_fs(art, "tar", out)
+        return self._register_tree(art, out)
+
+    def _decompress(self, art: Artifact, opener: Callable[[Path], BinaryIO], suffixes: Iterable[str]) -> list[Artifact]:
+        src = self.path_of(art.id)
+        out = self._out_dir(art)
+        base = Path(art.name).name or "data"
+        for suf in suffixes:
+            if base.lower().endswith(suf):
+                base = base[: -len(suf)] + (".tar" if suf in (".tgz", ".tbz2", ".txz") else "")
+                break
+        else:
+            base = base + ".decompressed"
+        dest = out / _sanitize_component(base)
+        with opener(src) as stream:
+            self._write_stream(stream, dest, compressed_size=art.size, label=art.name)
+        return [self._child(art, dest, base, "decoded")]
+
+    def h_gzip(self, art: Artifact) -> list[Artifact]:
+        import gzip
+        return self._decompress(art, lambda p: gzip.open(p, "rb"), (".gz", ".tgz"))
+
+    def h_bzip2(self, art: Artifact) -> list[Artifact]:
+        return self._decompress(art, lambda p: bz2.open(p, "rb"), (".bz2", ".tbz2"))
+
+    def h_xz(self, art: Artifact) -> list[Artifact]:
+        return self._decompress(art, lambda p: lzma.open(p, "rb"), (".xz", ".txz"))
+
+    def h_ihex(self, art: Artifact) -> list[Artifact]:
+        src = self.path_of(art.id)
+        if art.size > 256 * 1024**2:
+            raise LimitExceeded("Intel HEX file larger than 256 MiB")
+        img = parse_ihex(src.read_bytes(), max_span=min(self.limits.max_file_bytes, 64 * 1024**2))
+        out = self._out_dir(art)
+        dest = out / "image.bin"
+        self._write_bytes(img.data, dest)
+        art.details.update({"base_address": hex(img.base_address), "records": img.record_count,
+                            "segments": [(hex(a), n) for a, n in img.segments[:32]],
+                            "start_address": hex(img.start_address) if img.start_address is not None else None})
+        child = self._child(art, dest, "image.bin", "decoded")
+        child.details["load_address"] = hex(img.base_address)
+        return [child]
+
+    def h_fw_json(self, art: Artifact) -> list[Artifact]:
+        src = self.path_of(art.id)
+        if art.size > 128 * 1024**2:
+            raise LimitExceeded("JSON firmware container larger than 128 MiB")
+        cont = px4json.parse_container(src.read_bytes(), self.limits.max_file_bytes)
+        art.details.update({"container_platform": cont.platform, **cont.metadata})
+        self.result.container_metadata[str(art.id)] = {"platform": cont.platform, **cont.metadata}
+        out = self._out_dir(art)
+        children = []
+        for name, data in cont.images.items():
+            dest = out / name
+            self._write_bytes(data, dest)
+            children.append(self._child(art, dest, name, "decoded"))
+        return children
+
+    def h_uimage(self, art: Artifact) -> list[Artifact]:
+        src = self.path_of(art.id)
+        with src.open("rb") as fp:
+            hdr = parse_uimage_header(fp.read(64))
+            if hdr is None:
+                raise FormatError("invalid uImage header")
+            art.details.update(hdr)
+            size = min(hdr["data_size"], art.size - 64)
+            fp.seek(64)
+            out = self._out_dir(art)
+            ext = {"gzip": ".gz", "bzip2": ".bz2", "lzma": ".lzma"}.get(hdr["compression"], ".bin")
+            dest = out / f"payload{ext}"
+            self._write_stream(_Bounded(fp, size), dest, label="uImage payload")
+        return [self._child(art, dest, f"payload{ext}", "decoded")]
+
+    def h_cpio(self, art: Artifact) -> list[Artifact]:
+        src = self.path_of(art.id)
+        out = self._out_dir(art)
+        with src.open("rb") as fp:
+            entries = list(iter_cpio(fp, art.size, self.limits.max_files))
+            for e in entries:
+                self._materialize_entry(art, out, fp, e)
+        self._record_fs(art, "cpio", out)
+        return self._register_tree(art, out)
+
+    def h_romfs(self, art: Artifact, base: int = 0) -> list[Artifact]:
+        src = self.path_of(art.id)
+        out = self._out_dir(art)
+        with src.open("rb") as fp:
+            for e in list(iter_romfs(fp, base, art.size, self.limits.max_files)):
+                self._materialize_entry(art, out, fp, e)
+        self._record_fs(art, "romfs", out)
+        return self._register_tree(art, out)
+
+    def _materialize_entry(self, art: Artifact, out: Path, fp: BinaryIO, e) -> None:
+        if e.kind == "dir":
+            return
+        if e.kind != "file":
+            self._record_link(art, e.name, e.kind, e.link_target)
+            return
+        try:
+            rel = safe_member_path(e.name)
+            dest = _confined(out, rel)
+        except UnsafePath as exc:
+            self.result.warnings.append(f"{art.name}: rejected member {e.name!r}: {exc}")
+            return
+        if dest.exists():
+            return
+        fp.seek(e.offset)
+        self._write_stream(_Bounded(fp, e.size), dest, label=e.name)
+        self._note_meta(dest, mode=e.mode, uid=e.uid, gid=e.gid)
+
+    def h_dfu(self, art: Artifact) -> list[Artifact]:
+        src = self.path_of(art.id)
+        out = self._out_dir(art)
+        children = []
+        with src.open("rb") as fp:
+            meta, elements = parse_dfuse(fp, art.size)
+            art.details.update(meta)
+            for i, el in enumerate(elements):
+                name = f"target{el.target}_{el.address:08x}.bin"
+                dest = out / name
+                fp.seek(el.offset)
+                self._write_stream(_Bounded(fp, el.size), dest, label=name)
+                c = self._child(art, dest, name, "decoded")
+                c.details["load_address"] = hex(el.address)
+                if el.target_name:
+                    c.details["target_name"] = el.target_name
+                children.append(c)
+        return children
+
+    def h_disk_image(self, art: Artifact) -> list[Artifact]:
+        src = self.path_of(art.id)
+        out = self._out_dir(art)
+        children = []
+        with src.open("rb") as fp:
+            scheme, parts = parse_partitions(fp, art.size)
+            art.details["partition_table"] = scheme
+            art.details["partitions"] = [asdict(p) for p in parts]
+            for p in parts:
+                name = f"partition{p.index}_{_sanitize_component(p.type_id)}.img"
+                dest = out / name
+                fp.seek(p.offset)
+                self._write_stream(_Bounded(fp, p.size), dest, label=name)
+                children.append(self._child(art, dest, name, "partition"))
+        return children
+
+    # ---- external filesystem tools ----------------------------------------
+    def _run_tool(self, art: Artifact, cmd: list[str], out: Path, env: dict | None = None) -> None:
+        limit_file = self.limits.max_file_bytes
+        remaining = self.budget.remaining_bytes
+
+        def preexec() -> None:  # pragma: no cover - runs in child
+            resource.setrlimit(resource.RLIMIT_FSIZE, (limit_file, limit_file))
+            resource.setrlimit(resource.RLIMIT_CPU, (self.limits.tool_timeout_s, self.limits.tool_timeout_s + 5))
+            os.setsid()
+
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                preexec_fn=preexec, env={"PATH": os.environ.get("PATH", ""), **(env or {})})
+        deadline = time.monotonic() + self.limits.tool_timeout_s
+        reason = None
+        while proc.poll() is None:
+            time.sleep(0.25)
+            if time.monotonic() > deadline:
+                reason = f"{cmd[0]} timed out after {self.limits.tool_timeout_s}s"
+            elif _dir_size(out) > remaining:
+                reason = f"{cmd[0]} output exceeded remaining extraction budget"
+            if reason:
+                proc.kill()
+                proc.wait()
+                break
+        output = (proc.stdout.read() if proc.stdout else b"")[-4000:].decode("utf-8", "replace")
+        art.details["tool_output_tail"] = output[-800:]
+        if reason:
+            raise LimitExceeded(reason)
+        if proc.returncode not in (0, None):
+            # Partial output is still useful; record and keep going.
+            self.result.warnings.append(f"{art.name}: {cmd[0]} exited with status {proc.returncode}")
+
+    def _sanitize_tree(self, art: Artifact, out: Path) -> None:
+        """Remove links/special files created by external tools, clamp modes, charge budget."""
+        for dirpath, dirnames, filenames in os.walk(out, followlinks=False):
+            for name in list(dirnames) + filenames:
+                p = Path(dirpath) / name
+                rel = "/" + str(p.relative_to(out))
+                st = p.lstat()
+                if stat.S_ISLNK(st.st_mode):
+                    self._record_link(art, rel, "symlink", os.readlink(p)[:4096])
+                    p.unlink()
+                    if name in dirnames:
+                        dirnames.remove(name)
+                elif stat.S_ISDIR(st.st_mode):
+                    os.chmod(p, 0o755)
+                elif stat.S_ISREG(st.st_mode):
+                    self._note_meta(p, mode=st.st_mode & 0o7777)
+                    os.chmod(p, 0o644)
+                    self.budget.charge_file()
+                    self.budget.charge_bytes(st.st_size, file_total=st.st_size)
+                else:
+                    kind = "device" if (stat.S_ISCHR(st.st_mode) or stat.S_ISBLK(st.st_mode)) else "fifo"
+                    self._record_link(art, rel, kind, None)
+                    p.unlink()
+
+    def _need_tool(self, tool: str, fs: str) -> str:
+        path = self._external_tools.get(tool)
+        if not path:
+            raise UnsupportedFormat(f"{fs} detected but '{tool}' is not installed in the extraction "
+                                    f"environment; filesystem contents were not extracted")
+        return path
+
+    def h_squashfs(self, art: Artifact) -> list[Artifact]:
+        tool = self._need_tool("unsquashfs", "SquashFS")
+        out = self._out_dir(art)
+        dest = out / "root"
+        self._run_tool(art, [tool, "-no-xattrs", "-ignore-errors", "-quiet", "-no-progress", "-d", str(dest),
+                             str(self.path_of(art.id))], out)
+        self._sanitize_tree(art, out)
+        root = dest if dest.exists() else out
+        self._record_fs(art, "squashfs", root, image_artifact=art.id)
+        return self._register_tree(art, root)
+
+    def h_ext(self, art: Artifact) -> list[Artifact]:
+        tool = self._need_tool("debugfs", "ext2/3/4 filesystem")
+        out = self._out_dir(art)
+        dest = out / "root"
+        dest.mkdir()
+        self._run_tool(art, [tool, "-R", f"rdump / {dest}", str(self.path_of(art.id))], out)
+        self._sanitize_tree(art, out)
+        self._record_fs(art, "ext", dest, image_artifact=art.id)
+        return self._register_tree(art, dest)
+
+    def h_fat(self, art: Artifact) -> list[Artifact]:
+        tool = self._need_tool("mcopy", "FAT filesystem")
+        out = self._out_dir(art)
+        dest = out / "root"
+        dest.mkdir()
+        self._run_tool(art, [tool, "-s", "-n", "-p", "-i", str(self.path_of(art.id)), "::/", str(dest)], out,
+                       env={"MTOOLS_SKIP_CHECK": "1"})
+        self._sanitize_tree(art, out)
+        self._record_fs(art, "fat", dest, image_artifact=art.id)
+        return self._register_tree(art, dest)
+
+    def h_unsupported(self, art: Artifact) -> list[Artifact]:
+        raise UnsupportedFormat(f"{art.format_description}: unpacking this format is not supported yet")
+
+    # ---- carving -----------------------------------------------------------
+    def _carve(self, art: Artifact) -> list[Artifact]:
+        """Carve well-delimited embedded objects out of raw images."""
+        src = self.path_of(art.id)
+        found: list[tuple[int, int, str]] = []  # (offset, length, kind)
+        with src.open("rb") as fp:
+            for off, kind in _scan_magics(fp, art.size, self.limits.max_carves_per_file * 8):
+                if off == 0:
+                    continue
+                if any(o <= off < o + ln for o, ln, _ in found):
+                    continue
+                length = _carve_length(fp, off, kind, art.size)
+                if length:
+                    found.append((off, length, kind))
+                if len(found) >= self.limits.max_carves_per_file:
+                    self.result.limits_hit.append("max_carves_per_file")
+                    break
+            if not found:
+                return []
+            out = self._out_dir(art)
+            children = []
+            for off, length, kind in found:
+                name = f"carved_{off:08x}.{kind}"
+                dest = out / name
+                fp.seek(off)
+                if kind == "gz":
+                    try:
+                        self._write_stream(_GzipMemberReader(fp), dest, compressed_size=max(length, 1), label=name)
+                    except (zlib.error, EOFError) as exc:
+                        dest.unlink(missing_ok=True)
+                        self.result.warnings.append(f"{art.name}: gzip stream at {off:#x} invalid ({exc})")
+                        continue
+                    name = name[:-3] + ".gunzipped"
+                    new = dest.with_name(name)
+                    dest.rename(new)
+                    dest = new
+                else:
+                    self._write_stream(_Bounded(fp, length), dest, label=name)
+                c = self._child(art, dest, name, "carved")
+                c.details["carved_offset"] = hex(off)
+                children.append(c)
+        art.details["carved_objects"] = len(children)
+        return children
+
+
+class UnsupportedFormat(Exception):
+    pass
+
+
+class _Bounded:
+    """File wrapper that yields at most ``n`` bytes from the current position."""
+
+    def __init__(self, fp: BinaryIO, n: int) -> None:
+        self.fp, self.left = fp, max(n, 0)
+
+    def read(self, size: int = -1) -> bytes:
+        if self.left <= 0:
+            return b""
+        size = self.left if size < 0 else min(size, self.left)
+        data = self.fp.read(size)
+        self.left -= len(data)
+        return data
+
+
+class _GzipMemberReader:
+    """Decompress exactly one gzip member starting at the current position."""
+
+    def __init__(self, fp: BinaryIO) -> None:
+        self.fp = fp
+        self.d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        self.tail = b""
+        self.done = False
+
+    def read(self, size: int = -1) -> bytes:
+        while not self.done:
+            data = self.tail or self.fp.read(64 * 1024)
+            if not data:
+                raise EOFError("truncated gzip stream")
+            out = self.d.decompress(data, COPY_CHUNK)
+            self.tail = self.d.unconsumed_tail
+            if self.d.eof:
+                self.done = True
+            if out:
+                return out
+        return b""
+
+
+CARVE_MAGICS = {
+    b"hsqs": "squashfs",
+    b"\x1f\x8b\x08": "gz",
+    b"\x27\x05\x19\x56": "uimage",
+    b"-rom1fs-": "romfs",
+    b"070701": "cpio",
+    b"\x7fELF": "elf",
+}
+
+
+def _scan_magics(fp: BinaryIO, size: int, max_hits: int):
+    chunk = 4 * 1024**2
+    overlap = 16
+    pos = 0
+    hits = 0
+    while pos < size:
+        fp.seek(pos)
+        block = fp.read(chunk + overlap)
+        if not block:
+            break
+        found = []
+        for magic, kind in CARVE_MAGICS.items():
+            start = 0
+            while True:
+                i = block.find(magic, start)
+                if i < 0 or i >= chunk:
+                    break
+                found.append((pos + i, kind))
+                start = i + 1
+                if len(found) > max_hits:
+                    break
+        for item in sorted(found):
+            yield item
+            hits += 1
+            if hits >= max_hits:
+                return
+        pos += chunk
+
+
+def _carve_length(fp: BinaryIO, off: int, kind: str, size: int) -> int | None:
+    fp.seek(off)
+    head = fp.read(128)
+    if kind == "squashfs":
+        if len(head) < 96:
+            return None
+        major = struct.unpack_from("<H", head, 28)[0]
+        bytes_used = struct.unpack_from("<Q", head, 40)[0]
+        if major != 4 or not (96 < bytes_used <= size - off):
+            return None
+        return bytes_used
+    if kind == "uimage":
+        hdr = parse_uimage_header(head)
+        if not hdr:
+            return None
+        if zlib.crc32(head[:4] + b"\x00\x00\x00\x00" + head[8:64]) & 0xFFFFFFFF != struct.unpack(">I", head[4:8])[0]:
+            return None
+        n = 64 + hdr["data_size"]
+        return n if off + n <= size else None
+    if kind == "romfs":
+        n = romfs_size(head)
+        return n if n and 32 <= n <= size - off else None
+    if kind == "gz":
+        flags = head[3] if len(head) > 3 else 0xFF
+        if flags & 0xE0:
+            return None
+        return size - off  # upper bound; reader stops at end of member
+    if kind == "cpio":
+        fp.seek(off)
+        window = fp.read(min(size - off, 64 * 1024**2))
+        end = window.find(b"TRAILER!!!")
+        if end < 0:
+            return None
+        return min(((end + 10 + 511) // 512) * 512, len(window))
+    if kind == "elf":
+        if len(head) < 64 or head[4] not in (1, 2) or head[5] not in (1, 2) or head[6] != 1:
+            return None
+        end = "<" if head[5] == 1 else ">"
+        if head[4] == 1:
+            shoff = struct.unpack_from(end + "I", head, 32)[0]
+            shentsize, shnum = struct.unpack_from(end + "HH", head, 46)
+        else:
+            shoff = struct.unpack_from(end + "Q", head, 40)[0]
+            shentsize, shnum = struct.unpack_from(end + "HH", head, 58)
+        n = shoff + shentsize * shnum
+        if shnum == 0 or shentsize == 0 or not (64 < n <= size - off):
+            return None
+        return n
+    return None
+
+
+def _dir_size(path: Path) -> int:
+    total = 0
+    for dirpath, _d, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(dirpath, f)).st_size
+            except OSError:
+                pass
+    return total
+
+
+HANDLERS: dict[str, Callable[[Extractor, Artifact], list[Artifact]]] = {
+    "zip": Extractor.h_zip,
+    "tar": Extractor.h_tar,
+    "gzip": Extractor.h_gzip,
+    "bzip2": Extractor.h_bzip2,
+    "xz": Extractor.h_xz,
+    "ihex": Extractor.h_ihex,
+    "px4": Extractor.h_fw_json,
+    "apj": Extractor.h_fw_json,
+    "fw_json": Extractor.h_fw_json,
+    "uimage": Extractor.h_uimage,
+    "cpio": Extractor.h_cpio,
+    "romfs": Extractor.h_romfs,
+    "dfu": Extractor.h_dfu,
+    "disk_image": Extractor.h_disk_image,
+    "squashfs": Extractor.h_squashfs,
+    "ext": Extractor.h_ext,
+    "fat": Extractor.h_fat,
+    "ubi": Extractor.h_unsupported,
+    "jffs2": Extractor.h_unsupported,
+}
+
+__all__ = ["Extractor", "Artifact", "ExtractionResult", "safe_member_path", "UnsafePath"]
