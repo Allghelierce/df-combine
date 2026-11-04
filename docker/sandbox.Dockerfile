@@ -13,8 +13,9 @@ RUN CGO_ENABLED=0 GOBIN=/out go install github.com/cruise-automation/fwanalyzer/
 FROM ubuntu:24.04
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      python3 python3-pyelftools python3-pip squashfs-tools e2fsprogs e2tools mtools cpio \
- && pip install --no-cache-dir --break-system-packages "ubi_reader==0.8.16" "jefferson==0.4.8" \
+      python3 python3-pyelftools python3-pip squashfs-tools e2fsprogs e2tools mtools cpio erofs-utils \
+ && pip install --no-cache-dir --break-system-packages "ubi_reader==0.8.16" "jefferson==0.4.8" "lz4==4.4.5" \
+      "zstandard>=0.22" "lzallright>=0.2" \
  && apt-get purge -y python3-pip && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --uid 10001 --create-home --shell /usr/sbin/nologin analyzer \

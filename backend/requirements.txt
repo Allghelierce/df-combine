@@ -6,3 +6,7 @@ python-multipart>=0.0.9
 pyelftools>=0.31
 reportlab>=4.2
 httpx>=0.27
+# Optional codecs for LZ4 / Zstandard / LZO firmware payloads (also baked into the sandbox image)
+lz4>=4.3
+zstandard>=0.22
+lzallright>=0.2

@@ -56,11 +56,12 @@ def categorize(art: Artifact, elf: dict | None, ctx: ScanContext) -> str:
         return "executable"
     if art.format in ("cortexm_raw",):
         return "firmware_image"
-    if art.format in ("squashfs", "ext", "fat", "romfs", "cromfs", "disk_image", "ubi", "ubifs", "jffs2"):
+    if art.format in ("squashfs", "ext", "fat", "romfs", "cromfs", "cramfs", "erofs", "android_sparse", "disk_image",
+                      "ubi", "ubifs", "jffs2"):
         return "filesystem_image"
-    if art.format in ("zip", "tar", "gzip", "bzip2", "xz", "lzma", "cpio"):
+    if art.format in ("zip", "tar", "gzip", "bzip2", "xz", "lzma", "zstd", "lz4", "lz4_legacy", "lzop", "cpio"):
         return "archive"
-    if art.format in ("px4", "apj", "fw_json", "ihex", "dfu", "uimage"):
+    if art.format in ("px4", "apj", "fw_json", "ihex", "dfu", "uimage", "parrot_plf", "dji_imah"):
         return "firmware_container"
     if art.format == "text":
         text = ctx.text(art) or ""
@@ -304,18 +305,6 @@ def _identification_findings(ctx: ScanContext, arts: list[Artifact], platforms) 
     from .findings import Severity as S
     out = []
     root = arts[0]
-    for a in arts:
-        if a.format in ("dji_imah", "parrot_plf"):
-            out.append(Finding(
-                title=f"Vendor firmware container not unpacked: {a.format_description}",
-                description=("The file was identified as a proprietary drone vendor container. DJI IM*H modules "
-                             "are signed and typically encrypted; Parrot PLF unpacking is not implemented. Only "
-                             "identification and metadata were produced - this is not evidence of security or "
-                             "insecurity."),
-                severity=S.info, classification=C.info, confidence=K.high, source_tool="builtin:identify",
-                rule_id=f"vendor-container-{a.format}", affected_component=ctx.where(a),
-                remediation="Analyse a decrypted/unpacked image obtained through authorised means.",
-                evidence=[Evidence("string", a.format_description)]))
     if root.format in ("raw",) and len(arts) == 1:
         ent = file_entropy(ctx.paths[root.id])
         if ent > 7.6:

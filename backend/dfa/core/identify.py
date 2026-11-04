@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .formats.cortexm import analyze_vector_table
 from .formats.ihex import looks_like_ihex
+from .formats.more import cramfs_offset
 from .formats.px4json import looks_like_container
 from .formats.simplefs import cromfs_header
 
@@ -61,12 +62,20 @@ FORMAT_DESCRIPTIONS = {
     "text": "Text file",
     "raw": "Unrecognised binary data",
     "lzma": "LZMA (alone/legacy) compressed data",
+    "zstd": "Zstandard compressed data",
+    "lz4": "LZ4 frame compressed data",
+    "lz4_legacy": "LZ4 legacy (Linux kernel) compressed data",
+    "lzop": "lzop (LZO) compressed data",
+    "cramfs": "CramFS filesystem image",
+    "erofs": "EROFS filesystem image",
+    "android_sparse": "Android sparse image",
     "dji_imah": "DJI IM*H signed/encrypted firmware module",
     "parrot_plf": "Parrot PLF firmware container",
     "empty": "Empty file",
 }
 
-CONTAINER_FORMATS = {"zip", "tar", "gzip", "bzip2", "xz", "lzma", "ihex", "px4", "apj", "fw_json",
+CONTAINER_FORMATS = {"zip", "tar", "gzip", "bzip2", "xz", "lzma", "zstd", "lz4", "lz4_legacy", "lzop", "cramfs",
+                     "erofs", "android_sparse", "parrot_plf", "dji_imah", "ihex", "px4", "apj", "fw_json",
                      "squashfs", "ext", "fat", "cpio", "uimage", "dfu", "romfs", "cromfs", "disk_image", "ubi", "ubifs", "jffs2"}
 
 
@@ -97,6 +106,20 @@ def detect_format_bytes(head: bytes, size: int) -> FormatInfo:
         return _fmt("bzip2")
     if head.startswith(b"\xfd7zXZ\x00"):
         return _fmt("xz")
+    if head[:4] == b"\x28\xb5\x2f\xfd":
+        return _fmt("zstd")
+    if head[:4] == b"\x04\x22\x4d\x18":
+        return _fmt("lz4")
+    if head[:4] == b"\x02\x21\x4c\x18":
+        return _fmt("lz4_legacy")
+    if head[:9] == b"\x89LZO\x00\r\n\x1a\n":
+        return _fmt("lzop")
+    if head[:4] == b"\x3a\xff\x26\xed":
+        return _fmt("android_sparse")
+    if cramfs_offset(head) is not None:
+        return _fmt("cramfs")
+    if len(head) >= 1028 and head[1024:1028] == b"\xe2\xe1\xf5\xe0":
+        return _fmt("erofs")
     if head[:4] in (b"hsqs", b"sqsh"):
         return _fmt("squashfs", endianness="little" if head[:4] == b"hsqs" else "big")
     if len(head) >= 1082 and head[1080:1082] == b"\x53\xef":

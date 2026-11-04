@@ -36,7 +36,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
-from .formats import px4json
+from .formats import more, px4json
 from .formats.ihex import parse_ihex
 from .formats.simplefs import (
     FormatError,
@@ -173,7 +173,7 @@ class Extractor:
         self.in_container = os.environ.get("DFA_IN_SANDBOX") == "1"
         self._progress = progress or (lambda msg: None)
         self._external_tools = {t: shutil.which(t) for t in ("unsquashfs", "debugfs", "mcopy",
-                                                             "ubireader_extract_files", "jefferson")}
+                                                             "ubireader_extract_files", "jefferson", "fsck.erofs")}
 
     # ---- public -----------------------------------------------------------
     def run(self, input_path: Path, original_name: str) -> ExtractionResult:
@@ -442,6 +442,143 @@ class Extractor:
 
     def h_lzma(self, art: Artifact) -> list[Artifact]:
         return self._decompress(art, lambda p: _LzmaReader(p, lzma.FORMAT_ALONE), (".lzma", ".lz"))
+
+    def h_zstd(self, art: Artifact) -> list[Artifact]:
+        return self._decompress(art, more.ZstdReader, (".zst", ".zstd"))
+
+    def h_lz4(self, art: Artifact) -> list[Artifact]:
+        return self._decompress(art, more.Lz4FrameReader, (".lz4",))
+
+    def h_lz4_legacy(self, art: Artifact) -> list[Artifact]:
+        return self._decompress(art, more.Lz4LegacyReader, (".lz4",))
+
+    def h_lzop(self, art: Artifact) -> list[Artifact]:
+        return self._decompress(art, more.LzopReader, (".lzo",))
+
+    def h_cramfs(self, art: Artifact) -> list[Artifact]:
+        import io
+        src = self.path_of(art.id)
+        out = self._out_dir(art)
+        with src.open("rb") as fp:
+            for e, data in more.iter_cramfs(fp, art.size, self.limits.max_files, self.limits.max_file_bytes):
+                if e.kind == "file" and data is not None:
+                    self._materialize_entry(art, out, io.BytesIO(data), e)
+                elif e.kind != "dir":
+                    self._record_link(art, e.name, e.kind, e.link_target)
+        self._record_fs(art, "cramfs", out, image_artifact=art.id)
+        return self._register_tree(art, out)
+
+    def h_android_sparse(self, art: Artifact) -> list[Artifact]:
+        """Expand an Android sparse image; DONT_CARE chunks become holes (no disk usage)."""
+        src = self.path_of(art.id)
+        out = self._out_dir(art)
+        with src.open("rb") as fp:
+            info = more.sparse_header(fp.read(28))
+            if info is None:
+                raise FormatError("invalid Android sparse header")
+            full = info.block_size * info.total_blocks
+            if full > self.limits.max_file_bytes:
+                raise LimitExceeded(f"expanded sparse image ({full} bytes) exceeds per-file limit")
+            art.details.update({"block_size": info.block_size, "blocks": info.total_blocks, "chunks": info.total_chunks})
+            dest = out / "image.raw"
+            self.budget.charge_file()
+            pos = info.file_hdr
+            with dest.open("xb") as o:
+                for _ in range(info.total_chunks):
+                    fp.seek(pos)
+                    ch = fp.read(12)
+                    if len(ch) < 12:
+                        raise FormatError("truncated sparse chunk header")
+                    ctype, _r, nblk, tsize = struct.unpack("<HHII", ch)
+                    data_off, length = pos + info.chunk_hdr, nblk * info.block_size
+                    if o.tell() + length > full:
+                        raise FormatError("sparse chunks exceed declared image size")
+                    if ctype == 0xCAC1:  # RAW
+                        fp.seek(data_off)
+                        left = length
+                        while left:
+                            chunk = fp.read(min(COPY_CHUNK, left))
+                            if not chunk:
+                                raise FormatError("truncated sparse RAW chunk")
+                            self.budget.charge_bytes(len(chunk))
+                            o.write(chunk)
+                            left -= len(chunk)
+                    elif ctype == 0xCAC2:  # FILL
+                        fp.seek(data_off)
+                        pattern = fp.read(4) * (COPY_CHUNK // 4)
+                        left = length
+                        while left:
+                            n = min(len(pattern), left)
+                            self.budget.charge_bytes(n)
+                            o.write(pattern[:n])
+                            left -= n
+                    elif ctype == 0xCAC3:  # DONT_CARE
+                        o.seek(length, 1)
+                    elif ctype != 0xCAC4:  # CRC32 chunks carry no data
+                        raise FormatError(f"unknown sparse chunk type {ctype:#x}")
+                    pos += tsize
+                o.truncate(full)
+        return [self._child(art, dest, "image.raw", "decoded")]
+
+    def h_parrot_plf(self, art: Artifact) -> list[Artifact]:
+        src = self.path_of(art.id)
+        out = self._out_dir(art)
+        children = []
+        with src.open("rb") as fp:
+            meta, sections = more.parse_plf(fp, art.size)
+            art.details.update(meta)
+            art.details["sections"] = [{"index": sec.index, "type": hex(sec.type), "size": sec.size,
+                                        "uncompressed": sec.uncompressed_size, "load_address": hex(sec.load_addr)}
+                                       for sec in sections[:200]]
+            for sec in sections:
+                fp.seek(sec.offset)
+                data = fp.read(sec.size)
+                if sec.uncompressed_size:
+                    data = more.inflate_any(data, min(sec.uncompressed_size, self.limits.max_file_bytes))
+                    self.budget.check_ratio(max(sec.size, 1), len(data), f"PLF section {sec.index}")
+                kind = more.PLF_SECTION_NAMES.get(sec.type, "section")
+                name = f"section_{sec.index:03d}_{sec.type:02x}_{kind}.bin"
+                self._write_bytes(data, out / name)
+                c = self._child(art, out / name, name, "decoded")
+                c.details["load_address"] = hex(sec.load_addr)
+                children.append(c)
+        return children
+
+    def h_dji_imah(self, art: Artifact) -> list[Artifact]:
+        """Extract plaintext chunks of a DJI IM*H module. Encrypted chunks are never decrypted."""
+        src = self.path_of(art.id)
+        with src.open("rb") as fp:
+            info = more.parse_imah(fp, art.size)
+            art.details.update({"module_name": info.name, "module_type": info.module_type,
+                                "module_version": info.version, "date": info.date, "auth_key_id": info.auth_key,
+                                "enc_key_id": info.enc_key or "(none)", "header_version": info.header_version,
+                                "chunks": info.chunks[:64]})
+            plain = [c for c in info.chunks if c["plaintext"] and c["in_bounds"] and c["size"]]
+            if not plain:
+                raise UnsupportedFormat(
+                    f"DJI IM*H module '{info.name}': payload is encrypted (key id '{info.enc_key}'); it is not "
+                    "decrypted - only header metadata was analysed")
+            out = self._out_dir(art)
+            children = []
+            for c in plain:
+                name = f"chunk_{c['id']}.bin"
+                fp.seek(c["offset"])
+                self._write_stream(_Bounded(fp, c["size"]), out / name, label=name)
+                ch = self._child(art, out / name, name, "decoded")
+                ch.details["load_address"] = c["address"]
+                children.append(ch)
+        return children
+
+    def h_erofs(self, art: Artifact) -> list[Artifact]:
+        tool = self._container_only("fsck.erofs", "EROFS image")
+        out = self._out_dir(art)
+        dest = out / "root"
+        self._tree_roots[art.id] = (out, True)
+        self._run_tool(art, [tool, f"--extract={dest}", "--no-preserve", str(self.path_of(art.id))], out)
+        self._sanitize_tree(art, out)
+        root = dest if dest.exists() else out
+        self._record_fs(art, "erofs", root, image_artifact=art.id)
+        return self._register_tree(art, root)
 
     def h_ihex(self, art: Artifact) -> list[Artifact]:
         src = self.path_of(art.id)
@@ -1177,6 +1314,15 @@ HANDLERS: dict[str, Callable[[Extractor, Artifact], list[Artifact]]] = {
     "bzip2": Extractor.h_bzip2,
     "xz": Extractor.h_xz,
     "lzma": Extractor.h_lzma,
+    "zstd": Extractor.h_zstd,
+    "lz4": Extractor.h_lz4,
+    "lz4_legacy": Extractor.h_lz4_legacy,
+    "lzop": Extractor.h_lzop,
+    "cramfs": Extractor.h_cramfs,
+    "erofs": Extractor.h_erofs,
+    "android_sparse": Extractor.h_android_sparse,
+    "parrot_plf": Extractor.h_parrot_plf,
+    "dji_imah": Extractor.h_dji_imah,
     "ihex": Extractor.h_ihex,
     "px4": Extractor.h_fw_json,
     "apj": Extractor.h_fw_json,
