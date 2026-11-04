@@ -42,7 +42,8 @@ def scan(ctx: ScanContext) -> list[Finding]:
                 no_canary.append(art)
             if "gets" in info.get("dangerous_imports", []):
                 gets_users.append(art)
-            other = [f for f in info.get("dangerous_imports", []) if f in ("strcpy", "strcat", "sprintf", "system", "popen", "vsprintf")]
+            risky = ("strcpy", "strcat", "sprintf", "system", "popen", "vsprintf")
+            other = [f for f in info.get("dangerous_imports", []) if f in risky]
             if other:
                 dangerous.append((art, other))
             if info.get("has_debug_info"):

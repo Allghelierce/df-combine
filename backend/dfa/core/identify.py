@@ -11,9 +11,9 @@ import math
 import re
 import struct
 from collections import Counter
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Iterator
 
 from .formats.cortexm import analyze_vector_table
 from .formats.ihex import looks_like_ihex

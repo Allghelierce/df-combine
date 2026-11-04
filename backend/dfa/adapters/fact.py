@@ -51,9 +51,6 @@ class FactAdapter(ToolAdapter):
     homepage = "https://github.com/fkie-cad/FACT_core"
     inputs = "Original firmware upload (FACT performs its own unpacking); requires a running FACT instance"
 
-    def enabled(self) -> bool:
-        return bool(self.settings.fact_url)
-
     def _client(self) -> httpx.Client:
         headers = {"Accept": "application/json"}
         if self.settings.fact_api_key:
@@ -63,7 +60,7 @@ class FactAdapter(ToolAdapter):
 
     def status(self):
         if not self.settings.fact_url:
-            return self._status(False, "FACT is not configured. Set DFA_FACT_URL to a running FACT instance "
+            return self._status(False, "Not configured: set DFA_FACT_URL to a running FACT instance "
                                        "(FACT is a separate platform; see docs/TOOLS.md).", mode="remote")
         try:
             with self._client() as c:

@@ -118,7 +118,7 @@ class Finding:
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "Finding":
+    def from_dict(cls, d: dict[str, Any]) -> Finding:
         return cls(
             title=d["title"],
             description=d["description"],
@@ -149,3 +149,65 @@ def redact(secret: str, keep: int = 2) -> str:
     if len(secret) <= keep:
         return "*" * len(secret)
     return f"{secret[:keep]}{'*' * min(len(secret) - keep, 12)} (len={len(secret)})"
+
+
+# External-tool rule -> built-in rule ids describing the same issue.
+CORRELATIONS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("fwanalyzer", "fwa-empty-password"): ("empty-password",),
+    ("fwanalyzer", "fwa-world-writable"): ("world-writable-files",),
+    ("fwanalyzer", "fwa-suid"): ("setuid-files",),
+    ("fwanalyzer", "fwa-telnetd"): ("telnetd-shell-no-auth", "telnetd-enabled"),
+    ("fwanalyzer", "fwa-sshd-empty"): ("sshd-permit-empty-passwords",),
+    ("fwanalyzer", "fwa-bad-file"): ("ssh-host-key", "pem-private-key", "ssh-authorized-keys"),
+}
+
+
+def _paths(f: Finding) -> set[str]:
+    out = set()
+    for e in f.evidence:
+        for v in (e.location or "", e.value):
+            if v.startswith("/"):
+                out.add(v.split(" ", 1)[0].split(":", 1)[0])
+    tail = f.affected_component.rsplit(" > ", 1)[-1]
+    if tail.startswith("/"):
+        out.add(tail)
+    return out
+
+
+def correlate(findings: list[Finding]) -> list[Finding]:
+    """Merge external-tool findings that duplicate a built-in finding on the same file.
+
+    The built-in finding is kept, credited with the corroborating tool (tag
+    ``corroborated-by:<tool>``), gains the tool's evidence and is raised to high
+    confidence.  This avoids double counting the same weakness in severity
+    totals while keeping provenance from every tool.
+    """
+    builtin = [f for f in findings if f.source_tool.startswith("builtin:")]
+    keep: list[Finding] = []
+    for f in findings:
+        targets = CORRELATIONS.get((f.source_tool, f.rule_id))
+        if not targets:
+            keep.append(f)
+            continue
+        fpaths = _paths(f)
+        match = None
+        for b in builtin:
+            if b.rule_id not in targets:
+                continue
+            same_fs = b.affected_component.startswith(f.affected_component) or b.affected_component in (
+                "filesystem permissions",)
+            if same_fs and (fpaths & _paths(b) or b.affected_component == "filesystem permissions"):
+                match = b
+                break
+        if match is None:
+            keep.append(f)
+            continue
+        tag = f"corroborated-by:{f.source_tool}"
+        if tag not in match.tags:
+            match.tags.append(tag)
+        match.confidence = Confidence.high
+        match.evidence.extend(Evidence("tool_output", f"[{f.source_tool}] {e.value}", e.location)
+                              for e in f.evidence[:5])
+        if Severity(f.severity).rank < Severity(match.severity).rank:
+            match.severity = f.severity
+    return keep

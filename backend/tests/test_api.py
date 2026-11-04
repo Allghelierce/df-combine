@@ -1,10 +1,9 @@
 """Integration tests: upload -> worker -> findings -> reports through the HTTP API."""
-import json
 import time
 
 import pytest
 
-from dfa.worker import Worker, claim_next, run_one
+from dfa.worker import claim_next, run_one
 
 
 def upload(client, path, name=None):
@@ -37,7 +36,8 @@ def test_end_to_end_companion(client, settings, fixtures):
     assert d["risk_score"] > 50
     tools = {t["tool"]: t for t in d["tool_runs"]}
     assert tools["builtin:secrets"]["status"] == "completed"
-    assert tools["fact"]["status"] == "skipped"  # not configured
+    assert tools["fact"]["status"] == "unavailable"  # not configured
+    assert "DFA_FACT_URL" in tools["fact"]["message"]
     assert tools["cwe_checker"]["status"] in ("unavailable", "completed", "failed")
     assert any(e["stage"] == "complete" for e in d["events"])
 

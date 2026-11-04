@@ -31,14 +31,14 @@ import tarfile
 import time
 import zipfile
 import zlib
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Callable, Iterable
+from typing import BinaryIO
 
 from .formats import px4json
 from .formats.ihex import IHexError, parse_ihex
-from .formats.simplefs import (FormatError, iter_cpio, iter_romfs, parse_dfuse,
-                               parse_partitions, romfs_size)
+from .formats.simplefs import FormatError, iter_cpio, iter_romfs, parse_dfuse, parse_partitions, romfs_size
 from .identify import FormatInfo, detect_format, parse_uimage_header
 from .limits import ExtractionBudget, LimitExceeded, Limits
 
@@ -487,7 +487,7 @@ class Extractor:
         with src.open("rb") as fp:
             meta, elements = parse_dfuse(fp, art.size)
             art.details.update(meta)
-            for i, el in enumerate(elements):
+            for el in elements:
                 name = f"target{el.target}_{el.address:08x}.bin"
                 dest = out / name
                 fp.seek(el.offset)

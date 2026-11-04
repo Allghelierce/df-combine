@@ -27,7 +27,7 @@ class Limits:
     max_scan_bytes_per_file: int = 64 * 1024**2  # bytes read by content scanners per file
 
     @classmethod
-    def from_dict(cls, data: dict | None) -> "Limits":
+    def from_dict(cls, data: dict | None) -> Limits:
         lim = cls()
         for key, value in (data or {}).items():
             if hasattr(lim, key):

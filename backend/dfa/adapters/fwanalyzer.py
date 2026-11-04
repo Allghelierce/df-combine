@@ -24,7 +24,8 @@ from ..core.findings import Classification as C
 from ..core.findings import Confidence as K
 from ..core.findings import Evidence, Finding
 from ..core.findings import Severity as S
-from .base import AdapterContext, AdapterResult, ToolAdapter, run_cmd
+from ..toolexec import ToolExecutor
+from .base import AdapterContext, AdapterResult, ToolAdapter
 
 FS_TYPES = {"ext": "extfs", "squashfs": "squashfs", "fat": "vfatfs", "cpio": "cpiofs"}
 BAD_FILES = [
@@ -52,19 +53,21 @@ class FwAnalyzerAdapter(ToolAdapter):
     def enabled(self) -> bool:
         return self.settings.fwanalyzer_enabled
 
-    def _bin(self) -> str | None:
-        return self.settings.fwanalyzer_bin or shutil.which("fwanalyzer")
+    def _locate(self, ex: ToolExecutor | None = None) -> tuple[str | None, str]:
+        ex = ex or ToolExecutor(self.settings)
+        return ex.locate("fwanalyzer", self.settings.fwanalyzer_bin)
 
     def status(self):
-        b = self._bin()
-        if not b:
-            return self._status(False, "fwanalyzer binary not found on PATH. Build it with "
-                                       "'go install github.com/cruise-automation/fwanalyzer/cmd/fwanalyzer@latest' "
-                                       "(see docs/TOOLS.md).")
-        helpers = {t: bool(shutil.which(t)) for t in ("e2ls", "unsquashfs", "mcopy", "cpio")}
-        missing = [t for t, ok in helpers.items() if not ok]
-        detail = f"local binary {b}" + (f"; missing helper tools: {', '.join(missing)}" if missing else "")
-        return self._status(True, detail, mode="local")
+        how, detail = self._locate()
+        if how is None:
+            return self._status(False, detail + ". Build the sandbox image (docker/sandbox.Dockerfile bundles "
+                                       "FwAnalyzer) or install it with 'go install "
+                                       "github.com/cruise-automation/fwanalyzer/cmd/fwanalyzer@latest'.")
+        if how == "local":
+            missing = [t for t in ("e2ls", "unsquashfs", "mcopy", "cpio") if not shutil.which(t)]
+            if missing:
+                detail += f"; missing helper tools: {', '.join(missing)}"
+        return self._status(True, detail, mode=how)
 
     def plan(self, ctx: AdapterContext):
         man = ctx.manifest.get("extraction", {})
@@ -87,22 +90,26 @@ class FwAnalyzerAdapter(ToolAdapter):
 
     def run(self, ctx: AdapterContext, targets: list) -> AdapterResult:
         out_dir = ctx.tool_dir(self.name)
-        b = self._bin()
-        assert b
+        ex = ToolExecutor(self.settings, ctx.work_dir, ctx.input_path)
+        how, _ = self._locate(ex)
+        if how is None:
+            return AdapterResult("unavailable", "fwanalyzer disappeared between status check and run")
+        b = "fwanalyzer" if how == "sandbox" else (self.settings.fwanalyzer_bin or shutil.which("fwanalyzer") or "fwanalyzer")
+        runner = (ex, how)
         findings: list[Finding] = []
         runs = []
         for i, t in enumerate(targets):
             art = t["artifact"]
             report, mode, note = None, t["fstype"], None
             if t["kind"] == "image":
-                report, err = self._run_one(b, out_dir, i, t["fstype"], ctx.artifact_path(art),
+                report, err = self._run_one(runner, b, out_dir, i, t["fstype"], ctx.artifact_path(art),
                                             ctx.work_dir / t["fallback_dir"], perms=True)
                 if report is None:
                     note = f"image mode ({t['fstype']}) failed: {err}; fell back to dirfs on extracted tree"
                     ctx.log(f"fwanalyzer: {note}")
             if report is None:
                 mode = "dirfs"
-                report, err = self._run_one(b, out_dir, i, "dirfs", ctx.work_dir / t["fallback_dir"],
+                report, err = self._run_one(runner, b, out_dir, i, "dirfs", ctx.work_dir / t["fallback_dir"],
                                             ctx.work_dir / t["fallback_dir"], perms=False)
                 if report is None:
                     runs.append({"target": art["display_path"], "status": "failed", "error": err, "note": note})
@@ -120,15 +127,16 @@ class FwAnalyzerAdapter(ToolAdapter):
             msg += " - " + "; ".join(notes)
         if not ok:
             msg = "; ".join(r.get("error", "") for r in runs)[:800]
-        return AdapterResult(status, msg, findings, str(out_dir), {"runs": runs})
+        return AdapterResult(status, msg, findings, str(out_dir), {"runs": runs, "execution": how})
 
-    def _run_one(self, b: str, out_dir: Path, i: int, fstype: str, target: Path, tree: Path,
-                 perms: bool) -> tuple[dict | None, str]:
+    def _run_one(self, runner: tuple[ToolExecutor, str], b: str, out_dir: Path, i: int, fstype: str, target: Path,
+                 tree: Path, perms: bool) -> tuple[dict | None, str]:
         cfg = out_dir / f"config_{i}_{fstype}.toml"
         cfg.write_text(build_config(fstype, tree, perms))
         out = out_dir / f"report_{i}_{fstype}.json"
-        rc, stdout, stderr, _ = run_cmd([b, "-cfg", str(cfg), "-in", str(target), "-out", str(out)],
-                                        timeout=self.settings.fwanalyzer_timeout_s)
+        ex, how = runner
+        rc, stdout, stderr, _ = ex.run(how, [b, "-cfg", str(cfg), "-in", str(target), "-out", str(out)],
+                                       timeout=self.settings.fwanalyzer_timeout_s, writable=[out_dir])
         (out_dir / f"stderr_{i}_{fstype}.log").write_text((stdout + stderr)[-20000:])
         if rc != 0 or not out.exists():
             first = (stderr or stdout).strip().splitlines()[:1]

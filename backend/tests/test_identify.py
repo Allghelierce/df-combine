@@ -2,13 +2,13 @@ import json
 import shutil
 import struct
 
+import factory
+import pytest
+
 from dfa.core.formats.cortexm import analyze_vector_table
 from dfa.core.formats.ihex import IHexError, parse_ihex
 from dfa.core.formats.px4json import ContainerError, parse_container
 from dfa.core.identify import detect_format, detect_format_bytes, parse_uimage_header
-
-import factory
-import pytest
 
 
 @pytest.mark.parametrize("key,fmt", [

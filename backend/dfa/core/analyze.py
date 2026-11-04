@@ -16,8 +16,8 @@ import sys
 import time
 import traceback
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from .extract import Artifact, Extractor
 from .findings import Finding, dedupe

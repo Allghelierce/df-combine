@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import io
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
@@ -10,8 +10,7 @@ from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.platypus import (KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table,
-                                TableStyle)
+from reportlab.platypus import KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .. import __version__
 from ..core.findings import CLASSIFICATION_LABELS, SEVERITY_ORDER
@@ -64,7 +63,7 @@ def _iso(dt):
     if dt is None:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt.isoformat()
 
 
@@ -72,7 +71,7 @@ def json_report(scan: Scan) -> dict:
     return {
         "report_format": "drone-firmware-analyzer/1",
         "generator": f"Drone Firmware Analyzer {__version__}",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "disclaimer": DISCLAIMER,
         "classification_legend": CLASSIFICATION_LABELS,
         "scan": scan_to_dict(scan),

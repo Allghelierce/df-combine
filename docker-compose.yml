@@ -1,0 +1,52 @@
+# Drone Firmware Analyzer - single-node deployment.
+#
+#   make sandbox-image        # build the isolated analysis image first
+#   docker compose up --build
+#
+# The worker needs the Docker socket to start network-less sandbox containers for
+# each scan. Because bind mounts are resolved by the host daemon, DFA_SANDBOX_HOST_DATA_DIR
+# must be the *host* path of the data directory (./var by default).
+services:
+  sandbox-image:
+    image: dfa-sandbox:latest
+    build:
+      context: .
+      dockerfile: docker/sandbox.Dockerfile
+    command: ["true"]
+    restart: "no"
+    network_mode: none
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    image: dfa-app:latest
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      DFA_WORKER_MODE: external
+      DFA_SANDBOX_MODE: docker
+      DFA_SANDBOX_HOST_DATA_DIR: ${PWD}/var
+      DFA_API_KEY: ${DFA_API_KEY:-}
+      DFA_FACT_URL: ${DFA_FACT_URL:-}
+    volumes:
+      - ./var:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      sandbox-image:
+        condition: service_completed_successfully
+
+  worker:
+    image: dfa-app:latest
+    command: ["python", "-m", "dfa.worker"]
+    environment:
+      DFA_SANDBOX_MODE: docker
+      DFA_SANDBOX_HOST_DATA_DIR: ${PWD}/var
+      DFA_WORKER_THREADS: ${DFA_WORKER_THREADS:-2}
+      DFA_FACT_URL: ${DFA_FACT_URL:-}
+      DFA_CWE_CHECKER_IMAGE: ${DFA_CWE_CHECKER_IMAGE:-ghcr.io/fkie-cad/cwe_checker:stable}
+    volumes:
+      - ./var:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - api

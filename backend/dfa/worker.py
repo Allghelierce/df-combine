@@ -14,7 +14,7 @@ import socket
 import threading
 import time
 import traceback
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, update
 
@@ -33,25 +33,25 @@ def claim_next(worker_id: str) -> str | None:
         if not cand:
             return None
         res = s.execute(update(Scan).where(Scan.id == cand, Scan.status == "queued").values(
-            status="running", worker_id=worker_id, started_at=datetime.now(timezone.utc),
-            heartbeat_at=datetime.now(timezone.utc), attempts=Scan.attempts + 1, stage="starting", progress=1))
+            status="running", worker_id=worker_id, started_at=datetime.now(UTC),
+            heartbeat_at=datetime.now(UTC), attempts=Scan.attempts + 1, stage="starting", progress=1))
         return cand if res.rowcount == 1 else None
 
 
 def recover_stale(settings: Settings) -> int:
     """Requeue (or fail) scans left 'running' by a crashed/restarted worker."""
-    cutoff = datetime.now(timezone.utc) - STALE_AFTER
+    cutoff = datetime.now(UTC) - STALE_AFTER
     n = 0
     with session_scope() as s:
         for scan in s.execute(select(Scan).where(Scan.status == "running")).scalars():
             hb = scan.heartbeat_at
             if hb is not None and hb.tzinfo is None:
-                hb = hb.replace(tzinfo=timezone.utc)
+                hb = hb.replace(tzinfo=UTC)
             if hb is None or hb < cutoff or _owner_dead(scan.worker_id):
                 n += 1
                 if scan.attempts >= settings.max_attempts:
                     scan.status, scan.error = "failed", "worker interrupted repeatedly; giving up"
-                    scan.finished_at = datetime.now(timezone.utc)
+                    scan.finished_at = datetime.now(UTC)
                 else:
                     scan.status, scan.stage = "queued", "requeued"
                 s.add(ScanEvent(scan_id=scan.id, stage="worker", level="warning",
@@ -88,7 +88,7 @@ def run_one(scan_id: str, settings: Settings) -> None:
         with session_scope() as s:
             scan = s.get(Scan, scan_id)
             scan.status, scan.stage, scan.progress = "completed", "complete", 100
-            scan.finished_at = datetime.now(timezone.utc)
+            scan.finished_at = datetime.now(UTC)
     except Exception as exc:  # noqa: BLE001
         log.exception("scan %s failed", scan_id)
         log_event(scan_id, "failed", f"Scan failed: {type(exc).__name__}: {exc}", level="error")
@@ -96,7 +96,7 @@ def run_one(scan_id: str, settings: Settings) -> None:
             scan = s.get(Scan, scan_id)
             scan.status, scan.stage = "failed", "failed"
             scan.error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()[-2000:]}"
-            scan.finished_at = datetime.now(timezone.utc)
+            scan.finished_at = datetime.now(UTC)
 
 
 class Worker:

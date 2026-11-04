@@ -1,7 +1,7 @@
 """ORM models."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -10,7 +10,7 @@ from .db import Base
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class Scan(Base):
@@ -44,10 +44,10 @@ class Scan(Base):
     risk_score: Mapped[int | None] = mapped_column(Integer)
     manifest_path: Mapped[str | None] = mapped_column(String(1024))
 
-    findings: Mapped[list["FindingRow"]] = relationship(back_populates="scan", cascade="all, delete-orphan")
-    tool_runs: Mapped[list["ToolRun"]] = relationship(back_populates="scan", cascade="all, delete-orphan",
+    findings: Mapped[list[FindingRow]] = relationship(back_populates="scan", cascade="all, delete-orphan")
+    tool_runs: Mapped[list[ToolRun]] = relationship(back_populates="scan", cascade="all, delete-orphan",
                                                       order_by="ToolRun.id")
-    events: Mapped[list["ScanEvent"]] = relationship(back_populates="scan", cascade="all, delete-orphan",
+    events: Mapped[list[ScanEvent]] = relationship(back_populates="scan", cascade="all, delete-orphan",
                                                      order_by="ScanEvent.id")
 
 

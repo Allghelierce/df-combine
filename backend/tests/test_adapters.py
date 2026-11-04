@@ -1,6 +1,5 @@
 import json
 import shutil
-from pathlib import Path
 
 import httpx
 import pytest
@@ -168,3 +167,19 @@ def test_fact_unreachable(settings, tmp_path):
     settings.fact_url = "http://127.0.0.1:9"
     r = fact.FactAdapter(settings).execute(ctx_for(settings, {}, tmp_path))
     assert r.status == "unavailable" and "unreachable" in r.message
+
+
+def test_correlation_merges_fwanalyzer_duplicates():
+    from dfa.core.findings import Classification, Confidence, Evidence, Finding, Severity, correlate
+    b = Finding("Account 'root' has an empty password", "d", Severity.critical, Classification.detected,
+                Confidence.high, "builtin:secrets", "empty-password", "fw.img > p1.img > /etc/shadow", "r",
+                [Evidence("config", "root::1", "/etc/shadow")])
+    other = Finding("Static Wi-Fi passphrase", "d", Severity.high, Classification.detected, Confidence.medium,
+                    "builtin:secrets", "hostapd-static-psk", "fw.img > p1.img > /etc/hostapd.conf", "r")
+    fwa = fwanalyzer.normalize(FWA_REPORT, "fw.img > p1.img", perms=True)
+    merged = correlate([b, other] + fwa)
+    assert not any(f.rule_id == "fwa-empty-password" for f in merged)
+    assert "corroborated-by:fwanalyzer" in b.tags
+    assert any(e.value.startswith("[fwanalyzer]") for e in b.evidence)
+    # Unrelated FwAnalyzer results stay.
+    assert any(f.rule_id == "fwa-bad-file" for f in merged)

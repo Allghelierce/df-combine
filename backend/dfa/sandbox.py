@@ -19,9 +19,9 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from .config import BACKEND_DIR, Settings
 
@@ -70,9 +70,28 @@ def resolve_mode(settings: Settings) -> tuple[str, str]:
     return "local", "Docker sandbox unavailable - fell back to local subprocess with rlimits (no container isolation)"
 
 
+SANDBOX_UID = 10001  # 'analyzer' user in docker/sandbox.Dockerfile
+
+
+def container_user(*writable: Path) -> str:
+    """User for sandbox containers. Never root: if the worker runs as root, hand the
+    writable directories to the image's unprivileged 'analyzer' user."""
+    if os.getuid() != 0:
+        return f"{os.getuid()}:{os.getgid()}"
+    for d in writable:
+        for dirpath, _dirs, filenames in os.walk(d):
+            os.chown(dirpath, SANDBOX_UID, SANDBOX_UID)
+            for f in filenames:
+                os.chown(os.path.join(dirpath, f), SANDBOX_UID, SANDBOX_UID, follow_symlinks=False)
+    return f"{SANDBOX_UID}:{SANDBOX_UID}"
+
+
 def _host_path(p: Path, settings: Settings) -> str:
     if settings.sandbox_host_data_dir:
-        rel = p.resolve().relative_to(settings.data_dir.resolve())
+        try:
+            rel = p.resolve().relative_to(settings.data_dir.resolve())
+        except ValueError:
+            return str(p.resolve())
         return str(settings.sandbox_host_data_dir / rel)
     return str(p.resolve())
 
@@ -87,7 +106,7 @@ def run_analysis(input_path: Path, original_name: str, work_dir: Path, settings:
                  progress: Callable[[str], None] | None = None) -> SandboxResult:
     mode, explanation = resolve_mode(settings)
     work_dir.mkdir(parents=True, exist_ok=True)
-    os.chmod(work_dir, 0o777 if mode == "docker" else 0o755)
+    os.chmod(work_dir, 0o755)
     safe_name = "".join(c for c in original_name if c.isprintable())[:255] or "firmware"
     limits = json.dumps(settings.limits_dict())
     if mode == "docker":
@@ -97,7 +116,7 @@ def run_analysis(input_path: Path, original_name: str, work_dir: Path, settings:
             "--memory", settings.sandbox_memory, "--memory-swap", settings.sandbox_memory,
             "--cpus", settings.sandbox_cpus, "--pids-limit", str(settings.sandbox_pids),
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-            "--user", f"{os.getuid()}:{os.getgid()}",
+            "--user", container_user(work_dir),
             "-v", f"{_host_path(input_path, settings)}:/in/firmware:ro",
             "-v", f"{_host_path(work_dir, settings)}:/work:rw",
             settings.sandbox_image,

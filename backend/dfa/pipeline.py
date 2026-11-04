@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import time
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import delete
@@ -12,7 +12,7 @@ from sqlalchemy import delete
 from .adapters.base import AdapterContext
 from .adapters.registry import get_adapters
 from .config import Settings
-from .core.findings import SEVERITY_ORDER, Finding, dedupe
+from .core.findings import SEVERITY_ORDER, Finding, correlate, dedupe
 from .db import session_scope
 from .models import FindingRow, Scan, ScanEvent, ToolRun
 from .sandbox import SandboxError, run_analysis
@@ -22,7 +22,7 @@ CLASS_WEIGHT = {"detected": 1.0, "suspicious": 0.6, "unverified": 0.5, "info": 0
 
 
 def now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def log_event(scan_id: str, stage: str, message: str, level: str = "info", progress: int | None = None) -> None:
@@ -43,11 +43,13 @@ def risk_score(findings: list[dict]) -> int:
 
 
 def _store_tool_run(scan_id: str, tool: str, display: str, status: str, message: str, started: datetime,
-                    findings: int = 0, raw: str | None = None, details: dict | None = None) -> None:
+                    findings: int = 0, raw: str | None = None, details: dict | None = None,
+                    duration: float | None = None) -> None:
     fin = now()
     with session_scope() as s:
         s.add(ToolRun(scan_id=scan_id, tool=tool, display_name=display, status=status, message=message[:4000],
-                      started_at=started, finished_at=fin, duration_s=(fin - started).total_seconds(),
+                      started_at=started, finished_at=fin,
+                      duration_s=duration if duration is not None else (fin - started).total_seconds(),
                       findings_count=findings, raw_output_path=raw, details=details or {}))
 
 
@@ -96,10 +98,11 @@ def process_scan(scan_id: str, settings: Settings) -> None:
         }
         scan.components = manifest["components"]
         scan.manifest_path = str(work / "manifest.json")
+    iso_mode = res.isolation.split(":")[0]
     for run in manifest["scanner_runs"]:
         _store_tool_run(scan_id, run["name"], run["name"].replace("builtin:", "Built-in: "), run["status"],
-                        run.get("error") or f"{run['findings']} findings in {run['duration_s']}s", started,
-                        run["findings"], details={"isolation": res.isolation})
+                        run.get("error") or f"{run['findings']} finding(s); ran in {iso_mode} sandbox", started,
+                        run["findings"], details={"isolation": res.isolation}, duration=run.get("duration_s"))
     findings = [Finding.from_dict(f) for f in manifest["findings"]]
     log_event(scan_id, "sandbox", f"Isolated analysis finished in {res.duration_s}s ({res.isolation}); "
                                   f"{len(ex['artifacts'])} artifacts, {len(findings)} built-in findings", progress=65)
@@ -121,7 +124,7 @@ def process_scan(scan_id: str, settings: Settings) -> None:
         log_event(scan_id, f"tool:{ad.name}", f"{ad.display_name}: {r.status} - {r.message}", level, progress=pct)
 
     # ---- stage 3: normalise + persist ----
-    final = [f.to_dict() for f in dedupe(findings)]
+    final = [f.to_dict() for f in dedupe(correlate(findings))]
     sev = Counter(f["severity"] for f in final)
     cls = Counter(f["classification"] for f in final)
     with session_scope() as s:

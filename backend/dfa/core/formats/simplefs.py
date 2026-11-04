@@ -11,8 +11,9 @@ files themselves - the extractor decides where (and whether) to write.
 from __future__ import annotations
 
 import struct
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import BinaryIO, Iterator
+from typing import BinaryIO
 
 
 class FormatError(ValueError):
@@ -184,7 +185,7 @@ def parse_dfuse(fp: BinaryIO, total_size: int) -> tuple[dict, list[DfuElement]]:
         raise FormatError("invalid DfuSe header")
     pos = 11
     elements: list[DfuElement] = []
-    for t in range(targets):
+    for _ in range(targets):
         fp.seek(pos)
         tp = fp.read(274)
         if len(tp) < 274 or tp[:6] != b"Target":

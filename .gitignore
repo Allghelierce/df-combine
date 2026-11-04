@@ -11,3 +11,4 @@ var/
 *.db
 *.sqlite3
 .env
+fixtures/generated/

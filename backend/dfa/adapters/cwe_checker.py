@@ -24,7 +24,7 @@ from ..core.findings import Classification as C
 from ..core.findings import Confidence as K
 from ..core.findings import Evidence, Finding
 from ..core.findings import Severity as S
-from ..sandbox import docker_available, docker_image_present
+from ..sandbox import _host_path, docker_available, docker_image_present
 from .base import AdapterContext, AdapterResult, ToolAdapter, run_cmd
 
 SUPPORTED_ELF_ARCH = {"EM_ARM", "EM_AARCH64", "EM_X86_64", "EM_386", "EM_MIPS", "EM_PPC", "EM_PPC64", "EM_RISCV"}
@@ -160,9 +160,9 @@ class CweCheckerAdapter(ToolAdapter):
             return cmd
         cmd = ["docker", "run", "--rm", "--network", "none", "--memory", self.settings.cwe_checker_memory,
                "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-               "-v", f"{path.resolve()}:/input:ro"]
+               "--pids-limit", "512", "-v", f"{_host_path(path, self.settings)}:/input:ro"]
         if cfg:
-            cmd += ["-v", f"{cfg.resolve()}:/bare_metal.json:ro"]
+            cmd += ["-v", f"{_host_path(cfg, self.settings)}:/bare_metal.json:ro"]
         cmd += [self.settings.cwe_checker_image, "/input", "--json", "--quiet"]
         if cfg:
             cmd += ["--bare-metal-config", "/bare_metal.json"]

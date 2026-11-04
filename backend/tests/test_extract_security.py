@@ -5,9 +5,9 @@ import tarfile
 import zipfile
 from pathlib import Path
 
+import factory
 import pytest
 
-import factory
 from dfa.core.extract import Extractor, UnsafePath, safe_member_path
 from dfa.core.limits import Limits
 

@@ -64,7 +64,6 @@ def parse_ihex(text: bytes, max_span: int = 64 * 1024**2) -> IHexImage:
     seg_base = 0
     start = None
     records = 0
-    eof = False  # missing EOF record is tolerated
     for lineno, raw_line in enumerate(text.splitlines(), 1):
         line = raw_line.strip().lstrip(b"\xef\xbb\xbf")
         if not line:
@@ -80,7 +79,6 @@ def parse_ihex(text: bytes, max_span: int = 64 * 1024**2) -> IHexImage:
             absolute = upper + seg_base + addr
             chunks[absolute] = payload
         elif rtype == 0x01:
-            eof = True
             break
         elif rtype == 0x02:
             seg_base = int.from_bytes(payload, "big") * 16
