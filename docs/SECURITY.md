@@ -267,8 +267,12 @@ boundary for hostile samples.
   everything after it - every limit is reported when reached and marks the file *partial*, as does a compressed stream that
   decodes past the per-file limit (it used to be skipped as if it were none). An external unpacker that exits
   with an error without extracting anything marks the image as failed (it used to be reported as
-  unpacked). The limit that remains: the extent of an ELF or an image that still unpacks comes from
-  its own headers, so a section or block count claiming the appended bytes hides them;
+  unpacked). Inside an ELF file, data that none of its headers, sections or segments covers is analysed as
+  an artifact of its own and reported as a *suspicious* pattern: moving the section header table
+  behind an appended payload took the payload into the executable's extent, out of the overlay
+  check's sight. Linkers leave no such data - none of the 721 ELF files in the real Debian,
+  Alpine, ArduPilot and PX4 samples has any. The limit that remains: the extent of an image that
+  still unpacks comes from its own headers, so a block count claiming appended bytes hides them;
 * symlinks, hardlinks, device nodes and FIFOs are **never created** - they are recorded in the
   manifest; external unpacker output is walked and such entries removed;
 * files created with `O_EXCL|O_NOFOLLOW`, mode 0644 (setuid/setgid recorded, never applied);

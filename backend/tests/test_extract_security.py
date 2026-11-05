@@ -1932,3 +1932,37 @@ def test_adjusted_self_extractors_with_a_comment_and_streams_past_the_file_limit
     (tmp_path / "big.bin").write_bytes(_noise(8192, 114) + stream + _noise(4096, 115))
     res = Extractor(tmp_path / "w_big", Limits(max_file_bytes=1024 * 1024)).run(tmp_path / "big.bin", "big.bin")
     assert res.artifacts[0].extraction == "partial" and "max_file_bytes" in res.limits_hit  # reported
+
+
+def _elf_hiding(payload: bytes) -> bytes:
+    """A 32-bit ARM Linux executable whose section header table sits after ``payload``: the payload lies inside the
+    executable's extent, while no header, section or segment covers it."""
+    import struct
+    text = b"\x00\xf0\x20\xe3" * 16  # nop
+    text_off = 52 + 32
+    shoff = text_off + len(text) + len(payload)
+    shoff += -shoff % 4
+    ehdr = struct.pack("<4s5B7sHHIIIIIHHHHHH", b"\x7fELF", 1, 1, 1, 0, 0, b"\x00" * 7, 2, 40, 1, 0x10000 + text_off,
+                       52, shoff, 0x5000400, 52, 32, 1, 40, 2, 0)
+    phdr = struct.pack("<8I", 1, 0, 0x10000, 0x10000, text_off + len(text), text_off + len(text), 5, 0x1000)
+    text_sh = struct.pack("<10I", 0, 1, 6, 0x10000 + text_off, text_off, len(text), 0, 0, 4, 0)
+    body = ehdr + phdr + text + payload
+    return body + b"\x00" * (shoff - len(body)) + b"\x00" * 40 + text_sh
+
+
+def test_data_inside_an_executable_that_no_section_covers_is_analysed(tmp_path, run_analysis):
+    """An executable's extent comes from its own tables: moving the section header table behind an appended payload
+    took the payload into the extent, and the overlay check no longer saw it. Data that no header, section or
+    segment covers is analysed now (linkers leave none: none of the 721 ELF files in the real samples has any)."""
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("etc/shadow", _SHADOW)
+    (tmp_path / "dropper").write_bytes(_elf_hiding(_noise(512, 121) + b.getvalue() + _noise(256, 122)))
+    m = run_analysis(tmp_path / "dropper")
+    assert m["extraction"]["artifacts"][0]["format"] == "elf"
+    rules = {f["rule_id"]: f for f in m["findings"]}
+    assert "empty-password" in rules and "appended-to-executable" not in rules
+    hidden = rules["uncovered-data-in-executable"]
+    assert hidden["classification"] == "suspicious" and hidden["severity"] == "low"
+    (tmp_path / "plain").write_bytes(_elf_hiding(b""))  # nothing uncovered: nothing reported
+    assert "uncovered-data-in-executable" not in {f["rule_id"] for f in run_analysis(tmp_path / "plain")["findings"]}

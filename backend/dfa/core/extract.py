@@ -465,18 +465,47 @@ class Extractor:
     def _after_own_extent(self, art: Artifact) -> list[Artifact]:
         """Data after an executable's own data (an overlay: self-extracting and packed programs keep their payload
         there, and so can a dropper) or after the size an image declares (an overlay, another partition). A
-        Linux kernel module's appended signature, checked field by field, is recorded instead."""
-        end = self._data_after_end(art)
-        if end is None:
-            return []
+        Linux kernel module's appended signature, checked field by field, is recorded instead. Inside an
+        executable, data that none of its headers, sections or segments covers is analysed too: moving the section
+        header table behind an appended payload would otherwise take the payload into the executable's extent."""
         path = self.path_of(art.id)
         if art.format == "elf":
             with path.open("rb") as fp:
-                if (sig := _module_signature_size(fp, end, art.size)) is not None:
+                layout = _elf_layout(fp, art.size)
+            if layout is None:
+                return []
+            end, covered = layout
+            children = self._elf_uncovered(art, path, _uncovered(covered, min(end, art.size)))
+            if end < art.size:
+                with path.open("rb") as fp:
+                    sig = _module_signature_size(fp, end, art.size)
+                if sig is not None:
                     art.details["module_signature_bytes"] = sig
-                    return []
-            return self._trailing_data(art, path, end, "the ELF file's own data")
+                else:
+                    children += self._trailing_data(art, path, end, "the ELF file's own data")
+            return children
+        end = self._data_after_end(art)
+        if end is None:
+            return []
         return self._trailing_data(art, path, end, f"the {art.format_description} ({end:,} bytes declared)")
+
+    def _elf_uncovered(self, art: Artifact, src: Path, gaps: list[tuple[int, int]]) -> list[Artifact]:
+        """Regions inside an ELF file's extent that no header, section or segment covers, as artifacts of their own
+        (padding and a few bytes are skipped). Linkers leave none: none of the 721 ELF files in the real Debian,
+        Alpine, ArduPilot and PX4 samples has one."""
+        children: list[Artifact] = []
+        for i, (a, b) in enumerate(gaps):
+            if i >= 64:  # (its own bytes are still scanned)
+                art.extraction = "partial"
+                art.extraction_note = f"{len(gaps) - 64} more regions that no section or segment covers not analysed"
+                self.result.warnings.append(f"{art.name}: {art.extraction_note}")
+                break
+            if c := self._region_artifact(art, src, a, b, f"uncovered_{a:08x}.bin", "uncovered"):
+                children.append(c)
+        if children:
+            self.result.warnings.append(f"{art.name}: {len(children)} region(s) inside it that no section or segment "
+                                        "covers analysed separately")
+        return children
 
     def _carve_failed(self, art: Artifact) -> list[Artifact]:
         """An image or archive that could not be unpacked, and left nothing to salvage, is carved like raw data:
@@ -2279,10 +2308,16 @@ SHT_NOBITS = 8
 
 
 def _elf_data_end(fp: BinaryIO, size: int) -> int | None:
-    """Offset just past an ELF file's own data: header, program and section header tables, segments and
-    sections (without .bss-like ones). None if the header is not usable. Reads only the tables. The header size
-    field is not trusted (0 would make the whole file look appended, 0xFFFF would hide a short overlay); table
-    entries shorter than the standard ones are not read."""
+    """Offset just past an ELF file's own data (see _elf_layout); None if the header is not usable."""
+    layout = _elf_layout(fp, size)
+    return layout[0] if layout else None
+
+
+def _elf_layout(fp: BinaryIO, size: int) -> tuple[int, list[tuple[int, int]]] | None:
+    """(offset just past an ELF file's own data, the ranges that data covers): header, program and section header
+    tables, segments and sections (without .bss-like ones). None if the header is not usable. Reads only the
+    tables. The header size field is not trusted (0 would make the whole file look appended, 0xFFFF would hide a
+    short overlay); table entries shorter than the standard ones are not read."""
     fp.seek(0)
     hdr = fp.read(64)
     if len(hdr) < 52 or hdr[:4] != b"\x7fELF" or hdr[4] not in (1, 2) or hdr[5] not in (1, 2):
@@ -2294,7 +2329,7 @@ def _elf_data_end(fp: BinaryIO, size: int) -> int | None:
             phentsize, phnum, shentsize, shnum = struct.unpack_from(e + "HHHH", hdr, 42)
             ph = (e + "I", 4, e + "I", 16, 32)  # (offset fmt, at, filesz fmt, at, standard entry size)
             sh = (e + "I", 4, e + "I", 16, e + "I", 20, 40)  # (type, at, offset, at, size, at, standard size)
-            ends = [52]
+            covered, end = [(0, 52)], 52
         else:
             if len(hdr) < 64:
                 return None
@@ -2302,7 +2337,7 @@ def _elf_data_end(fp: BinaryIO, size: int) -> int | None:
             phentsize, phnum, shentsize, shnum = struct.unpack_from(e + "HHHH", hdr, 54)
             ph = (e + "Q", 8, e + "Q", 32, 56)
             sh = (e + "I", 4, e + "Q", 24, e + "Q", 32, 64)
-            ends = [64]
+            covered, end = [(0, 64)], 64
         if shoff and shnum == 0 and shentsize >= sh[6] and shoff + shentsize <= size:  # e_shnum overflowed
             fp.seek(shoff)
             shnum = min(struct.unpack_from(sh[4], fp.read(shentsize), sh[5])[0], 1_000_000)
@@ -2310,7 +2345,7 @@ def _elf_data_end(fp: BinaryIO, size: int) -> int | None:
             minimum = ph[4] if kind == "ph" else sh[6]
             if not off or not count or entsize < minimum or off + count * entsize > size:
                 continue
-            ends.append(off + count * entsize)
+            covered.append((off, off + count * entsize))
             fp.seek(off)
             table = fp.read(count * entsize)
             for i in range(0, len(table) - entsize + 1, entsize):
@@ -2324,10 +2359,26 @@ def _elf_data_end(fp: BinaryIO, size: int) -> int | None:
                     start = struct.unpack_from(sh[2], entry, sh[3])[0]
                     length = struct.unpack_from(sh[4], entry, sh[5])[0]
                 if start + length <= size:
-                    ends.append(start + length)
+                    end = max(end, start + length)  # (an empty section still counts, as it always has)
+                    if length:
+                        covered.append((start, start + length))
     except struct.error:
         return None
-    return max(ends)
+    return max([end] + [b for _a, b in covered]), covered
+
+
+def _uncovered(covered: list[tuple[int, int]], end: int) -> list[tuple[int, int]]:
+    """The ranges of [0, end) that none of ``covered`` includes."""
+    gaps, pos = [], 0
+    for a, b in sorted(covered):
+        if a > pos:
+            gaps.append((pos, min(a, end)))
+        pos = max(pos, b)
+        if pos >= end:
+            break
+    if pos < end:
+        gaps.append((pos, end))
+    return [(a, b) for a, b in gaps if a < b]
 
 
 def _module_signature_size(fp: BinaryIO, end: int, size: int) -> int | None:

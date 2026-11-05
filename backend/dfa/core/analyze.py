@@ -407,7 +407,8 @@ def _identification_findings(ctx: ScanContext, arts: list[Artifact], platforms) 
 def _appended_data_findings(ctx: ScanContext, arts: list[Artifact]) -> list[Finding]:
     """Data found after an executable's or an image's own data (analysed as an artifact of its own) is worth a
     look in itself: appended to an executable it is a pattern of packed and self-extracting programs and of
-    droppers (suspicious); after an image or archive it may be a normal layout, such as an overlay (info)."""
+    droppers (suspicious); after an image or archive it may be a normal layout, such as an overlay (info). Data
+    inside an executable that no section or segment covers is suspicious too: linkers leave none."""
     from .findings import Classification as C
     from .findings import Confidence as K
     from .findings import Evidence
@@ -416,10 +417,23 @@ def _appended_data_findings(ctx: ScanContext, arts: list[Artifact]) -> list[Find
     out = []
     for a in arts:
         parent = by_id.get(a.parent_id) if a.parent_id is not None else None
-        if parent is None or a.origin != "carved" or not a.name.startswith("trailing_"):
+        if parent is None or a.origin != "carved" or not a.name.startswith(("trailing_", "uncovered_")):
             continue
         ev = Evidence("offset", f"{a.details.get('carved_offset', '?')}: {a.size:,} bytes ({a.format_description})",
                       ctx.where(a))
+        if a.name.startswith("uncovered_"):
+            if parent.format == "elf":
+                out.append(Finding(
+                    title="Executable holds data that no section or segment covers",
+                    description=f"'{parent.name}' holds {a.size:,} bytes inside its own extent that none of its headers, "
+                                "sections or segments covers. Linkers leave no such data; it can be a payload placed "
+                                "where an overlay check would not look. The data was analysed separately. This is a "
+                                "pattern, not a confirmed problem.",
+                    severity=S.low, classification=C.suspicious, confidence=K.medium, source_tool="builtin:extract",
+                    rule_id="uncovered-data-in-executable", affected_component=ctx.where(parent),
+                    remediation="Check what the data is and how the program was built or packed.",
+                    evidence=[ev], tags=["extraction"]))
+            continue
         if parent.format == "elf":
             out.append(Finding(
                 title="Executable carries appended data (overlay)",
