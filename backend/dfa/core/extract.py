@@ -105,6 +105,8 @@ class ExtractionResult:
     filesystems: list[dict] = field(default_factory=list)
     limits_hit: list[str] = field(default_factory=list)
     stats: dict = field(default_factory=dict)
+    # artifact id -> byte ranges (start, end) copied verbatim into carved children (not part of the manifest)
+    copied: dict[int, list[tuple[int, int]]] = field(default_factory=dict)
 
 
 # ----------------------------------------------------------------- helpers
@@ -686,6 +688,7 @@ class Extractor:
                                     f"analysed separately as {name}")
         child = self._child(art, dest, name, "carved")
         child.details["carved_offset"] = hex(off)
+        self.result.copied.setdefault(art.id, []).append((off, off + size))
         return [child]
 
     def h_gzip(self, art: Artifact) -> list[Artifact]:
@@ -1527,6 +1530,7 @@ class Extractor:
                     dest = new
                 else:
                     self._write_stream(_Bounded(fp, length), dest, label=name)
+                    self.result.copied.setdefault(art.id, []).append((off, off + length))
                 c = self._child(art, dest, name, "carved")
                 c.details["carved_offset"] = hex(off)
                 children.append(c)

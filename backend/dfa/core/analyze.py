@@ -107,7 +107,8 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
     result = ex.run(input_path, original_name)
     arts = result.artifacts
     display = build_display_paths(arts)
-    ctx = ScanContext(artifacts=arts, paths={a.id: ex.path_of(a.id) for a in arts}, display=display, limits=limits)
+    ctx = ScanContext(artifacts=arts, paths={a.id: ex.path_of(a.id) for a in arts}, display=display, limits=limits,
+                      copied=result.copied)
 
     progress("inventory")
     for a in arts:

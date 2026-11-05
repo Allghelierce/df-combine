@@ -1397,6 +1397,25 @@ def test_a_failed_image_is_carved_like_raw_data(tmp_path, run_analysis):
     assert res.artifacts[0].extraction == "failed" and len(res.artifacts) == 1
 
 
+def test_a_secret_in_a_carved_region_is_reported_once(tmp_path, run_analysis):
+    """A plaintext key inside a region carved verbatim out of a binary (a stored zip member in a flash dump, an
+    executable's overlay) was reported twice: at its offset in the binary and again for the extracted file."""
+    key = b"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA" + b"B" * 64 + b"\n-----END RSA PRIVATE KEY-----\n"
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("etc/ssl/server.key", key)
+    cases = {"flash.bin": (_noise(8192, 41) + b.getvalue() + _noise(4096, 42), "/etc/ssl/server.key"),
+             "plain.bin": (_noise(8192, 43) + key + _noise(4096, 44), "plain.bin")}  # not carved: found in place
+    elf = Path("/usr/bin/true")
+    if elf.is_file() and elf.read_bytes()[:4] == b"\x7fELF":
+        cases["tool"] = (elf.read_bytes() + b.getvalue(), "/etc/ssl/server.key")
+    for name, (data, where) in cases.items():
+        src = tmp_path / name
+        src.write_bytes(data)
+        keys = [f for f in run_analysis(src)["findings"] if f["rule_id"] == "pem-private-key"]
+        assert len(keys) == 1 and keys[0]["affected_component"].endswith(where), (name, keys)
+
+
 def test_carving_stays_disjoint_bounded_and_unhidden(tmp_path, run_analysis):
     """Zips carved back from forged end records nested and overlapped (100 near-full copies from 1 MB, past the
     carve limit); a stored member was also carved on its own (two findings for one key); a forged 7z header

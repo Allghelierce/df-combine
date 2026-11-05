@@ -27,6 +27,7 @@ class ScanContext:
     limits: Limits
     elf: dict[int, dict] = field(default_factory=dict)  # artifact id -> ElfInfo dict
     category: dict[int, str] = field(default_factory=dict)
+    copied: dict[int, list[tuple[int, int]]] = field(default_factory=dict)  # byte ranges carved verbatim into children
     _strings: dict[int, list[tuple[int, str]]] = field(default_factory=dict)
     _text: dict[int, str | None] = field(default_factory=dict)
 
@@ -63,6 +64,11 @@ class ScanContext:
                     break
             self._strings[art.id] = out
         return self._strings[art.id]
+
+    def outside_children(self, art: Artifact, offset: int) -> bool:
+        """Whether a byte of ``art`` lies outside the regions carved verbatim into child artifacts (whose own
+        analysis covers them)."""
+        return not any(start <= offset < end for start, end in self.copied.get(art.id, ()))
 
     def fs_path(self, art: Artifact) -> str:
         """Path of the artifact inside its filesystem/archive ('/etc/shadow')."""

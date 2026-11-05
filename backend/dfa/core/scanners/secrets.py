@@ -95,8 +95,9 @@ def scan(ctx: ScanContext) -> list[Finding]:
             out += _assignment_findings(ctx, art, text)
             out += _token_findings(ctx, art, ((0, ln) for ln in text.splitlines()), in_binary=False)
         else:
-            # Binary content: only high-signal patterns (PEM blocks, tokens).
-            strings = ctx.strings(art)
+            # Binary content: only high-signal patterns (PEM blocks, tokens). Regions carved verbatim into child
+            # artifacts are left to those (a key in a stored zip member is reported once, for the member).
+            strings = [(o, s) for o, s in ctx.strings(art) if ctx.outside_children(art, o)]
             joined = "\n".join(s for _, s in strings if "PRIVATE KEY" in s or "-----" in s or len(s) > 60)
             if "PRIVATE KEY" in joined:
                 out += _pem_findings(ctx, art, _rebuild_pem_text(ctx, art), in_binary=True)
@@ -105,7 +106,9 @@ def scan(ctx: ScanContext) -> list[Finding]:
 
 
 def _rebuild_pem_text(ctx: ScanContext, art) -> str:
-    raw = ctx.paths[art.id].read_bytes()[: ctx.limits.max_scan_bytes_per_file]
+    raw = bytearray(ctx.paths[art.id].read_bytes()[: ctx.limits.max_scan_bytes_per_file])
+    for start, end in ctx.copied.get(art.id, ()):
+        raw[start:end] = bytes(len(raw[start:end]))  # carved into a child: analysed there
     return raw.decode("latin-1")
 
 
