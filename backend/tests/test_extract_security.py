@@ -779,3 +779,42 @@ def test_root_filesystem_after_a_uimage_kernel_is_analysed(tmp_path):
     plain.write_bytes(kernel + b"\xff" * 4096)  # padding only: nothing extra
     res = Extractor(tmp_path / "w2", Limits()).run(plain, plain.name)
     assert not any(a.name.startswith("trailing_") for a in res.artifacts)
+
+
+def test_data_after_a_squashfs_image_is_analysed(tmp_path):
+    """In an OpenWrt-style rootfs partition the writable overlay (JFFS2, with the device's own configuration)
+    follows the SquashFS on the next erase block; only the SquashFS was extracted. The trailing artifact starts on
+    that erase block, past mksquashfs's zero padding and the 0xFF of erased flash."""
+    import gzip
+    import subprocess
+    if not shutil.which("mksquashfs"):
+        pytest.skip("mksquashfs unavailable")
+    tree = tmp_path / "rom"
+    (tree / "etc").mkdir(parents=True)
+    (tree / "etc" / "passwd").write_text("root:x:0:0::/root:/bin/ash\n")
+    sqfs = tmp_path / "rom.squashfs"
+    subprocess.run(["mksquashfs", str(tree), str(sqfs), "-noappend", "-quiet"], check=True, capture_output=True)
+    rom = sqfs.read_bytes()
+    pad = b"\xff" * (-len(rom) % 65536)
+    b = io.BytesIO()
+    with tarfile.open(fileobj=b, mode="w") as tf:
+        ti = tarfile.TarInfo("etc/shadow")
+        ti.size = 24
+        tf.addfile(ti, io.BytesIO(b"root:$1$changed:19000::\n"))
+    overlays = {"gzip": gzip.compress(b.getvalue(), mtime=0)}
+    if shutil.which("mkfs.jffs2"):
+        jffs2 = tmp_path / "overlay.jffs2"
+        subprocess.run(["mkfs.jffs2", "-r", str(tree), "-o", str(jffs2), "-e", "64KiB", "-l"], check=True,
+                       capture_output=True)
+        overlays["jffs2"] = jffs2.read_bytes()
+    for fmt, overlay in overlays.items():
+        img = tmp_path / f"rootfs-{fmt}.bin"
+        img.write_bytes(rom + pad + overlay)
+        res = Extractor(tmp_path / f"w_{fmt}", Limits()).run(img, img.name)
+        trailing = [a for a in res.artifacts if a.name.startswith("trailing_") and a.origin == "carved"]
+        assert len(trailing) == 1 and trailing[0].details["carved_offset"] == hex(len(rom) + len(pad)), fmt
+        assert trailing[0].format == fmt, (fmt, trailing[0].format)
+        if fmt == "gzip":
+            assert {"/etc/passwd", "/etc/shadow"} <= {a.name for a in res.artifacts if a.origin == "extracted"}
+    res = Extractor(tmp_path / "w_plain", Limits()).run(sqfs, sqfs.name)  # mksquashfs's own zero padding
+    assert not any(a.name.startswith("trailing_") for a in res.artifacts)

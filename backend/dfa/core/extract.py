@@ -155,6 +155,9 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+_NOT_PADDING = re.compile(rb"[^\x00\xff]")
+
+
 class _SkipCountingTarInfo(tarfile.TarInfo):
     """Counts the blocks tarfile skips with ignore_zeros (zero blocks, damaged headers) on its TarFile."""
 
@@ -577,17 +580,20 @@ class Extractor:
         to a directory of its own, so it never appears inside an extracted root filesystem."""
         with src.open("rb") as fp:
             fp.seek(off)
-            pos, start = off, None
+            pos, data_at = off, None
             while chunk := fp.read(COPY_CHUNK):
-                if start is None and (rest := chunk.lstrip(b"\xff")):
-                    start = pos + len(chunk) - len(rest)  # after 0xFF padding (zeros may be data: ext boot block)
-                if chunk.translate(None, b"\x00\xff"):
+                if m := _NOT_PADDING.search(chunk):
+                    data_at = pos + m.start()
                     break
                 pos += len(chunk)
-            else:
+            if data_at is None:
                 art.details["trailing_padding_bytes"] = art.size - off
                 return []
-            off = start if start is not None else off
+            # start after the padding, but back on the 4 KiB boundary when only zeros lie in between: an image
+            # placed on an erase block may begin with zeros itself (ext's boot block)
+            cand = max(off, data_at - data_at % 4096)
+            fp.seek(cand)
+            off = cand if not fp.read(data_at - cand).strip(b"\x00") else data_at
             size = art.size - off
             name = f"trailing_{off:08x}.bin"
             tdir = self.root / f"{art.id:05d}_trailing.d"
@@ -1113,7 +1119,12 @@ class Extractor:
         root = dest if dest.exists() else out
         listed = self._squashfs_modes(art, tool, root)
         self._record_fs(art, "squashfs", root, image_artifact=art.id, **({"unix_modes": True} if listed else {}))
-        return self._register_tree(art, root)
+        children = self._register_tree(art, root)
+        with self.path_of(art.id).open("rb") as fp:
+            end = _carve_length(fp, 0, "squashfs", art.size)
+        if end and end < art.size:  # e.g. OpenWrt's writable overlay after the SquashFS in the rootfs partition
+            children += self._trailing_data(art, self.path_of(art.id), end, "the SquashFS image")
+        return children
 
     def _squashfs_modes(self, art: Artifact, tool: str, root: Path) -> bool:
         """Original modes and owners from 'unsquashfs -lln'. Extraction by an unprivileged user, as in the
