@@ -161,7 +161,9 @@ class FactAdapter(ToolAdapter):
                     creds = self._credential_details(c, fw)
                     requested = set(self.settings.fact_plugins)
                     fs = normalize(fw, ctx.original_name if i == 0 else f"{ctx.original_name} > {t['file_name']}",
-                                   creds, requested=requested, paths=self._object_paths(c, fw, "crypto_material"))
+                                   creds, requested=requested,
+                                   paths={**self._object_paths(c, fw, "crypto_material"),
+                                          **self._object_paths(c, fw, "exploit_mitigations", MITIGATION_WEAK)})
                     findings += fs
                     components += fact_components(fw, t["label"])
                     analysis = fw.get("analysis", {}) or {}
@@ -211,10 +213,16 @@ class FactAdapter(ToolAdapter):
                                                            "components": components})
 
     @staticmethod
-    def _object_paths(c: httpx.Client, fw: dict, plugin: str, limit: int = 25) -> dict[str, str]:
-        """uid -> path inside the firmware for the files a plug-in summary points to (best effort)."""
+    def _object_paths(c: httpx.Client, fw: dict, plugin: str, labels=None, per_label: int = 10,
+                      limit: int = 60) -> dict[str, str]:
+        """uid -> path inside the firmware for the files a plug-in summary points to (best effort; only the
+        summary labels that become findings when ``labels`` is given)."""
         summary = (((fw or {}).get("analysis") or {}).get(plugin) or {}).get("summary") or {}
-        uids = sorted({u for v in summary.values() for u in v}) if isinstance(summary, dict) else []
+        uids: list[str] = []
+        if isinstance(summary, dict):
+            for label, us in summary.items():
+                if labels is None or label in labels:
+                    uids += [u for u in list(us)[:per_label] if u not in uids]
         out: dict[str, str] = {}
         for uid in uids[:limit]:
             try:

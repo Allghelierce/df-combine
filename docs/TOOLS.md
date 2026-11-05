@@ -134,6 +134,9 @@ parsing and error handling.
   from an earlier run that had requested it.)
 * **File count:** `number_of_included_files` counts direct children only (1 for a `.tar.gz`); the
   adapter reports `total_files_in_firmware`.
+* **Locations:** summaries only carry FACT object IDs; for crypto material and weak exploit
+  mitigations the adapter looks up each object's path (`/rest/file_object/<uid>`, bounded), so findings
+  name files (on Debian: PIE disabled on `/sbin/ldconfig`, RUNPATH set on the `gconv` modules).
 * **Plug-in selection** (`DFA_FACT_PLUGINS`): crypto material, users/passwords, software
   components, CVE lookup, known vulnerabilities, exploit mitigations, ELF analysis. FACT's own
   cwe_checker plug-in is **not** requested by default: in a real run it analysed every ELF of a
