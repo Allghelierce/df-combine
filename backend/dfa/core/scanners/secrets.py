@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import re
 
@@ -33,7 +34,14 @@ ASSIGN_RE = re.compile(
     \s*[:=]\s*
     (?P<q>["']?)(?P<val>[^"'\s#;]{4,128})(?P=q)""")
 PLACEHOLDERS = {"none", "null", "nil", "true", "false", "yes", "no", "xxxx", "xxxxxx", "******", "<password>",
-                "changeme_please", "required", "optional", "string", "example", "your_password", "password_here"}
+                "changeme_please", "required", "optional", "string", "example", "your_password", "password_here",
+                # configuration keywords seen in real root filesystems (nsswitch sources, Perl build flags,
+                # PAM profile fields), not credentials
+                "define", "undef", "files", "compat", "systemd", "primary", "additional", "sufficient",
+                "requisite", "include", "nis", "nisplus", "ldap", "winbind", "cache", "myhostname", "resolve"}
+# Files whose credential-looking keys are configuration vocabulary, not secrets
+NOT_CREDENTIAL_FILES = re.compile(r"(^|/)(nsswitch\.conf|Config(_heavy)?\.p[lm]|Config_git\.pl)$|/pam-configs/|"
+                                  r"/usr/share/(doc|man|info|locale)/")
 WEAK_VALUES = {"admin", "password", "root", "1234", "12345", "123456", "12345678", "toor", "default", "changeme",
                "dji12345", "drone", "pass", "letmein", "ardupilot", "px4"}
 
@@ -101,21 +109,43 @@ def _rebuild_pem_text(ctx: ScanContext, art) -> str:
     return raw.decode("latin-1")
 
 
+# Cryptographic toolkits embed public known-answer/self-test keys (e.g. GnuTLS's FIPS self-tests in
+# crypto-selftests-pk.c). Such keys are present but are not device secrets.
+CRYPTO_LIBRARY = re.compile(r"(^|/)lib(gnutls|crypto|ssl|mbedcrypto|mbedtls|mbedx509|nettle|hogweed|wolfssl|gcrypt|"
+                            r"tomcrypt|sodium|nss3|softokn3|freebl3)[\w.+-]*\.so(\.[\d.]+)?$")
+_B64_LINE = re.compile(r"[A-Za-z0-9+/]+={0,2}")
+_ARMOR_HEADER = re.compile(r"^(Proc-Type|DEK-Info|Comment|Version|Hash|Charset)\s*:", re.I)
+
+
+def pem_body(raw: str) -> str | None:
+    """The base64 payload of a PEM/armored block, or None if the content between the markers is not one
+    (e.g. other string constants that sit between a library's BEGIN/END literals)."""
+    lines = [ln.strip() for ln in raw.replace("\r", "").split("\n")]
+    lines = [ln for ln in lines if ln and not _ARMOR_HEADER.match(ln)]
+    if lines and lines[-1].startswith("=") and len(lines[-1]) == 5:  # OpenPGP armor checksum
+        lines = lines[:-1]
+    if not lines or not all(_B64_LINE.fullmatch(ln) for ln in lines):
+        return None
+    body = "".join(lines)
+    try:
+        base64.b64decode(body + "=" * (-len(body) % 4), validate=True)
+    except (ValueError, binascii.Error):
+        return None
+    return body
+
+
 def _pem_findings(ctx: ScanContext, art, text: str, in_binary: bool) -> list[Finding]:
     out = []
     path = ctx.fs_path(art)
     base = path.rsplit("/", 1)[-1]
     for m in PEM_RE.finditer(text):
         kind = m.group(1)
-        body = re.sub(r"\s+", "", m.group(2))
-        body = re.sub(r"^(Proc-Type|DEK-Info):[^\n]*", "", body)
-        encrypted = "ENCRYPTED" in kind or "Proc-Type:4,ENCRYPTED" in m.group(2)
-        valid = len(body) >= 64
-        try:
-            base64.b64decode(body[: len(body) // 4 * 4] or "AAAA", validate=False)
-        except Exception:  # noqa: BLE001
-            valid = False
-        fp = hashlib.sha256(body.encode()).hexdigest()[:16]
+        body = pem_body(m.group(2))
+        encrypted = "ENCRYPTED" in kind or "Proc-Type: 4,ENCRYPTED" in m.group(2) or "Proc-Type:4,ENCRYPTED" in m.group(2)
+        valid = body is not None and len(body) >= 64
+        if not valid and in_binary:
+            continue  # PEM marker strings of a parser/library (header and footer constants), not a key
+        fp = hashlib.sha256((body or "").encode()).hexdigest()[:16]
         host_key = bool(re.search(r"(ssh_host_.*_key|dropbear_.*host_key)$", base))
         if host_key:
             title = "SSH host private key embedded in image"
@@ -139,12 +169,25 @@ def _pem_findings(ctx: ScanContext, art, text: str, in_binary: bool) -> list[Fin
                                remediation="Review the referenced file manually.",
                                evidence=[Evidence("string", f"-----BEGIN {kind}-----", path)], cwe="CWE-321"))
             continue
+        if in_binary and CRYPTO_LIBRARY.search(path):
+            out.append(Finding(
+                title="Self-test key material in a cryptographic library",
+                description=(f"'{base}' embeds a complete PEM '{kind}' block. Cryptographic libraries ship public "
+                             "known-answer/self-test keys (GnuTLS, for example, for its FIPS self-tests); such a key "
+                             "is not a device secret. Confirm the key is not used for device identity, signing or TLS."),
+                severity=S.info, classification=C.info, confidence=K.medium, source_tool=TOOL,
+                rule_id="crypto-library-test-key", affected_component=ctx.where(art),
+                remediation="No action if this is the library's built-in self-test key.",
+                evidence=[Evidence("string", f"-----BEGIN {kind}----- (body sha256 prefix {fp}, {len(body)} b64 chars)",
+                                   path + f" @ offset {m.start():#x}")],
+                cwe="CWE-321", tags=["crypto", "self-test"]))
+            continue
         out.append(Finding(
             title=title, description=desc, severity=sev, classification=C.detected,
             confidence=K.high if not in_binary else K.medium, source_tool=TOOL,
             rule_id="ssh-host-key" if host_key else "pem-private-key", affected_component=ctx.where(art),
             remediation=rem,
-            evidence=[Evidence("string", f"-----BEGIN {kind}----- (body sha256 prefix {fp}, {len(body)} b64 chars)",
+            evidence=[Evidence("string", f"-----BEGIN {kind}----- (body sha256 prefix {fp}, {len(body or '')} b64 chars)",
                                path + (f" @ offset {m.start():#x}" if in_binary else ""))],
             cwe="CWE-321", references=["https://cwe.mitre.org/data/definitions/321.html"],
             tags=["credentials", "crypto"]))
@@ -298,7 +341,7 @@ def _credential_file(ctx: ScanContext, art, text: str, base: str) -> list[Findin
 def _assignment_findings(ctx: ScanContext, art, text: str) -> list[Finding]:
     out = []
     path = ctx.fs_path(art)
-    if path.rsplit("/", 1)[-1] in ("hostapd.conf", "shadow", "passwd"):
+    if path.rsplit("/", 1)[-1] in ("hostapd.conf", "shadow", "passwd") or NOT_CREDENTIAL_FILES.search(path):
         return out
     hits = []
     for n, line in enumerate(text.splitlines()[:50_000], 1):

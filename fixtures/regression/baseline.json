@@ -239,8 +239,7 @@
    "builtin:components:outdated-openssl": 1,
    "builtin:components:outdated-zlib": 1,
    "builtin:config:setuid-files": 1,
-   "builtin:secrets:hardcoded-credential-assignment": 6,
-   "builtin:secrets:pem-private-key": 10
+   "builtin:secrets:crypto-library-test-key": 10
   },
   "identification": {
    "architecture": "ARM (32-bit)",
