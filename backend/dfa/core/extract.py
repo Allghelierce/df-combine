@@ -1182,7 +1182,8 @@ class Extractor:
 
         rdump materialises symlinks and then writes later entries *through* them (a crafted image with
         duplicate directory entries can write outside the extraction root).  Instead the tree is listed
-        with 'ls -p' and each regular file is written with 'dump' to a path we created and confined.
+        with 'ls -p' and each regular file is written with 'dump', by inode number, to a name we chose; it
+        is then moved to its confined path, so no name from the image ever appears in a debugfs command.
         """
         tool = self._need_tool("debugfs", "ext2/3/4 filesystem")
         out = self._out_dir(art)
@@ -1194,7 +1195,7 @@ class Extractor:
         planned: list[tuple[str, Path, int, dict]] = []
         reserved = 0
         over_budget = None
-        for path, mode, uid, gid, size in files:
+        for path, mode, uid, gid, size, ino in files:
             try:
                 target = _confined(dest, safe_member_path(path))
             except UnsafePath as exc:
@@ -1211,11 +1212,13 @@ class Extractor:
                 self.result.warnings.append(f"{art.name}: duplicate entry {path!r} skipped")
                 continue
             reserved += size
-            planned.append((path, target, size, {"mode": mode & 0o7777, "uid": uid, "gid": gid}))
+            planned.append((path, target, size, {"mode": mode & 0o7777, "uid": uid, "gid": gid}, ino))
         seen_targets: set[str] = set()
         batch: list[str] = []
         todo = []
-        for path, target, size, meta in planned:
+        staging = out / ".dump"  # debugfs writes by inode to names we chose; files are moved into place after
+        staging.mkdir()
+        for n, (path, target, size, meta, ino) in enumerate(planned):
             if str(target) in seen_targets:
                 continue
             seen_targets.add(str(target))
@@ -1224,22 +1227,30 @@ class Extractor:
             except (FileExistsError, NotADirectoryError):
                 self.result.warnings.append(f"{art.name}: rejected member {path!r}: path collision")
                 continue
-            batch.append(f'dump "{path}" "{target}"\n')
-            todo.append((target, size, meta))
+            batch.append(f'dump <{ino}> "{staging / str(n)}"\n')
+            todo.append((path, staging / str(n), target, size, meta))
         for i in range(0, len(batch), 2000):
             self._debugfs(art, tool, batch[i:i + 2000])
-        for target, _size, meta in todo:
+        for path, tmp, target, _size, meta in todo:
             try:
-                st = target.lstat()
+                st = tmp.lstat()
             except FileNotFoundError:
+                self.result.warnings.append(f"{art.name}: {path!r} could not be read from the image")
                 continue
             if not stat.S_ISREG(st.st_mode):
-                target.unlink()
+                tmp.unlink()
+                continue
+            try:
+                os.rename(tmp, target)
+            except OSError as exc:
+                tmp.unlink(missing_ok=True)
+                self.result.warnings.append(f"{art.name}: rejected member {path!r}: {exc.strerror}")
                 continue
             os.chmod(target, 0o644)
             self.budget.charge_file()
             self.budget.charge_bytes(st.st_size, file_total=st.st_size)
             self._note_meta(target, **meta)
+        shutil.rmtree(staging, ignore_errors=True)
         if over_budget:
             raise LimitExceeded(over_budget)
         return self._register_tree(art, dest)
@@ -1261,59 +1272,72 @@ class Extractor:
             raise LimitExceeded(f"debugfs timed out after {self.limits.tool_timeout_s}s") from None
         finally:
             cmdfile.unlink(missing_ok=True)
-        return proc.stdout.decode("utf-8", "replace")
+        return proc.stdout.decode("utf-8", "surrogateescape")  # names keep their bytes (escaped later)
 
-    def _ext_list(self, art: Artifact, tool: str) -> list[tuple[str, int, int, int, int]]:
-        """Breadth-first listing via 'ls -p'. Returns regular files as (path, mode, uid, gid, size)."""
-        files: list[tuple[str, int, int, int, int]] = []
-        seen_dirs: set[str] = set()
-        level = ["/"]
+    def _ext_list(self, art: Artifact, tool: str) -> list[tuple[str, int, int, int, int, int]]:
+        """Breadth-first listing via 'ls -p <inode>': no names in commands, so a name may hold any byte but '/'
+        and NUL (quotes, backslashes, newlines, bytes that are not UTF-8 used to be skipped, together with
+        everything below such a directory). Returns regular files as (path, mode, uid, gid, size, inode)."""
+        files: list[tuple[str, int, int, int, int, int]] = []
+        paths: dict[int, str] = {2: ""}  # directory inode -> display path (2: the root directory)
+        level = [2]
         depth = 0
-        entries = 0
         while level and depth <= MAX_PATH_DEPTH:
-            out = self._debugfs(art, tool, [f'ls -p "{d}"\n' for d in level])
-            nxt: list[str] = []
-            current = None
-            for line in out.splitlines():
-                if line.startswith("debugfs: ls -p "):
-                    current = line[len("debugfs: ls -p "):].strip()
-                    if len(current) >= 2 and current[0] == current[-1] == '"':
-                        current = current[1:-1]
-                    continue
-                parts = line.split("/")
-                if current is None or len(parts) < 7 or parts[0] != "":
-                    continue
-                try:
-                    ino, mode, uid, gid = int(parts[1]), int(parts[2], 8), int(parts[3]), int(parts[4])
-                    size = int(parts[6]) if parts[6] else 0
-                except ValueError:
-                    continue
-                name = parts[5]
-                if name in (".", "..", ""):
-                    continue
-                path = (current.rstrip("/") + "/" + name)
-                if any(c in name for c in '"\\\n\r') or not name.isprintable():
-                    self.result.warnings.append(f"{art.name}: entry with unsupported characters skipped: {name!r}")
-                    continue
-                entries += 1
-                if entries > self.limits.max_files:
+            nxt: list[int] = []
+            for i in range(0, len(level), 20_000):  # directories per debugfs run (all of them are listed)
+                self._ext_ls(art, tool, level[i:i + 20_000], paths, nxt, files)
+                if len(files) + len(paths) > self.limits.max_files:
                     self.result.limits_hit.append("max_files")
                     return files
-                if stat.S_ISDIR(mode):
-                    key = f"{ino}"
-                    if key not in seen_dirs:
-                        seen_dirs.add(key)
-                        nxt.append(path)
-                elif stat.S_ISREG(mode):
-                    files.append((path, mode, uid, gid, size))
-                elif stat.S_ISLNK(mode):
-                    self._record_link(art, path, "symlink", None)
-                else:
-                    kind = "device" if (stat.S_ISCHR(mode) or stat.S_ISBLK(mode)) else "fifo"
-                    self._record_link(art, path, kind, None)
-            level = nxt[:20000]
+            level = nxt
             depth += 1
+        if level:
+            self.result.warnings.append(f"{art.name}: directories nested deeper than {MAX_PATH_DEPTH} levels not listed")
         return files
+
+    def _ext_ls(self, art: Artifact, tool: str, inodes: list[int], paths: dict[int, str], nxt: list[int],
+                files: list[tuple[str, int, int, int, int, int]]) -> None:
+        out = self._debugfs(art, tool, [f"ls -p <{ino}>\n" for ino in inodes])
+        current: str | None = None
+        record = ""
+        for line in out.split("\n"):
+            if line.startswith("debugfs: "):
+                m = re.match(r"debugfs: ls -p <(\d+)>$", line)
+                current, record = (paths.get(int(m.group(1))) if m else None), ""
+                continue
+            if current is None:
+                continue
+            record = f"{record}\n{line}" if record else line
+            if not record.startswith("/") or record.count("\n") > 8:
+                record = ""
+                continue
+            if record.count("/") < 7:
+                continue  # a name with a newline: the record goes on in the next line
+            parts, record = record.split("/"), ""
+            if len(parts) != 8:
+                continue
+            try:
+                ino, mode, uid, gid = int(parts[1]), int(parts[2], 8), int(parts[3]), int(parts[4])
+                size = int(parts[6]) if parts[6] else 0
+            except ValueError:
+                continue
+            name = parts[5]  # raw bytes as surrogates: safe_member_path escapes them after its separator check
+            if name in (".", "..", "") or ino < 1:
+                continue
+            path = f"{current}/{name}"
+            if len(files) + len(paths) > self.limits.max_files:
+                return  # the caller records the limit
+            if stat.S_ISDIR(mode):
+                if ino not in paths:
+                    paths[ino] = path
+                    nxt.append(ino)
+            elif stat.S_ISREG(mode):
+                files.append((path, mode, uid, gid, size, ino))
+            elif stat.S_ISLNK(mode):
+                self._record_link(art, path, "symlink", None)
+            else:
+                kind = "device" if (stat.S_ISCHR(mode) or stat.S_ISBLK(mode)) else "fifo"
+                self._record_link(art, path, kind, None)
 
     def h_fat(self, art: Artifact) -> list[Artifact]:
         tool = self._need_tool("mcopy", "FAT filesystem")

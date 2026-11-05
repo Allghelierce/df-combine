@@ -818,3 +818,32 @@ def test_data_after_a_squashfs_image_is_analysed(tmp_path):
             assert {"/etc/passwd", "/etc/shadow"} <= {a.name for a in res.artifacts if a.origin == "extracted"}
     res = Extractor(tmp_path / "w_plain", Limits()).run(sqfs, sqfs.name)  # mksquashfs's own zero padding
     assert not any(a.name.startswith("trailing_") for a in res.artifacts)
+
+
+def test_ext_names_with_quotes_newlines_or_bytes_that_are_not_utf8_are_extracted(tmp_path):
+    """debugfs commands carried the names, so entries with quotes, backslashes, newlines, tabs, non-printable or
+    non-UTF-8 bytes were skipped (a directory like that hid everything below it; two of them vanished without a
+    warning). Listing and dumping now go by inode number."""
+    import subprocess
+    if not shutil.which("mkfs.ext4") or not shutil.which("debugfs"):
+        pytest.skip("e2fsprogs unavailable")
+    tree = os.fsencode(tmp_path / "tree")
+    names = [b'a"b', b"new\nline", b"bad\x80", "nbsp x".encode(), b"tab\tname", b"esc\x1bname", b"plain"]
+    os.makedirs(tree + b'/dir"x/deeper')
+    for n in names:
+        with open(tree + b"/" + n, "wb") as fp:
+            fp.write(b"data:" + n)
+    with open(tree + b'/dir"x/deeper/inner.txt', "wb") as fp:
+        fp.write(b"inside a quoted directory")
+    img = tmp_path / "ext.img"
+    subprocess.run(["mkfs.ext4", "-q", "-F", "-d", os.fsdecode(tree), "-b", "1024", str(img), "2M"], check=True,
+                   capture_output=True)
+    ex = Extractor(tmp_path / "w", Limits())
+    res = ex.run(img, "ext.img")
+    got = {a.name: ex.path_of(a.id).read_bytes() for a in res.artifacts if a.origin == "extracted"}
+    assert got == {'/a"b': b'data:a"b', "/new\nline": b"data:new\nline", "/bad\\x80": b"data:bad\x80",
+                   "/nbsp x": "data:nbsp x".encode(), "/tab\tname": b"data:tab\tname",
+                   "/esc\x1bname": b"data:esc\x1bname", "/plain": b"data:plain",
+                   '/dir"x/deeper/inner.txt': b"inside a quoted directory"}
+    assert not res.warnings
+    assert not list((tmp_path / "w" / "files").rglob(".dump"))  # the staging directory is removed
