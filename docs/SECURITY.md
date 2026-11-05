@@ -113,6 +113,12 @@ access the scan directory only through `dfa/safefs.py`:
   down to each finding's field types and enum values; lone surrogates (bytes that are not UTF-8) are
   shown as `\xNN`, so no sandbox output can break the database, the JSON API or the reports, and
   the UI turns only absolute http(s) references into links;
+* JSON from untrusted sources (`.px4`/`.apj` containers, the manifest, cwe_checker, Ghidra,
+  FwAnalyzer and FACT output) is parsed with `NaN`/`Infinity`, overflowing floats and integers of
+  more than 40 digits as `null` (`dfa/core/safejson.py`): before, a container with `"board_id": NaN`
+  made the scan unviewable (the API's JSON responses refuse non-finite floats), and a 5,000-digit
+  integer would have made the whole container unreadable. API responses also send any non-finite
+  float as `null` instead of failing;
 * paths taken from the manifest (artifacts, filesystem roots, permission images) are resolved and must
   stay inside the work directory before any adapter uses them;
 * progress messages from the sandbox are throttled and capped per poll;

@@ -21,6 +21,7 @@ import shutil
 from pathlib import Path
 
 from ..containers import JobError, JobRejected, get_runner
+from ..core import safejson
 from ..core.findings import Classification as C
 from ..core.findings import Confidence as K
 from ..core.findings import Evidence, Finding
@@ -187,7 +188,7 @@ class FwAnalyzerAdapter(ToolAdapter):
             first = (stderr or stdout).strip().splitlines()[:1]
             return None, f"exit code {rc}: {first[0][:200] if first else 'no output'}"
         try:
-            return json.loads(raw), ""
+            return safejson.loads(raw), ""
         except json.JSONDecodeError as exc:
             return None, f"invalid JSON report: {exc}"
 

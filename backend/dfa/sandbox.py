@@ -26,6 +26,7 @@ from pathlib import Path
 
 from . import safefs
 from .config import BACKEND_DIR, Settings
+from .core import safejson
 from .core.findings import Classification, Confidence, Severity
 from .core.text import clean_strings
 
@@ -203,7 +204,7 @@ def load_manifest(base: Path, name: str, settings: Settings) -> dict:
     """Parse a sandbox-produced manifest: size-limited, no links followed, shape checked.
     Raises FileNotFoundError, OSError, ValueError or RecursionError (deeply nested JSON)."""
     raw = safefs.read_bytes(base, name, settings.max_manifest_mb * 1024 * 1024)
-    data = json.loads(raw)
+    data = safejson.loads(raw)  # NaN, infinities and over-long ints -> None
     if not isinstance(data, dict):
         raise ValueError("manifest is not a JSON object")
     if _MAYBE_SURROGATE.search(raw):  # lone surrogates cannot be stored or served: show them as \xNN

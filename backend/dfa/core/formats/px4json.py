@@ -14,6 +14,8 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Any
 
+from .. import safejson
+
 MAGICS = {"PX4FWv1": "PX4", "APJFWv1": "ArduPilot"}
 METADATA_KEYS = (
     "board_id", "board_revision", "magic", "description", "summary", "version",
@@ -59,7 +61,7 @@ def _inflate(blob_b64: str, limit: int) -> bytes:
 
 def parse_container(raw: bytes, max_image_bytes: int) -> FirmwareContainer:
     try:
-        doc = json.loads(raw.decode("utf-8"))
+        doc = safejson.loads(raw.decode("utf-8"))  # NaN, infinities, 5,000-digit ints -> None
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ContainerError(f"not a JSON firmware container: {exc}") from None
     if not isinstance(doc, dict) or "image" not in doc:

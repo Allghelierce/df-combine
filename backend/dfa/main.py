@@ -38,6 +38,7 @@ from .auth import (
     utcnow,
 )
 from .config import Settings, get_settings
+from .core import safejson
 from .db import get_session, init_engine, session_scope
 from .models import ApiToken, FindingRow, Scan, ScanEvent, User
 from .reports.export import finding_to_dict, json_report, pdf_report, scan_to_dict
@@ -49,6 +50,17 @@ CHUNK = 1024 * 1024
 MULTIPART_OVERHEAD = 64 * 1024
 CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; "
        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+
+
+class FiniteJSONResponse(JSONResponse):
+    """A non-finite float anywhere in a response (tool output, data stored before parsing was hardened) is sent
+    as null instead of failing the whole response: Starlette refuses NaN/Infinity, which made a scan unviewable."""
+
+    def render(self, content) -> bytes:  # noqa: ANN001 - any JSON-like value
+        try:
+            return super().render(content)
+        except ValueError:
+            return super().render(safejson.finite(content))
 
 
 class UploadLimitMiddleware:
@@ -134,7 +146,7 @@ def create_app(settings: Settings | None = None, start_worker: bool | None = Non
             worker_holder["w"].stop()
 
     app = FastAPI(title="Drone Firmware Analyzer", version=__version__, lifespan=lifespan,
-                  docs_url="/api/docs", openapi_url="/api/openapi.json")
+                  docs_url="/api/docs", openapi_url="/api/openapi.json", default_response_class=FiniteJSONResponse)
     app.state.settings = settings
     app.state.worker = worker_holder
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_methods=["*"],

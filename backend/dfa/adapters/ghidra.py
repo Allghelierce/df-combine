@@ -19,6 +19,7 @@ import json
 from collections import Counter
 
 from ..containers import JobError, JobRejected, get_runner
+from ..core import safejson
 from ..core.findings import Classification as C
 from ..core.findings import Confidence as K
 from ..core.findings import Evidence, Finding
@@ -126,7 +127,7 @@ class GhidraAdapter(ToolAdapter):
                 summaries.append({"binary": a["display_path"], "status": "failed", "error": err[:400]})
                 continue
             try:
-                data = json.loads(raw)
+                data = safejson.loads(raw)
             except json.JSONDecodeError as exc:
                 failures += 1
                 summaries.append({"binary": a["display_path"], "status": "failed", "error": f"bad JSON: {exc}"})

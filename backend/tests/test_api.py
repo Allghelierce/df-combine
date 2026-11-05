@@ -347,3 +347,35 @@ def test_pdf_report_survives_texts_longer_than_a_page(client, settings, fixtures
     full = client.get(f"/api/scans/{s['id']}/report.json").json()["scan"]["findings"]
     assert any(f["description"] == "D" * 60000 for f in full)
 
+
+
+def test_px4_container_with_non_finite_numbers_stays_viewable(client, settings, fixtures, tmp_path):
+    """.px4/.apj containers are JSON, and Python's json accepts NaN, Infinity and 1e999 (= inf). Such values in
+    the metadata must not make the scan unviewable: Starlette's JSON responses reject non-finite floats."""
+    import json as _json
+    doc = _json.loads(fixtures["px4"].read_text())
+    text = _json.dumps({**doc, "board_id": "@NAN@", "build_time": "@BIG@", "image_maxsize": "@NINF@",
+                        "board_revision": "@BIG@", "flash_free": "@NAN@", "flash_total": "@LONG@"})
+    text = (text.replace('"@NAN@"', "NaN").replace('"@BIG@"', "1e999").replace('"@NINF@"', "-Infinity")
+            .replace('"@LONG@"', "9" * 5000))  # int() refuses more than 4,300 digits
+    src = tmp_path / "odd.px4"
+    src.write_text(text)
+    s = upload(client, src)
+    process_all(settings)
+    d = client.get(f"/api/scans/{s['id']}")
+    assert d.status_code == 200, d.text[:300]
+    assert d.json()["status"] == "completed", d.json().get("error")
+    for route in ("findings", "artifacts", "packages", "report.json", "report.pdf", "report.sarif", "sbom.cdx.json"):
+        assert client.get(f"/api/scans/{s['id']}/{route}").status_code == 200, route
+    assert client.get("/api/scans").status_code == 200
+    ident = d.json()["identification"]
+    assert ident["platform"] == "PX4" and ident.get("board_id") is None  # NaN parsed as null, rest kept
+    arts = client.get(f"/api/scans/{s['id']}/artifacts").json()["items"]
+    assert any(a["name"].endswith("rcS") for a in arts)  # the container was still unpacked and analysed
+    # last line of defence: a non-finite float already stored (or from a tool) is sent as null
+    from dfa.db import session_scope
+    from dfa.models import Scan
+    with session_scope() as db:
+        db.get(Scan, s["id"]).identification = {**ident, "board_id": float("nan"), "odd": [float("inf")]}
+    d = client.get(f"/api/scans/{s['id']}")
+    assert d.status_code == 200 and d.json()["identification"]["odd"] == [None]

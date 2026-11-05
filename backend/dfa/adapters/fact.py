@@ -29,6 +29,7 @@ from pathlib import Path
 
 import httpx
 
+from ..core import safejson
 from ..core.findings import Classification as C
 from ..core.findings import Confidence as K
 from ..core.findings import Evidence, Finding
@@ -53,6 +54,11 @@ PLUGIN_MAP = {
     "exploit_mitigations": (S.low, C.detected, "Exploit mitigation", "CWE-693"),
 }
 
+
+
+def _json(r: httpx.Response):  # noqa: ANN202 - any JSON value
+    """FACT's responses describe hostile firmware: NaN, infinities and over-long ints parse as None."""
+    return safejson.loads(r.content)
 
 class FactAdapter(ToolAdapter):
     name = "fact"
@@ -146,12 +152,12 @@ class FactAdapter(ToolAdapter):
                 }
                 submitted = time.time()
                 r = self._put_once_more_on_reset(c, payload)
-                if r.status_code not in (200, 201) or not r.json().get("uid"):
+                if r.status_code not in (200, 201) or not _json(r).get("uid"):
                     failed += 1
                     submissions.append({"target": t["label"], "status": "failed",
                                         "error": f"HTTP {r.status_code} {r.text[:200]}"})
                     continue
-                uid = r.json()["uid"]
+                uid = _json(r)["uid"]
                 ctx.log(f"FACT: submitted {t['label']} as {uid}; waiting for unpacking and analysis")
                 state, fw = self._wait(c, uid, submitted)
                 entry: dict = {"target": t["label"], "uid": uid, "status": state}
@@ -225,7 +231,7 @@ class FactAdapter(ToolAdapter):
         for uid in uids[:limit]:
             try:
                 r = c.get(f"/rest/file_object/{uid}")
-                hid = ((r.json().get("file_object") or {}).get("meta_data") or {}).get("hid") if r.status_code == 200 \
+                hid = ((_json(r).get("file_object") or {}).get("meta_data") or {}).get("hid") if r.status_code == 200 \
                     else None
             except (httpx.HTTPError, ValueError):
                 break
@@ -245,7 +251,7 @@ class FactAdapter(ToolAdapter):
                 r = c.get(f"/rest/file_object/{uid}")
                 if r.status_code != 200:
                     return None
-                fo = r.json().get("file_object") or {}
+                fo = _json(r).get("file_object") or {}
                 result = (((fo.get("analysis") or {}).get("users_and_passwords") or {}).get("result")) or {}
                 path = (fo.get("meta_data") or {}).get("hid")
                 for kind in ("unix", "http", "mosquitto"):
@@ -290,7 +296,7 @@ class FactAdapter(ToolAdapter):
         if fr.status_code != 200:
             return None
         try:
-            return fr.json().get("firmware") or None
+            return _json(fr).get("firmware") or None
         except ValueError:
             return None
 
@@ -304,7 +310,7 @@ class FactAdapter(ToolAdapter):
         and cancelled entries only count if FACT stamped them (time_finished) after our submission."""
         try:
             r = c.get("/rest/status")
-            data = r.json()
+            data = _json(r)
         except (httpx.HTTPError, ValueError):
             return "running"
         backend = data.get("system_status", {}).get("backend", {}) or {}

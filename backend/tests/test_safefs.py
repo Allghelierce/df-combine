@@ -55,3 +55,37 @@ def test_writes_replace_planted_links_instead_of_following_them(tmp_path):
     assert not (tmp_path / "fact").exists() and not (tmp_path / "cwe_checker").exists()
     assert safefs.ensure_dir(work, "out/a") == work / "out" / "a" and (work / "out" / "a").is_dir()
     assert [p.name for p in work.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_safejson_keeps_documents_with_non_finite_or_huge_numbers():
+    """Python's json accepts NaN/Infinity, turns 1e999 into inf and refuses ints over 4,300 digits; untrusted JSON
+    (containers, manifest, tool output) parses with those values as None and the rest of the document kept."""
+    import json
+    import math
+
+    from dfa.core import safejson
+    doc = safejson.loads('{"a": NaN, "b": [1e999, -Infinity, 2.5, -1e-999], "big": 1' + "0" * 5000
+                         + ', "id": -123456789012345678901234567890, "ok": 1e3, "s": "NaN"}')
+    assert doc == {"a": None, "b": [None, None, 2.5, -0.0], "big": None, "id": -123456789012345678901234567890,
+                   "ok": 1000.0, "s": "NaN"}
+    with pytest.raises(json.JSONDecodeError):
+        safejson.loads("{broken")
+    x = {"z": 1, "n": {"f": math.nan, "l": [math.inf, 1.0, (2, -math.inf)]}, "k": "s"}
+    assert safejson.finite(x) == {"z": 1, "n": {"f": None, "l": [None, 1.0, [2, None]]}, "k": "s"}
+    assert list(safejson.finite(x)) == ["z", "n", "k"] and math.isnan(x["n"]["f"])  # order kept, input untouched
+    deep = cur = []
+    for _ in range(50_000):  # deeper than the recursion limit
+        cur.append([])
+        cur = cur[0]
+    cur.append(math.nan)
+    safejson.finite(deep)
+
+
+def test_manifest_with_non_finite_numbers_loads_as_null(settings, tmp_path):
+    import json
+
+    from dfa.sandbox import load_manifest
+    work = tmp_path / "w"
+    work.mkdir()
+    (work / "manifest.json").write_text(json.dumps({"fatal_error": "x", "n": float("nan"), "i": float("inf")}))
+    assert load_manifest(work, "manifest.json", settings) == {"fatal_error": "x", "n": None, "i": None}

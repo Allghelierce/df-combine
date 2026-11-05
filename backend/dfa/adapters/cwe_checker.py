@@ -19,6 +19,7 @@ import shutil
 from collections import defaultdict
 
 from ..containers import JobError, JobRejected, get_runner
+from ..core import safejson
 from ..core.findings import Classification as C
 from ..core.findings import Confidence as K
 from ..core.findings import Evidence, Finding
@@ -218,7 +219,7 @@ def parse_output(stdout: str) -> list[dict]:
     if start < 0:
         raise ValueError("cwe_checker output contains no JSON array")
     try:
-        data = json.loads(text[start:])
+        data = safejson.loads(text[start:])
     except json.JSONDecodeError as exc:
         raise ValueError(f"could not parse cwe_checker JSON: {exc}") from None
     if not isinstance(data, list):
@@ -279,7 +280,7 @@ def _load_symbols(ctx: AdapterContext, art: dict) -> SymbolMap | None:
     if not rel:
         return None
     try:  # written by the sandbox: regular file below the work directory, size limited
-        data = json.loads(ctx.read_artifact({"path": str(rel)}, 64 * 1024 * 1024))
+        data = safejson.loads(ctx.read_artifact({"path": str(rel)}, 64 * 1024 * 1024))
         return SymbolMap(data) if isinstance(data, list) else None
     except (OSError, ValueError, TypeError):
         return None
