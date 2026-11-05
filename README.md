@@ -12,7 +12,7 @@ firmware are first-class targets; format, platform and tool registries are desig
 |---|---|
 | **Upload** | Drag-and-drop UI or `POST /api/scans`. Authenticated, size-limited (checked before the multipart body is spooled), rate-limited per user, hashed (SHA-256), stored read-only. Firmware is **never executed**. |
 | **Identification** | Content-based format detection (extensions are ignored); platform (PX4, ArduPilot, Betaflight, INAV, Espressif, Linux companion; DJI `IM*H` and Parrot `PLF` containers), version, vehicle type, board ID; architecture from ELF headers, Cortex-M vector tables, ESP image headers or — for headerless code — opcode-signature voting (ARM, Thumb-2, AArch64, MIPS BE/LE, PowerPC, x86/x86-64, Xtensa, RISC-V). |
-| **Extraction** | Recursive, in a network-less container, with traversal/link/device protection and size/count/depth/ratio budgets. ZIP, tar, gzip, bzip2, xz, LZMA, **Zstandard, LZ4 (frame + legacy), lzop/LZO**, cpio, ROMFS, **NuttX CROMFS (PX4 `/etc`)**, SquashFS, ext2/3/4, FAT, **CramFS**, UBI/UBIFS, JFFS2, EROFS (identified), **Android sparse**, MBR/GPT, U-Boot uImage, Intel HEX, DfuSe, PX4 `.px4`, ArduPilot `.apj`, **ESP application images and ESP flash dumps (partition table)**, **Parrot PLF**, **DJI IM\*H plaintext chunks** (encrypted chunks are reported, never decrypted). Carving of embedded filesystems/streams from raw images. |
+| **Extraction** | Recursive, in a network-less container, with traversal/link/device protection and size/count/depth/ratio budgets. ZIP, tar, gzip, bzip2, xz, LZMA, **Zstandard, LZ4 (frame + legacy), lzop/LZO**, cpio, ROMFS, **NuttX CROMFS (PX4 `/etc`)**, SquashFS, ext2/3/4, FAT, **CramFS**, UBI/UBIFS, JFFS2, **EROFS**, **Android sparse**, MBR/GPT, U-Boot uImage, Intel HEX, DfuSe, PX4 `.px4`, ArduPilot `.apj`, **ESP application images and ESP flash dumps (partition table)**, **Parrot PLF**, **DJI IM\*H plaintext chunks** (encrypted chunks are reported, never decrypted). Carving of embedded filesystems/streams from raw images. |
 | **Built-in scanners** | Credentials, keys and tokens; `/etc/shadow`; insecure services; PX4 circuit breakers / ArduPilot safety parameters; MAVLink exposure; ELF hardening and dangerous imports; component version strings; **package inventories** (dpkg, apk, opkg, Python) with file ownership. |
 | **External engines** | **FwAnalyzer** (in the sandbox; Linux and NuttX rule profiles), **cwe_checker** (ELF and bare-metal Cortex-M), **Ghidra headless** (function recovery, call-site analysis), **FACT** (REST). Every engine reports `completed / failed / skipped (not applicable) / unavailable / timeout` per scan. |
 | **Vulnerability intelligence** | Offline OSV database (Debian, Alpine, upstream GIT ranges; NVD CVE data via OSV): **backport-aware** matching of installed distro packages; release-tag matching for upstream components (OpenSSL, BusyBox, glibc, PX4, NuttX, ArduPilot by vehicle, ESP-IDF, FreeRTOS, Zephyr, …); CVSS v3 base scores. |
@@ -204,8 +204,10 @@ make lint
 ## Validation status and limitations
 
 See [docs/TOOLS.md](docs/TOOLS.md) for per-tool evidence and [docs/SECURITY.md](docs/SECURITY.md)
-for the isolation model. In short:
+for the isolation model and [docs/STATUS.md](docs/STATUS.md) for the full capability matrix. In short:
 
+* **Formats without real samples:** LZ4, Zstandard, lzop, CramFS, EROFS, Android sparse, UBI/UBIFS,
+  JFFS2 and ext/FAT/SquashFS extraction is verified with images made by the reference tools.
 * **Verified with real inputs:** PX4 v1.17.0 `.px4`/ELF identification and extraction (incl. CROMFS),
   ArduPilot bootloader identification, cwe_checker on ARM/AArch64 ELFs and bare-metal PX4 and
   ArduPilot images, Ghidra function recovery on ELFs and Cortex-M images, FACT end to end over REST,
