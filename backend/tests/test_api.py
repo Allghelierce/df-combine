@@ -323,3 +323,27 @@ def test_file_names_that_are_not_utf8_do_not_break_a_scan(client, settings, tmp_
     assert arts and all("\\x80" in a["name"] for a in arts), arts
     for route in ("report.json", "report.pdf", "report.sarif", "sbom.cdx.json"):
         assert client.get(f"/api/scans/{scan['id']}/{route}").status_code == 200, route
+
+
+def test_pdf_report_survives_texts_longer_than_a_page(client, settings, fixtures):
+    """A reportlab table cell taller than a page raises LayoutError and failed the whole PDF. Finding texts and
+    names come from firmware and tools (a long config line, a big tool message), so the PDF cuts them and points
+    to the JSON report, which keeps the full text."""
+    from dfa.db import session_scope
+    from dfa.models import FindingRow, Scan
+    s = upload(client, fixtures["tar_gz"])
+    process_all(settings)
+    wide = "\n".join(["W" * 75] * 60)
+    with session_scope() as db:
+        scan = db.get(Scan, s["id"])
+        scan.identification = {**(scan.identification or {}), "board_name": wide, "platform_version": "9" * 20000}
+        scan.components = [{"name": wide, "version": wide, "method": "probe", "sources": [wide],
+                            "vulnerabilities_note": wide}]
+        row = db.query(FindingRow).filter_by(scan_id=s["id"]).first()
+        row.description, row.remediation, row.affected_component = "D" * 60000, wide, "c" * 9000
+        row.evidence = [{"kind": "string", "value": "V" * 20000, "location": "L" * 5000}] * 30
+    rp = client.get(f"/api/scans/{s['id']}/report.pdf")
+    assert rp.status_code == 200 and rp.content.startswith(b"%PDF")
+    full = client.get(f"/api/scans/{s['id']}/report.json").json()["scan"]["findings"]
+    assert any(f["description"] == "D" * 60000 for f in full)
+

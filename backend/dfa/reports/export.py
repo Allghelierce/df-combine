@@ -87,8 +87,22 @@ def json_report(scan: Scan) -> dict:
     }
 
 
-def _p(text, style) -> Paragraph:
-    return Paragraph(escape(str(text if text is not None else "-")).replace("\n", "<br/>"), style)
+CLIPPED = " ... [cut; the JSON report has the full text]"
+
+
+def _clip(text: str, limit: int, max_lines: int = 30) -> str:
+    """A table cell cannot be taller than a page (reportlab raises LayoutError and the whole PDF fails), and
+    texts come from firmware and tools: long descriptions, evidence lines and names are cut in the PDF only."""
+    cut = False
+    if text.count("\n") >= max_lines:
+        text, cut = "\n".join(text.split("\n", max_lines)[:max_lines]), True
+    if len(text) > limit:
+        text, cut = text[:limit], True
+    return text + CLIPPED if cut else text
+
+
+def _p(text, style, limit: int = 2000) -> Paragraph:
+    return Paragraph(escape(_clip(str(text if text is not None else "-"), limit)).replace("\n", "<br/>"), style)
 
 
 def pdf_report(scan: Scan) -> bytes:
@@ -141,7 +155,7 @@ def pdf_report(scan: Scan) -> bytes:
     story += [_p("Analysis tools", h2)]
     rows = [[_p("Tool", small), _p("Status", small), _p("Findings", small), _p("Message", small)]]
     for tr in scan.tool_runs:
-        rows.append([_p(tr.display_name, small), _p(tr.status, small), _p(tr.findings_count, small),
+        rows.append([_p(tr.display_name, small, 200), _p(tr.status, small, 60), _p(tr.findings_count, small, 20),
                      _p((tr.message or "")[:400], small)])
     tt = Table(rows, colWidths=[38 * mm, 20 * mm, 15 * mm, 105 * mm], repeatRows=1)
     tt.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#c5ced8")),
@@ -159,9 +173,10 @@ def pdf_report(scan: Scan) -> bytes:
             vulns = c.get("vulnerabilities") or []
             vtxt = (f"{len(vulns)}: " + ", ".join(v["id"] for v in vulns[:8]) + (" ..." if len(vulns) > 8 else "")
                     if vulns else c.get("vulnerabilities_note") or ("none listed" if "vulnerabilities" in c else "-"))
-            crow.append([_p(c["name"] + (f" ({c['variant']})" if c.get("variant") else ""), small),
-                         _p(c["version"], small),
-                         _p(f"{c.get('method', '')}: " + "; ".join(c.get("sources", []))[:180], small), _p(vtxt, small)])
+            crow.append([_p(c["name"] + (f" ({c['variant']})" if c.get("variant") else ""), small, 160),
+                         _p(c["version"], small, 120),
+                         _p(f"{c.get('method', '')}: " + "; ".join(c.get("sources", []))[:180], small, 300),
+                         _p(vtxt, small, 400)])
         ct = Table(crow, colWidths=[30 * mm, 28 * mm, 65 * mm, 55 * mm], repeatRows=1)
         ct.setStyle(grid)
         story.append(ct)
@@ -182,10 +197,10 @@ def pdf_report(scan: Scan) -> bytes:
             for pk in sorted(vulnerable, key=lambda x: -len(x["vulnerabilities"]))[:60]:
                 vs = pk["vulnerabilities"]
                 fixed = sorted({v["fixed"] for v in vs if v.get("fixed")})
-                prow.append([_p(pk["name"], small), _p(pk["version"], small),
+                prow.append([_p(pk["name"], small, 160), _p(pk["version"], small, 120),
                              _p(f"{len(vs)}: " + ", ".join(f"{v['id']} ({v.get('severity') or 'n/a'})" for v in vs[:6])
                                 + (" ..." if len(vs) > 6 else ""), small),
-                             _p(fixed[-1] if fixed else "no fix listed", small)])
+                             _p(fixed[-1] if fixed else "no fix listed", small, 120)])
             pt = Table(prow, colWidths=[35 * mm, 35 * mm, 80 * mm, 28 * mm], repeatRows=1)
             pt.setStyle(grid)
             story.append(pt)
@@ -199,7 +214,7 @@ def pdf_report(scan: Scan) -> bytes:
         brow = [[_p("Binary", small), _p("Functions", small), _p("Instructions", small), _p("Risky call sites", small)]]
         for b in bins[:10]:
             if b.get("status") != "completed":
-                brow.append([_p(b.get("binary", ""), small), _p("failed", small), _p("-", small),
+                brow.append([_p(b.get("binary", ""), small, 400), _p("failed", small), _p("-", small),
                              _p(str(b.get("error", ""))[:200], small)])
                 continue
             risky = b.get("risky_call_sites") or {}
@@ -208,8 +223,8 @@ def pdf_report(scan: Scan) -> bytes:
             if not rtxt:
                 # library calls are recognised by name; stripped raw images have none to recognise
                 rtxt = "n/a (raw image without symbol names)" if b.get("mode") == "raw" else "none found"
-            brow.append([_p(b.get("binary", ""), small), _p(b.get("function_count", "-"), small),
-                         _p(b.get("instruction_count", "-"), small), _p(rtxt, small)])
+            brow.append([_p(b.get("binary", ""), small, 400), _p(b.get("function_count", "-"), small, 20),
+                         _p(b.get("instruction_count", "-"), small, 20), _p(rtxt, small, 600)])
         bt = Table(brow, colWidths=[70 * mm, 22 * mm, 26 * mm, 60 * mm], repeatRows=1)
         bt.setStyle(grid)
         story.append(bt)
@@ -224,7 +239,8 @@ def pdf_report(scan: Scan) -> bytes:
                      colWidths=[20 * mm, 158 * mm])
         head.setStyle(TableStyle([("BACKGROUND", (0, 0), (0, 0), SEV_COLORS.get(f.severity, colors.grey)),
                                   ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
-        ev = "<br/>".join(escape(f"{e.get('value', '')}" + (f"  [{e['location']}]" if e.get("location") else ""))
+        ev = "<br/>".join(escape(_clip(f"{e.get('value', '')}" + (f"  [{e['location']}]" if e.get("location") else ""),
+                                       400, 1).replace("\n", " "))
                           for e in (f.evidence or [])[:8])
         rows = [
             ("Classification", CLASSIFICATION_LABELS.get(f.classification, f.classification)

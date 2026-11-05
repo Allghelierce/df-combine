@@ -109,7 +109,10 @@ access the scan directory only through `dfa/safefs.py`:
   symlink is followed, not even an intermediate one;
 * only regular files are read, with size limits (a FIFO cannot block the worker, a link to
   `/dev/zero` cannot exhaust its memory). The manifest is capped at `DFA_MAX_MANIFEST_MB` (64 MiB; JSON
-  grows about tenfold when parsed), deeply nested JSON is rejected, and its shape is checked before use;
+  grows about tenfold when parsed), deeply nested JSON is rejected, and its shape is checked before use,
+  down to each finding's field types and enum values; lone surrogates (bytes that are not UTF-8) are
+  shown as `\xNN`, so no sandbox output can break the database, the JSON API or the reports, and
+  the UI turns only absolute http(s) references into links;
 * paths taken from the manifest (artifacts, filesystem roots, permission images) are resolved and must
   stay inside the work directory before any adapter uses them;
 * progress messages from the sandbox are throttled and capped per poll;
@@ -186,7 +189,9 @@ boundary for hostile samples.
 ## Extraction guards (inside the sandbox, and in the local fallback)
 
 * member names normalised; absolute paths re-rooted; `..`, NUL, drive letters and over-long names
-  rejected; output paths re-checked to resolve inside the extraction root;
+  rejected; output paths re-checked to resolve inside the extraction root; bytes that are not UTF-8
+  become a literal `\xNN` in the name on disk and in the manifest (tar, zip, external unpacker
+  output), and a zip entry flagged UTF-8 whose name is not no longer makes the whole zip unreadable;
 * symlinks, hardlinks, device nodes and FIFOs are **never created** - they are recorded in the
   manifest; external unpacker output is walked and such entries removed;
 * files created with `O_EXCL|O_NOFOLLOW`, mode 0644 (setuid/setgid recorded, never applied);
