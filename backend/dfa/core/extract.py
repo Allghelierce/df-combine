@@ -1699,6 +1699,7 @@ CARVE_MAGICS = {
     b"070701": "cpio",
     b"\x7fELF": "elf",
     b"PK\x05\x06": "zip_end",  # one per zip (local headers would be one per member)
+    b"7z\xbc\xaf\x27\x1c": "7z",  # not unpacked, but carved so that it is reported
 }
 
 
@@ -1918,6 +1919,11 @@ def _carve_length(fp: BinaryIO, off: int, kind: str, size: int) -> int | None:
         if end < 0:
             return None
         return min(((end + 10 + 511) // 512) * 512, len(window))
+    if kind == "7z":  # signature header: CRC over the next-header offset/size/CRC, which give the length
+        if len(head) < 32 or zlib.crc32(head[12:32]) != struct.unpack_from("<I", head, 8)[0]:
+            return None
+        n = 32 + struct.unpack_from("<Q", head, 12)[0] + struct.unpack_from("<Q", head, 20)[0]
+        return n if off + n <= size else None
     if kind == "elf":
         if len(head) < 64 or head[4] not in (1, 2) or head[5] not in (1, 2) or head[6] != 1:
             return None

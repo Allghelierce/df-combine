@@ -1091,3 +1091,31 @@ def test_appended_data_is_reported_as_a_finding(tmp_path, run_analysis):
     plain = tmp_path / "plain"
     plain.write_bytes(elf.read_bytes())
     assert not {"appended-to-executable", "data-after-image"} & {f["rule_id"] for f in run_analysis(plain)["findings"]}
+
+
+def test_7z_inside_a_raw_image_is_carved_and_reported(tmp_path, run_analysis):
+    """7-Zip archives are not unpacked, but one inside a raw image is carved (its signature header gives the exact
+    length and is CRC-protected) so that the report names it as content that was not analysed."""
+    import random
+    import struct
+    import zlib
+    rng = random.Random(11)
+    noise = bytearray(rng.randbytes(8192))
+    for magic in (b"7z", b"PK", b"hsqs", b"\x1f\x8b", b"CROM", b"-rom1fs-", b"070701", b"\x7fELF", b"\xfd7zXZ"):
+        noise = noise.replace(magic, b"\x00" * len(magic))
+    body = rng.randbytes(300)  # packed streams and header: not parsed, only measured
+    fields = struct.pack("<QQI", len(body) - 40, 40, zlib.crc32(body[-40:]))
+    archive = b"7z\xbc\xaf\x27\x1c\x00\x04" + struct.pack("<I", zlib.crc32(fields)) + fields + body
+    img = tmp_path / "flash.bin"
+    img.write_bytes(bytes(noise) + archive + bytes(noise[:4096]))
+    res = Extractor(tmp_path / "w", Limits()).run(img, img.name)
+    carved = [a for a in res.artifacts if a.origin == "carved" and a.format == "7z"]
+    assert carved and carved[0].details["carved_offset"] == hex(8192) and carved[0].size == len(archive)
+    assert carved[0].extraction == "unsupported"
+    findings = run_analysis(img)["findings"]
+    assert any(f["rule_id"] == "extraction-unsupported" and "7-Zip" in f["title"] for f in findings)
+    broken = bytearray(archive)
+    broken[12] ^= 1  # header CRC no longer matches: not carved
+    img.write_bytes(bytes(noise) + bytes(broken) + bytes(noise[:4096]))
+    res = Extractor(tmp_path / "w2", Limits()).run(img, img.name)
+    assert not [a for a in res.artifacts if a.origin == "carved"]
