@@ -8,9 +8,12 @@ from __future__ import annotations
 import hashlib
 import struct
 
+# image chip IDs as esptool defines them (IMAGE_CHIP_ID in esptool/targets/*.py, v5.1.0)
 ESP_CHIPS = {0x0000: "ESP32", 0x0002: "ESP32-S2", 0x0005: "ESP32-C3", 0x0009: "ESP32-S3", 0x000C: "ESP32-C2",
-             0x000D: "ESP32-C6", 0x0010: "ESP32-H2"}
-RISCV_CHIPS = {"ESP32-C3", "ESP32-C2", "ESP32-C6", "ESP32-H2"}
+             0x000D: "ESP32-C6", 0x0010: "ESP32-H2", 0x0012: "ESP32-P4", 0x0014: "ESP32-C61", 0x0017: "ESP32-C5",
+             0x0019: "ESP32-H21", 0x001C: "ESP32-H4"}
+RISCV_CHIPS = {"ESP32-C3", "ESP32-C2", "ESP32-C6", "ESP32-H2", "ESP32-P4", "ESP32-C61", "ESP32-C5", "ESP32-H21",
+               "ESP32-H4"}
 ESP_APP_DESC_MAGIC = 0xABCD5432
 ESP_CHECKSUM_SEED = 0xEF
 

@@ -262,6 +262,23 @@ def test_esp32_image(tmp_path, run_analysis):
     assert code["details"]["arch_guess"]["architecture"] == "Xtensa"
 
 
+def test_newer_espressif_chips_are_recognised(tmp_path, run_analysis):
+    """Images for the ESP32-P4, -C5, -C61, -H21 and -H4 (chip IDs from esptool's targets) were not recognised at all:
+    they passed as raw data, with no platform, ESP-IDF version or application name."""
+    from tests.factory import esp_app_desc, esp_image
+    for chip, chip_id in (("ESP32-P4", 18), ("ESP32-C61", 20), ("ESP32-C5", 23), ("ESP32-H21", 25),
+                          ("ESP32-H4", 28)):
+        img = esp_image([(0x40800000, esp_app_desc("telemetry", "2.0.1", "v5.4.1") + b"\x00" * 256),
+                         (0x40810000, bytes(range(256)) * 16)], entry=0x40800400, chip_id=chip_id, hash_appended=True)
+        p = tmp_path / f"{chip}.bin"
+        p.write_bytes(img)
+        assert detect_format(p).format == "esp_image", chip
+        m = run_analysis(p)
+        assert m["identification"]["platform"] == "Espressif", chip
+        assert m["identification"]["architecture"] == f"RISC-V ({chip})"
+        assert {("esp-idf", "5.4.1"), ("telemetry", "2.0.1")} <= {(c["name"], c["version"]) for c in m["components"]}
+
+
 def test_esp_image_with_bad_checksum_is_flagged(tmp_path, run_analysis):
     from tests.factory import esp_image, xtensa_code
     img = bytearray(esp_image([(0x400D0020, xtensa_code(10))], chip_id=9))
