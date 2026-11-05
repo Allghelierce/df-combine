@@ -18,7 +18,8 @@ a timeout and a per-scan disk cap; the firmware is mounted read-only.
 
 Inputs: official PX4 v1.17.0 builds (`px4-travis.s3.amazonaws.com`, pinned SHA-256), official ArduPilot
 bootloader builds (committed in the ArduPilot repository, tag Copter-4.5.7), ArduPilot SITL vehicle
-builds published for `dronekit-sitl`, Debian 11 armhf and Alpine 3.15 arm64 root filesystems exported
+builds published for `dronekit-sitl`, official Betaflight and INAV release builds, Debian 11 armhf and
+Alpine 3.15 arm64 root filesystems exported
 from the official Docker images, esptool's published ESP test images. Numbers are from actual runs,
 not mocks.
 

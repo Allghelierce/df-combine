@@ -2,8 +2,8 @@
 
 What works, what partly works and what is unverified, with the evidence behind each statement.
 "Real input" means official public builds (PX4 v1.17.0, ArduPilot bootloaders, ArduPilot SITL
-vehicle builds), root filesystems exported from official Debian/Alpine images, or esptool's published
-ESP images — never synthetic data. Numbers come from actual runs in the development environment
+vehicle builds, Betaflight and INAV release builds), root filesystems exported from official
+Debian/Alpine images, or esptool's published ESP images — never synthetic data. Numbers come from actual runs in the development environment
 (2026-11-04/05).
 
 ## Fully working (verified with real inputs and covered by tests)
@@ -18,6 +18,7 @@ ESP images — never synthetic data. Numbers come from actual runs in the develo
 | Extraction safety | Traversal, links, devices, bombs, nesting, ext duplicate-entry attack, CROMFS loops (`tests/test_extract_security.py`). |
 | PX4 identification and extraction | FMUv2/v5/v6X `.px4`, CAN bootloader, unstripped ELF: platform, version 1.17.0, board ID, Cortex-M architecture, flash base; NuttX CROMFS `/etc` extracted. The flash image derived from the FMUv2 ELF is byte-identical to the image in the official `.px4` (`tests/test_formats_real.py`). |
 | ArduPilot identification | Official AP_Bootloader builds (fmuv3, Matek H743, Pixhawk 6X, CubeOrange `.bin`/`.hex`) → ArduPilot / AP_Bootloader. SITL vehicle builds → ArduCopter 3.2.1 (`ArduCopter V3.2.1`), ArduCopter 3.3 (`APM:Copter V3.3`), ArduPlane 3.3.0, ArduRover 2.50 (`ArduRover v2.50`), all high confidence; vehicle-specific OSV tags (`APMrover2-2.50`, `ArduPlane-3.3.0` match CVE-2026-38971 as `unverified`). |
+| Betaflight / INAV identification | Official release builds (Betaflight 4.3.2 STM32F405/H743, INAV 7.1.2 Matek F405/H743, INAV 6.1.1 Matek F405): platform (high confidence), version, board/target, git revision and build date from the projects' build-information block, Cortex-M architecture and flash base. Fixed on these builds: no version extracted, INAV only "medium" confidence, and F405 images with the stack in CCM RAM (`SP = 0x10010000`) not recognised as Cortex-M. OSV has no records for either project. |
 | cwe_checker | ARM and AArch64 ELF (Debian/Alpine binaries, CWE-676 on `strcpy` user); bare-metal Cortex-M (PX4 image/IO/bootloader, ArduPilot bootloader); unstripped Cortex-M ELF via its derived flash image, with results mapped to the ELF's function symbols (PX4 FMUv2: 101 warnings in 57 functions). Results always `unverified`. |
 | Ghidra headless layer | Function recovery on ELF (2,500–2,660 functions for perl/libc/bash; 6,366 for the PX4 FMUv2 ELF) and raw Cortex-M images seeded from the vector table (PX4 8,258 functions; ArduPilot bootloader 331). |
 | FwAnalyzer | Debian 11 / Alpine 3.15 root filesystems with permission checks (cpio image carrying the archive's modes: 14 setuid/setgid offenders on Debian, each labelled with its real bit), PX4 NuttX `/etc` with drone rules (matched the `CBRK_SUPPLY_CHK` overrides the built-in scanner found). |
@@ -28,7 +29,7 @@ ESP images — never synthetic data. Numbers come from actual runs in the develo
 | ESP32/ESP8266 | Real esptool images: chip, checksum, SHA-256, ESP-IDF app descriptor; flash layouts with partition tables. |
 | Reports | PDF (components, vulnerable packages, Ghidra summary), JSON, SARIF 2.1.0, CycloneDX 1.5 SBOM with purls/CPEs. |
 | Authentication and authorisation | Users/roles, scrypt, hashed session and API tokens, CSRF header, login throttling, per-user visibility, upload rate/size/disk limits (`tests/test_auth.py`, `tests/test_api.py`). |
-| Regression suite | 21 pinned real samples with committed signatures (`tests/test_regression_real.py`); CI job fetches the samples. |
+| Regression suite | 26 pinned real samples with committed signatures (`tests/test_regression_real.py`); CI job fetches the samples. A CI-equivalent run (Python 3.12, unprivileged user, no samples) passes. |
 
 ## Partially working
 

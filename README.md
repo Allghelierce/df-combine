@@ -187,7 +187,8 @@ make lint
   bombs, nested archives, ext duplicate-entry attack, CROMFS loops). Mocks are used for unit tests
   of tool adapters only.
 * **Real samples** — fetch the pinned public samples first (PX4 v1.17.0 builds, ArduPilot
-  bootloaders, ArduPilot SITL vehicle builds, esptool's ESP images; SHA-256 verified):
+  bootloaders, ArduPilot SITL vehicle builds, Betaflight and INAV release builds, esptool's ESP
+  images; SHA-256 verified):
 
   ```bash
   python scripts/fetch_real_firmware.py
@@ -220,7 +221,8 @@ for the isolation model and [docs/STATUS.md](docs/STATUS.md) for the full capabi
 * **Formats without real samples:** LZ4, Zstandard, lzop, CramFS, EROFS, Android sparse, UBI/UBIFS,
   JFFS2 and ext/FAT/SquashFS extraction is verified with images made by the reference tools.
 * **Verified with real inputs:** PX4 v1.17.0 `.px4`/ELF identification and extraction (incl. CROMFS),
-  ArduPilot bootloader and vehicle (SITL) identification, cwe_checker on ARM/AArch64 ELFs, bare-metal
+  ArduPilot bootloader and vehicle (SITL) identification, Betaflight and INAV release builds (version,
+  board/target, build info), cwe_checker on ARM/AArch64 ELFs, bare-metal
   PX4/ArduPilot images and unstripped PX4 ELFs (via the derived flash image, symbolised), Ghidra
   function recovery on ELFs and Cortex-M images, FACT end to end over REST (incl. extracted PX4
   `/etc` trees and a full Debian rootfs in 222 s), FwAnalyzer with permission checks on Debian/Alpine
