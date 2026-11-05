@@ -430,6 +430,38 @@
    "owned_files": 0
   }
  },
+ "betaflight/betaflight_4.5.1_STM32F405.hex": {
+  "components": [
+   "betaflight 4.5.1"
+  ],
+  "extraction": {
+   "artifacts": 2,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1,
+    "ihex": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": "STM32F405",
+   "endianness": "little",
+   "format": "ihex",
+   "os_hint": "bare-metal",
+   "platform": "Betaflight",
+   "platform_version": "4.5.1",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
  "cubepilot_cubeorange_default.px4": {
   "components": [
    "nuttx 11.0.0",

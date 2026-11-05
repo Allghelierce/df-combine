@@ -399,9 +399,18 @@ PLATFORMS: list[PlatformSignature] = [
         # official builds carry the version only as a standalone constant (FC_VERSION_STRING, e.g. "4.3.2";
         # the only NUL-delimited x.y.z string in the 4.3.2 STM32F405/H743 builds)
         version_constant=True,
-        # version.c in official 4.3 builds: target, git revision, build time, build date
+        # version.c in official 4.3 builds: target, git revision, build time, build date. 4.4/4.5 builds keep them with
+        # the CLI 'version' line instead (target, "Betaflight" since 4.5, format, MSP API version, revision, time,
+        # date, version) and in the "BTFL" identifier block (target, date, time, revision; 4.4 adds "# Betaflight")
         build_info=[re.compile(rb"(?P<board>[A-Z0-9][A-Z0-9_]{2,31})\x00+(?P<revision>[0-9a-f]{7,8})\x00+"
-                               rb"(?P<time>\d\d:\d\d:\d\d)\x00+(?P<date>[A-Z][a-z]{2} [ \d]\d \d{4})\x00")],
+                               rb"(?P<time>\d\d:\d\d:\d\d)\x00+(?P<date>[A-Z][a-z]{2} [ \d]\d \d{4})\x00"),
+                    re.compile(rb"(?P<board>[A-Z0-9][A-Z0-9_]{2,31})\x00+(?:Betaflight\x00+)?# %s / %s \(%s\) %s %s / %s "
+                               rb"\(%s\) MSP API: %s\x00+\d{1,2}\.\d{1,3}\x00+(?P<revision>[0-9a-f]{7,8})\x00+"
+                               rb"(?P<time>\d\d:\d\d:\d\d)\x00+(?P<date>[A-Z][a-z]{2} [ \d]\d \d{4})\x00+"
+                               rb"(?P<version>\d{1,2}\.\d{1,2}\.\d{1,2})\x00"),
+                    re.compile(rb"BTFL\x00+(?:# Betaflight\x00+)?(?P<board>[A-Z0-9][A-Z0-9_]{2,31})\x00+"
+                               rb"(?P<date>[A-Z][a-z]{2} [ \d]\d \d{4})\x00+(?P<time>\d\d:\d\d:\d\d)\x00+"
+                               rb"(?P<revision>[0-9a-f]{7,8})\x00")],
     ),
     PlatformSignature(
         name="INAV",

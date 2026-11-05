@@ -100,6 +100,10 @@ SAMPLES = {
     "betaflight/betaflight_4.3.2_STM32H743.hex": (
         "4e7dc985e26acd7b1e4a15f36a7c6b4c91c00ea44dbea473cd5c7c35e53572c8", 1601416,
         "Betaflight 4.3.2 for STM32H743 (official release)", BETAFLIGHT + "4.3.2/"),
+    "betaflight/betaflight_4.5.1_STM32F405.hex": (
+        "a2e366a2422b0b78ec37c2e4e88335c9f382694c49b99ca79306c362affe0729", 1576755,
+        "Betaflight 4.5.1 for STM32F405 (official release; build information with the CLI version line)",
+        BETAFLIGHT + "4.5.1/"),
     "inav/inav_7.1.2_MATEKF405.hex": (
         "b7e6be9d846817474417992d3429ab1cfda1cc6b22fda99a6be51209045fae16", 1660770,
         "INAV 7.1.2 for Matek F405 (official release; initial SP in CCM RAM)", INAV + "7.1.2/"),

@@ -172,6 +172,16 @@ def test_build_information_blocks():
     acc.feed_bytes(bf)
     g = next(r for r in acc.results() if r.name == "Betaflight")
     assert (g.confidence, g.version, g.board, g.build["revision"]) == ("high", "4.3.2", "STM32F405", "60c9521")
+    # 4.4/4.5 builds: the CLI 'version' line's arguments, or the "BTFL" identifier block (board and build were lost)
+    for block, want in (
+            (b"STM32F405\x00Betaflight\x00# %s / %s (%s) %s %s / %s (%s) MSP API: %s\x001.46\x0077d01ba\x0002:23:52\x00"
+             b"Jul 27 2024\x004.5.1\x00# board: manufacturer_id", ("4.5.1", "STM32F405", "77d01ba")),
+            (b"\x00\x00BTFL\x00\x00\x00\x00# Betaflight\x00\x00\x00\x00STM32F405\x00\x00\x00Jan 28 2023\x0023:33:34\x00\x00\x00\x00"
+             b"4605309\x00\x00\x004.4.0\x00\x00", ("4.4.0", "STM32F405", "4605309"))):
+        acc = PlatformAccumulator()
+        acc.feed_bytes(block)
+        g = next(r for r in acc.results() if r.name == "Betaflight")
+        assert (g.version, g.board, g.build["revision"]) == want, g
     # without the project's own markers neither the block nor a bare x.y.z constant means anything
     acc = PlatformAccumulator()
     acc.feed_bytes(b"\x00\x00\x001.2.3\x00\x00" + inav.replace(b"INAV ", b"XXXX "))
