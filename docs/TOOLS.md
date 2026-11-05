@@ -16,7 +16,8 @@ a timeout and a per-scan disk cap; the firmware is mounted read-only.
 
 ## Real-input validation (development environment)
 
-Inputs: official PX4 v1.17.0 builds (`px4-travis.s3.amazonaws.com`, pinned SHA-256), Debian 11 armhf
+Inputs: official PX4 v1.17.0 builds (`px4-travis.s3.amazonaws.com`, pinned SHA-256), official ArduPilot
+bootloader builds (committed in the ArduPilot repository, tag Copter-4.5.7), Debian 11 armhf
 and Alpine 3.15 arm64 root filesystems exported from the official Docker images, esptool's published
 ESP test images. Numbers are from actual runs, not mocks.
 
@@ -24,6 +25,7 @@ ESP test images. Numbers are from actual runs, not mocks.
 |---|---|---|
 | cwe_checker | PX4 FMUv5 `.px4` → decoded 2 MB Cortex-M image + IO firmware + bootloader (bare-metal) | completed, 3/3 binaries in ~21–23 min; 4 grouped findings (CWE-125 ×3, CWE-787 ×10, CWE-476 ×157 warnings) |
 | cwe_checker | PX4 CAN bootloader (bare-metal) | completed, 1 grouped finding |
+| cwe_checker | ArduPilot AP_Bootloader for CubeOrange (bare-metal, STM32H7) | completed in 48 s, 1 grouped finding (CWE-476 ×2) |
 | cwe_checker | Debian 11 armhf: `perl`, `libc-2.31.so`, `bash` | completed, 3/3 in 392 s, 28 grouped findings |
 | cwe_checker | Alpine 3.15 arm64: `scanelf`, `apk`, `getent` | completed, 3/3, 14 grouped findings |
 | cwe_checker | Debian `sbin/killall5` (imports `strcpy`) | completed; CWE-676 reported (`tests/test_real_tools.py`) |
@@ -31,9 +33,10 @@ ESP test images. Numbers are from actual runs, not mocks.
 | Ghidra | PX4 FMUv5 image / IO / bootloader | completed: 8,258 / 363 / 110 functions (373–497 s) |
 | Ghidra | Debian armhf `perl` / `libc` / `bash` | completed: 2,610 / 2,660 / 2,508 functions (542 s) |
 | Ghidra | PX4 CAN bootloader | completed: 90 functions |
+| Ghidra | ArduPilot CubeOrange bootloader | completed: 331 functions (18 s) |
 | FwAnalyzer | Debian 11 / Alpine 3.15 rootfs (`dirfs`) | completed (no offenders with the default rule set) |
 | FwAnalyzer | PX4 FMUv5 / FMUv2 CROMFS `/etc` (NuttX profile) | completed; FMUv5: 1 finding |
-| FACT | PX4 `.px4` and decoded image; PX4 CAN bootloader | completed end to end over REST; FACT's unpacker cannot unpack `.px4`/raw MCU images and no plug-in produced results — reported as such |
+| FACT | PX4 `.px4` and decoded image; PX4 CAN bootloader; ArduPilot CubeOrange bootloader | completed end to end over REST; FACT's unpacker cannot unpack `.px4`/raw MCU images and no plug-in produced results — reported as such |
 | FACT | Debian 11 rootfs | see the milestone report (run in progress at time of writing) |
 
 Opt-in real integration tests (`DFA_REAL_TOOLS=1 pytest tests/test_real_tools.py`) cover FwAnalyzer

@@ -206,9 +206,11 @@ See [docs/TOOLS.md](docs/TOOLS.md) for per-tool evidence and [docs/SECURITY.md](
 for the isolation model. In short:
 
 * **Verified with real inputs:** PX4 v1.17.0 `.px4`/ELF identification and extraction (incl. CROMFS),
-  cwe_checker on ARM/AArch64 ELFs and bare-metal PX4 images, Ghidra function recovery on ELFs and
-  Cortex-M images, FACT end to end over REST, FwAnalyzer on Debian/Alpine root filesystems and PX4
-  CROMFS, OSV matching on real Debian/Alpine package databases, ESP image/partition parsing.
+  ArduPilot bootloader identification, cwe_checker on ARM/AArch64 ELFs and bare-metal PX4 and
+  ArduPilot images, Ghidra function recovery on ELFs and Cortex-M images, FACT end to end over REST,
+  FwAnalyzer on Debian/Alpine root filesystems and PX4 CROMFS, OSV matching on real Debian/Alpine
+  package databases, ESP image/partition parsing, the broker-only compose topology with an
+  unprivileged worker.
 * **ArduPilot:** validated on the official **bootloader** builds committed in the ArduPilot repository
   (AP_Bootloader for fmuv3, Matek H743, Pixhawk 6X, CubeOrange; `.bin` and `.hex`). Real
   *flight-stack* builds (`.apj`) could not be obtained: `firmware.ardupilot.org` was unreachable from
