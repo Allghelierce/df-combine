@@ -2,8 +2,9 @@
 """Download legitimate, publicly distributed firmware used by the real-firmware tests.
 
 Only official open-source builds are listed: PX4 Autopilot (BSD-3-Clause, published by the PX4 project in
-the public firmware bucket that QGroundControl downloads from) and the Espressif image fixtures that ship
-with esptool's own test suite (GPL-2.0, tag v4.8.1). Files are verified against pinned SHA-256 hashes;
+the public firmware bucket that QGroundControl downloads from), ArduPilot's prebuilt bootloaders that are
+committed in the ArduPilot repository (GPL-3.0, tag Copter-4.5.7), and the Espressif image fixtures that
+ship with esptool's own test suite (GPL-2.0, tag v4.8.1). Files are verified against pinned SHA-256 hashes;
 nothing is committed to the repository.
 
 Usage: python scripts/fetch_real_firmware.py [dest]   (default: fixtures/real)
@@ -17,6 +18,7 @@ from pathlib import Path
 
 BASE = "https://px4-travis.s3.amazonaws.com/Firmware/stable/"
 ESPTOOL = "https://raw.githubusercontent.com/espressif/esptool/v4.8.1/test/images/"
+APBL = "https://raw.githubusercontent.com/ArduPilot/ardupilot/Copter-4.5.7/Tools/bootloaders/"
 SAMPLES = {
     # name: (sha256, size, description[, url])
     "px4_fmu-v5_default.px4": ("b50b275507da4cb0e218c943c2aff5359e3f0914c18f6b563494b925c0a0e403", 1881838,
@@ -41,6 +43,17 @@ SAMPLES = {
                                       "ESP-IDF v5.0 'blink' application for ESP32-S2", ESPTOOL),
     "esp/partitions_singleapp.bin": ("88449960589ae349edd5afe868b7ef6a3592fbe79b161c14267d2811f157ec8a", 96,
                                      "ESP-IDF partition table (single factory app)", ESPTOOL),
+    # Official ArduPilot bootloader builds committed in the ArduPilot repository (GPL-3.0)
+    "ardupilot/fmuv3_bl.bin": ("f3c082aa26ed42e40fb799b47b3b08e04814c5e73421763750bea0b7264fa8fe", 16256,
+                               "ArduPilot AP_Bootloader for fmuv3 (Pixhawk 1/2.4.8, STM32F4)", APBL),
+    "ardupilot/MatekH743_bl.bin": ("1097d07f6090a3d755a7ce67cd799810a24d043a1d51440b578245424981fa1b", 17404,
+                                   "ArduPilot AP_Bootloader for Matek H743 (STM32H7)", APBL),
+    "ardupilot/Pixhawk6X_bl.bin": ("d544bc268682587007b00a065497dd0c82e7a6b4199f2d3d12a3de6c83197bf6", 38848,
+                                   "ArduPilot AP_Bootloader for Pixhawk 6X", APBL),
+    "ardupilot/CubeOrange_bl.bin": ("37957c99bd035aa378a6f28309cd94e36e8371f331b828dee5d232a927df2052", 38800,
+                                    "ArduPilot AP_Bootloader for CubeOrange", APBL),
+    "ardupilot/CubeOrange_bl.hex": ("13006870ecb150cd7667a27261d9db48c35fe8f5e74d4fb145b7ae46771ccd45", 106728,
+                                    "ArduPilot AP_Bootloader for CubeOrange (Intel HEX)", APBL),
 }
 
 

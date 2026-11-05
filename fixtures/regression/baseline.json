@@ -42,6 +42,147 @@
    "owned_files": 73
   }
  },
+ "ardupilot/CubeOrange_bl.bin": {
+  "components": [],
+  "extraction": {
+   "artifacts": 1,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "endianness": "little",
+   "format": "cortexm_raw",
+   "os_hint": "bare-metal",
+   "platform": "ArduPilot",
+   "platform_version": null,
+   "vehicle_type": "AP_Bootloader"
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "ardupilot/CubeOrange_bl.hex": {
+  "components": [],
+  "extraction": {
+   "artifacts": 2,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1,
+    "ihex": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "endianness": "little",
+   "format": "ihex",
+   "os_hint": "bare-metal",
+   "platform": "ArduPilot",
+   "platform_version": null,
+   "vehicle_type": "AP_Bootloader"
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "ardupilot/MatekH743_bl.bin": {
+  "components": [],
+  "extraction": {
+   "artifacts": 1,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "endianness": "little",
+   "format": "cortexm_raw",
+   "os_hint": "bare-metal",
+   "platform": "ArduPilot",
+   "platform_version": null,
+   "vehicle_type": "AP_Bootloader"
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "ardupilot/Pixhawk6X_bl.bin": {
+  "components": [],
+  "extraction": {
+   "artifacts": 1,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "endianness": "little",
+   "format": "cortexm_raw",
+   "os_hint": "bare-metal",
+   "platform": "ArduPilot",
+   "platform_version": null,
+   "vehicle_type": "AP_Bootloader"
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "ardupilot/fmuv3_bl.bin": {
+  "components": [],
+  "extraction": {
+   "artifacts": 1,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "endianness": "little",
+   "format": "cortexm_raw",
+   "os_hint": "bare-metal",
+   "platform": "ArduPilot",
+   "platform_version": null,
+   "vehicle_type": "AP_Bootloader"
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
  "ark_can-flow_canbootloader.px4": {
   "components": [],
   "extraction": {

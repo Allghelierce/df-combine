@@ -307,14 +307,18 @@ PLATFORMS: list[PlatformSignature] = [
         # Note: the 8-byte app-descriptor signature is NOT used here - it also occurs as a constant in
         # PX4 builds; a *populated* descriptor is added as a hint by the analysis stage instead.
         strong=[b"APJFWv1", b"ArduCopter V", b"ArduPlane V", b"ArduRover V", b"ArduSub V",
-                b"AntennaTracker V", b"AP_Periph", b"Blimp V"],
+                b"AntennaTracker V", b"AP_Periph", b"Blimp V",
+                # AP_Bootloader (official builds in ardupilot/Tools/bootloaders): ChibiOS USB product
+                # template and the SD-card update image name
+                b"%BOARD%-BL", b"/ardupilot.abin"],
         weak=[b"ArduPilot", b"ChibiOS", b"AP_HAL", b"ARMING_CHECK", b"SYSID_THISMAV",
-              b"@PARAM", b"PreArm:", b"ArduCopter", b"ArduPlane"],
+              b"@PARAM", b"PreArm:", b"ArduCopter", b"ArduPlane", b"%BOARD%", b"%SERIAL%"],
         version_patterns=[
             re.compile(r"(?:ArduCopter|ArduPlane|ArduRover|ArduSub|AntennaTracker|Blimp|AP_Periph)"
                        r"\s+V(\d+\.\d+\.\d+(?:-?[\w.]+)?)"),
         ],
-        vehicle_patterns=[re.compile(r"(ArduCopter|ArduPlane|ArduRover|ArduSub|AntennaTracker|Blimp|AP_Periph)\b")],
+        vehicle_patterns=[re.compile(r"(ArduCopter|ArduPlane|ArduRover|ArduSub|AntennaTracker|Blimp|AP_Periph)\b"),
+                          re.compile(r"%BOARD%-(BL)\b")],
     ),
     PlatformSignature(
         name="Betaflight",
@@ -425,10 +429,14 @@ class PlatformAccumulator:
             if self.versions[p.name] and (strong or hints):
                 version = self.versions[p.name].most_common(1)[0][0]
             vehicle = self.vehicles[p.name].most_common(1)[0][0] if self.vehicles[p.name] else None
+            vehicle = VEHICLE_ALIASES.get(vehicle, vehicle)
             out.append(PlatformGuess(name=p.name, family=p.family, confidence=conf, score=score,
                                      evidence=ev[:12], version=version, vehicle=vehicle))
         out.sort(key=lambda g: -g.score)
         return out
+
+
+VEHICLE_ALIASES = {"BL": "AP_Bootloader"}
 
 
 def _show(sig: bytes) -> str:

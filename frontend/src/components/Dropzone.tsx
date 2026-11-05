@@ -105,7 +105,8 @@ export function Dropzone({ maxMb, onUploaded }: { maxMb?: number; onUploaded?: (
         <>
           <div className="dz-title">Drop firmware here or click to browse (multiple files allowed)</div>
           <div className="dz-sub">
-            PX4 (.px4), ArduPilot (.apj), .bin, .hex, .elf, .img, .zip, .tar, .gz / .tar.gz, DfuSe, SquashFS, ext4
+            PX4 (.px4), ArduPilot (.apj / .hex / .bin), ESP32 / ESP8266 images and flash dumps, ELF, raw MCU images, disk and
+            filesystem images (SquashFS, ext4, CramFS, UBI, JFFS2…), archives (.zip, .tar, .gz, .xz, .zst, .lz4, .lzo)
             {maxMb ? ` · max ${maxMb} MiB` : ""}
           </div>
           <div className="dz-note">Format is detected from content, not the extension. Firmware is never executed.</div>

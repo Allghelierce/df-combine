@@ -174,8 +174,8 @@ make lint
   (`backend/tests/factory.py`), including malicious archives (zip-slip, tar traversal/links/devices,
   bombs, nested archives, ext duplicate-entry attack, CROMFS loops). Mocks are used for unit tests
   of tool adapters only.
-* **Real samples** — fetch the pinned public samples first (PX4 v1.17.0 builds, esptool's ESP images;
-  SHA-256 verified):
+* **Real samples** — fetch the pinned public samples first (PX4 v1.17.0 builds, ArduPilot
+  bootloaders, esptool's ESP images; SHA-256 verified):
 
   ```bash
   python scripts/fetch_real_firmware.py
@@ -209,9 +209,12 @@ for the isolation model. In short:
   cwe_checker on ARM/AArch64 ELFs and bare-metal PX4 images, Ghidra function recovery on ELFs and
   Cortex-M images, FACT end to end over REST, FwAnalyzer on Debian/Alpine root filesystems and PX4
   CROMFS, OSV matching on real Debian/Alpine package databases, ESP image/partition parsing.
-* **ArduPilot:** only synthetic samples. `firmware.ardupilot.org` was unreachable from the
-  development environment and building ArduPilot from source there was not permitted, so ArduPilot
-  identification has not been validated on a real build.
+* **ArduPilot:** validated on the official **bootloader** builds committed in the ArduPilot repository
+  (AP_Bootloader for fmuv3, Matek H743, Pixhawk 6X, CubeOrange; `.bin` and `.hex`). Real
+  *flight-stack* builds (`.apj`) could not be obtained: `firmware.ardupilot.org` was unreachable from
+  the development environment and building ArduPilot from source there was not permitted, so
+  vehicle-firmware identification (`.apj`, app descriptor, vehicle/version strings) is covered by
+  synthetic samples only.
 * **cwe_checker** panics on the unstripped PX4 debug ELF (upstream issue; reported verbatim) and
   bare-metal mode is experimental upstream; a 2 MB PX4 image takes ~20 minutes.
 * **FACT** cannot unpack `.px4` containers or raw MCU images; for such inputs it completes without

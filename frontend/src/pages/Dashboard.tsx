@@ -36,7 +36,7 @@ export default function Dashboard({ config, canUpload = true }: { config: AppCon
       <header className="page-head">
         <div>
           <h1>Firmware security dashboard</h1>
-          <p className="muted">Upload PX4, ArduPilot or companion-computer firmware for automated static security analysis.</p>
+          <p className="muted">Upload PX4, ArduPilot, ESP32 peripheral or companion-computer firmware for automated static security analysis.</p>
         </div>
       </header>
       <ErrorBox error={error} />

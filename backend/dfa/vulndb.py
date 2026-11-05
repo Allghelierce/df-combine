@@ -73,6 +73,8 @@ VARIANT_TAGS = {"ardupilot": lambda v, variant: _ardupilot_tags(v, variant)}
 
 
 def _ardupilot_tags(v: str, vehicle: str | None) -> list[str]:
+    if vehicle == "AP_Bootloader":
+        return []  # the bootloader is not a flight-stack release; vehicle advisories do not apply
     prefixes = _AP_VEHICLE_TAGS.get(vehicle or "") or tuple(p for ps in _AP_VEHICLE_TAGS.values() for p in ps)
     return [f"{p}-{v}" for p in prefixes]
 

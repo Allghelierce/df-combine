@@ -17,6 +17,8 @@ SAMPLES = [
     "debian11-armhf-rootfs-20210816.tar.gz", "alpine3.15.0-arm64-rootfs.tar.gz",
     "esp/bootloader_esp32.bin", "esp/bootloader_esp32c3.bin", "esp/esp8266_deepsleep.bin",
     "esp/esp_idf_blink_esp32s2.bin", "esp/partitions_singleapp.bin",
+    "ardupilot/fmuv3_bl.bin", "ardupilot/MatekH743_bl.bin", "ardupilot/Pixhawk6X_bl.bin",
+    "ardupilot/CubeOrange_bl.bin", "ardupilot/CubeOrange_bl.hex",
 ]
 
 

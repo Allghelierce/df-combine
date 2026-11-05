@@ -182,6 +182,7 @@ def test_upstream_tag_mapping():
     assert _describe_base("4.4.2") == "4.4.2"
     assert _ardupilot_tags("4.6.2", "ArduCopter") == ["Copter-4.6.2", "ArduCopter-4.6.2"]
     assert "Plane-4.6.2" in _ardupilot_tags("4.6.2", None)
+    assert _ardupilot_tags("4.6.2", "AP_Bootloader") == []
     assert _repo_key("https://github.com/apache/nuttx") == "nuttx"
     assert _repo_key("https://github.com/apache/nuttx-apps") is None  # different project, different tags
     assert _repo_key("https://git.busybox.net/busybox") == "busybox"
@@ -300,3 +301,17 @@ def test_real_debian_binary_findings_name_their_package(run_analysis):
                                                                                  for f in binary][:5]
     owners = m["packages"]["owners"]
     assert owners[next(k for k in owners if k.endswith("/sbin/killall5"))] == "sysvinit-utils"
+
+
+APBL = REAL / "ardupilot"
+
+
+@pytest.mark.skipif(not (APBL / "fmuv3_bl.bin").exists(),
+                    reason="ArduPilot bootloaders not fetched (scripts/fetch_real_firmware.py)")
+def test_real_ardupilot_bootloaders_identified(run_analysis):
+    """Official AP_Bootloader builds committed in ardupilot/Tools/bootloaders (tag Copter-4.5.7)."""
+    for name in ("fmuv3_bl.bin", "MatekH743_bl.bin", "Pixhawk6X_bl.bin", "CubeOrange_bl.bin", "CubeOrange_bl.hex"):
+        ident = run_analysis(APBL / name)["identification"]
+        assert (ident["platform"], ident["platform_confidence"], ident["vehicle_type"]) == \
+            ("ArduPilot", "high", "AP_Bootloader"), (name, ident["platform_candidates"])
+        assert ident["architecture"] == "ARM Cortex-M (Thumb-2)"
