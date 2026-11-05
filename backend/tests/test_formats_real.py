@@ -339,7 +339,11 @@ def test_real_px4_elf_yields_the_official_flash_image(tmp_path):
     official = zlib.decompress(base64.b64decode(px4["image"]))
     assert (work / flash["path"]).read_bytes() == official
     symbols = json.loads((work / flash["details"]["symbol_map"]).read_text())
-    assert any(name == "main" or name.endswith("_main") for _a, _s, name in symbols)
+    assert any(e[2] == "main" or e[2].endswith("_main") for e in symbols)
+    import shutil
+    if shutil.which("c++filt"):  # C++ names are demangled on the sandbox side (binutils in the sandbox image)
+        readable = {e[2]: e[3] for e in symbols if len(e) == 4}
+        assert readable.get("_ZN3px46logger6Logger3runEv") == "px4::logger::Logger::run"
     # the NuttX /etc CROMFS inside the image is extracted as it is from the .px4
     assert {"/init.d/rcS", "/extras/px4_io-v2_default.bin"} <= {a["name"] for a in arts}
 

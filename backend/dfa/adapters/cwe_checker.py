@@ -251,8 +251,15 @@ class SymbolMap:
     """Function symbols of the ELF a flash image was derived from: address -> 'name+0xoff'."""
 
     def __init__(self, entries: list) -> None:
-        clean = sorted((int(s), int(n), str(name)) for s, n, name in entries
-                       if isinstance(s, int) and isinstance(n, int) and isinstance(name, str))
+        # [address, size, name] or [address, size, name, demangled name] (written by the sandbox: validated)
+        clean = []
+        for e in entries:
+            if not isinstance(e, list) or len(e) not in (3, 4):
+                continue
+            s, n, name = e[0], e[1], e[-1]
+            if isinstance(s, int) and isinstance(n, int) and isinstance(name, str) and isinstance(e[2], str):
+                clean.append((s, n, name[:300]))
+        clean.sort()
         self.starts = [e[0] for e in clean]
         self.entries = clean
 

@@ -23,6 +23,7 @@ RUN --mount=type=secret,id=extra_ca \
     apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       python3 python3-pyelftools python3-pip ca-certificates squashfs-tools e2fsprogs e2tools mtools cpio erofs-utils \
+      binutils \
  && if [ -s /run/secrets/extra_ca ]; then \
       cat /etc/ssl/certs/ca-certificates.crt /run/secrets/extra_ca > /tmp/ca.pem && export PIP_CERT=/tmp/ca.pem; \
     fi \

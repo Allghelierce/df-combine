@@ -701,6 +701,10 @@ class Extractor:
         child.details.update({"load_address": hex(base), "derived_from_elf": True})
         if symbols:
             symbols.sort()
+            readable = demangle([s[2] for s in symbols])
+            for s in symbols:
+                if s[2] in readable:
+                    s.append(readable[s[2]])
             self._write_bytes(json.dumps(symbols, separators=(",", ":")).encode(), out / "symbols.json")
             child.details["symbol_map"] = self._rel(out / "symbols.json")
             child.details["symbol_count"] = len(symbols)
@@ -1419,6 +1423,31 @@ def _scan_magics(fp: BinaryIO, size: int, max_hits: int):
             if hits >= max_hits:
                 return
         pos += chunk
+
+
+def demangle(names: list[str], timeout: int = 60) -> dict[str, str]:
+    """Readable names for C++ (Itanium ABI) symbols via binutils' c++filt, without parameter lists
+    ('_ZN12MissionBlock30get_absolute_altitude_for_itemERK14mission_item_s' ->
+    'MissionBlock::get_absolute_altitude_for_item'). The names come from the untrusted ELF, so this runs on the
+    sandbox side, CPU/memory-limited. Empty if c++filt is unavailable or fails."""
+    exe = shutil.which("c++filt")
+    todo = sorted({n for n in names if n.startswith("_Z") and n.isascii() and n.isprintable() and " " not in n})
+    if not exe or not todo:
+        return {}
+
+    def preexec() -> None:  # pragma: no cover - runs in child
+        resource.setrlimit(resource.RLIMIT_CPU, (timeout, timeout + 5))
+        resource.setrlimit(resource.RLIMIT_AS, (1024**3, 1024**3))
+
+    try:
+        p = subprocess.run([exe, "--no-params"], input=("\n".join(todo) + "\n").encode(), capture_output=True,
+                           timeout=timeout, preexec_fn=preexec, env={"PATH": os.environ.get("PATH", "")})
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    out = p.stdout.decode("utf-8", "replace").split("\n")
+    if p.returncode != 0 or len(out) < len(todo):
+        return {}
+    return {m: d[:300] for m, d in zip(todo, out[:len(todo)], strict=True) if d and d != m}
 
 
 def _is_mcu_elf(path: Path) -> bool:

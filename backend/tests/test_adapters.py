@@ -306,7 +306,11 @@ def test_fact_resubmission_ignores_previous_runs_entries(settings, tmp_path, mon
 def test_cwe_checker_symbolises_flash_images_derived_from_elf(settings, tmp_path):
     """Bare-metal warnings on a flash image derived from an ELF are mapped back to its function symbols."""
     syms = cwe_checker.SymbolMap([[0x8004000, 0x40, "__start"], [0x8010000, 0x100, "mavlink_main"],
-                                  [0x8010200, 0, "no_size"], ["bad", 1, "x"], [1, 2, 3]])
+                                  [0x8010200, 0, "no_size"], ["bad", 1, "x"], [1, 2, 3],
+                                  [0x8020000, 0x10, "_ZN3px46logger6Logger3runEv", "px4::logger::Logger::run"],
+                                  [0x8030000, 0x10, "n", 5], "junk", [1, 2]])
+    assert syms.lookup(0x8020004) == "px4::logger::Logger::run+0x4"  # demangled name is shown
+    assert syms.lookup(0x8030000) is None  # malformed entry ignored
     assert syms.lookup(0x8004000) == "__start"
     assert syms.lookup(0x8010010) == "mavlink_main+0x10"
     assert syms.lookup(0x8010150) is None          # past the end of mavlink_main
