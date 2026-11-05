@@ -201,7 +201,7 @@ class Extractor:
         permissions on it. For root filesystems whose original metadata is known (tar, ext) write a cpio (newc)
         archive that carries modes and owners as header fields; FwAnalyzer reads it in cpio image mode."""
         for fs in self.result.filesystems:
-            if fs["type"] not in ("tar", "ext"):
+            if fs["type"] not in ("tar", "ext") and not (fs["type"] == "zip" and fs.get("unix_modes")):
                 continue
             root = self.work_dir / fs["root"]
             if not (root / "etc").is_dir() or not ((root / "bin").exists() or (root / "usr").is_dir()):
@@ -435,9 +435,16 @@ class Extractor:
             infos = zf.infolist()
             if len(infos) > self.limits.max_files:
                 raise LimitExceeded(f"zip declares {len(infos)} entries (limit {self.limits.max_files})")
+            # Unix modes are only meaningful for archives made on Unix (create_system 3); others carry none
+            unix = bool(infos) and sum(1 for zi in infos if zi.create_system == 3) * 2 > len(infos)
             for zi in infos:
-                mode = (zi.external_attr >> 16) & 0xFFFF
+                mode = (zi.external_attr >> 16) & 0xFFFF if unix else 0
                 if zi.is_dir():
+                    if unix:
+                        with contextlib.suppress(UnsafePath):
+                            d = str(safe_member_path(zi.filename)).strip("/")
+                            if d and d != ".":
+                                self._dir_meta.setdefault(art.id, {})[d] = ((mode & 0o7777) or 0o755, 0, 0)
                     continue
                 if stat.S_ISLNK(mode):
                     target = zf.read(zi)[:4096].decode("utf-8", "replace") if zi.file_size <= 4096 else None
@@ -459,7 +466,7 @@ class Extractor:
                     if not self._member_write(art, zi.filename, member, dest, compressed_size=max(zi.compress_size, 1)):
                         continue
                 self._note_meta(dest, mode=(mode & 0o7777) or None)
-        self._record_fs(art, "zip", out)
+        self._record_fs(art, "zip", out, **({"unix_modes": True} if unix else {}))
         return self._register_tree(art, out)
 
     def h_tar(self, art: Artifact) -> list[Artifact]:

@@ -405,3 +405,35 @@ def test_generated_hostile_archives_keep_extraction_invariants(tmp_path):
                 assert stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode), (i, n)
                 assert not st.st_mode & 0o6002, (i, n, oct(st.st_mode))
     assert produced > 60  # the archives really were extracted (most hostile members are rejected by design)
+
+
+def test_permission_image_for_unix_zip_root_filesystems(tmp_path):
+    """A root filesystem shipped as a zip made on Unix keeps its modes in the permission image; a zip without
+    Unix modes gets none (an image full of default modes would make permission checks look clean)."""
+    import subprocess
+    import zipfile
+
+    from dfa.core.extract import Extractor
+    from dfa.core.limits import Limits
+
+    def make(path, unix):
+        with zipfile.ZipFile(path, "w") as zf:
+            for name, mode, data in (("etc/", 0o40755, b""), ("bin/", 0o40755, b""), ("tmp/", 0o41777, b""),
+                                     ("etc/passwd", 0o100644, b"root:x:0:0::/root:/bin/sh\n"),
+                                     ("bin/su", 0o104755, b"\x7fELF" + bytes(60))):
+                zi = zipfile.ZipInfo(name)
+                zi.create_system = 3 if unix else 0
+                zi.external_attr = (mode << 16) if unix else (0x10 if name.endswith("/") else 0)
+                zf.writestr(zi, data)
+    make(tmp_path / "unix.zip", True)
+    res = Extractor(tmp_path / "w1", Limits()).run(tmp_path / "unix.zip", "unix.zip")
+    fs = next(f for f in res.filesystems if f["type"] == "zip")
+    assert fs["unix_modes"] and fs["special_dirs"] == {"/tmp": 0o1777}
+    listing = subprocess.run(["sh", "-c", f"cpio -tvn --quiet < '{tmp_path / 'w1' / fs['mode_image']}'"],
+                             capture_output=True, text=True).stdout
+    rows = {line.split()[-1]: line for line in listing.splitlines()}
+    assert rows["bin/su"].startswith("-rwsr-xr-x") and rows["tmp"].startswith("drwxrwxrwt")
+    make(tmp_path / "dos.zip", False)
+    res = Extractor(tmp_path / "w2", Limits()).run(tmp_path / "dos.zip", "dos.zip")
+    fs = next(f for f in res.filesystems if f["type"] == "zip")
+    assert "mode_image" not in fs and "unix_modes" not in fs
