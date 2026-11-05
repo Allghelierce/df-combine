@@ -39,6 +39,15 @@ def _cpe(name: str, version: str) -> str | None:
     return f"cpe:2.3:{part}:{vp[0]}:{vp[1]}:{version}:*:*:*:*:*:*:*"
 
 
+def _build_properties(ident: dict) -> list[dict]:
+    """Board and build of the firmware (from .px4/.apj metadata or Betaflight/INAV build blocks)."""
+    build = ident.get("build") if isinstance(ident.get("build"), dict) else {}
+    props = [("dfa:board", ident.get("board_name")), ("dfa:board-id", ident.get("board_id")),
+             ("dfa:vehicle", ident.get("vehicle_type")), ("dfa:build-revision", build.get("revision")),
+             ("dfa:build-date", " ".join(str(x) for x in (build.get("date"), build.get("time")) if x) or None)]
+    return [{"name": k, "value": str(v)[:200]} for k, v in props if v not in (None, "")]
+
+
 def cyclonedx(scan: Scan) -> dict:
     ident = scan.identification or {}
     root_ref = f"firmware:{scan.sha256[:16]}"
@@ -94,7 +103,7 @@ def cyclonedx(scan: Scan) -> dict:
                           "hashes": [{"alg": "SHA-256", "content": scan.sha256}],
                           "properties": [{"name": "dfa:platform", "value": str(ident.get("platform"))},
                                          {"name": "dfa:architecture", "value": str(ident.get("architecture"))},
-                                         {"name": "dfa:scan-id", "value": scan.id}]},
+                                         {"name": "dfa:scan-id", "value": scan.id}] + _build_properties(ident)},
         },
         "components": components,
         "dependencies": [{"ref": root_ref, "dependsOn": [c["bom-ref"] for c in components]}],

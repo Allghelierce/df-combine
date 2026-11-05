@@ -279,3 +279,20 @@ def test_artifacts_expose_raw_image_facts(client, settings, fixtures):
     assert images and images[0]["flash_base"].startswith("0x")
     assert all(set(i) <= {"flash_base", "flash_base_source", "derived_from_elf", "symbol_count", "symbols_from",
                           "identical_to"} for i in images)
+
+
+def test_cyclonedx_sbom(client, settings, fixtures):
+    """CycloneDX 1.5 export: firmware metadata (incl. board/build from the .px4 container), components with
+    purl/CPE where known, attachment download."""
+    s = upload(client, fixtures["px4"])
+    process_all(settings)
+    r = client.get(f"/api/scans/{s['id']}/sbom.cdx.json")
+    assert r.status_code == 200 and "attachment" in r.headers.get("content-disposition", "")
+    bom = r.json()
+    assert (bom["bomFormat"], bom["specVersion"]) == ("CycloneDX", "1.5")
+    comp = bom["metadata"]["component"]
+    assert comp["type"] == "firmware" and comp["hashes"][0]["content"] == s["sha256"]
+    props = {p["name"]: p["value"] for p in comp["properties"]}
+    assert props["dfa:platform"] == "PX4" and props["dfa:board"] == "PX4FMUv5" and props["dfa:board-id"] == "50"
+    assert all(c.get("bom-ref") for c in bom["components"])
+    assert bom["dependencies"][0]["ref"] == comp["bom-ref"]

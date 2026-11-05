@@ -112,6 +112,10 @@ def pdf_report(scan: Scan) -> bytes:
          f"{ident.get('platform')} ({ident.get('platform_confidence') or 'n/a'} confidence)"),
         ("Platform version", ident.get("platform_version")), ("Architecture", ident.get("architecture")),
         ("OS", ident.get("os_hint")), ("Board ID", ident.get("board_id")),
+        ("Board / target", ident.get("board_name")),
+        ("Build", " · ".join(str(x) for x in ((ident.get("build") or {}).get("revision"),
+                                               (ident.get("build") or {}).get("date"),
+                                               (ident.get("build") or {}).get("time")) if x) or None),
         ("Isolation", (scan.extraction_summary or {}).get("isolation_detail") or scan.isolation),
         ("Risk score", f"{scan.risk_score}/100 (heuristic)" if scan.risk_score is not None else "-"),
     ]
