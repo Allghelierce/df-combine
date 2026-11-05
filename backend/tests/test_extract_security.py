@@ -869,3 +869,18 @@ def test_zip_after_a_vendor_header_is_extracted(tmp_path):
     fake = tmp_path / "fake.bin"
     fake.write_bytes(bytes(range(256)) * 8 + b"PK\x05\x06" + b"\x00" * 6 + b"\x01\x00" + b"\x50\x00\x00\x00" * 2 + b"\x00\x00")
     assert Extractor(tmp_path / "w_fake", Limits()).run(fake, "fake.bin").artifacts[0].format != "zip"
+
+
+def test_archives_that_are_not_unpacked_are_reported_not_hidden(tmp_path, run_analysis):
+    """7-Zip, RAR and Cabinet archives were taken for raw data, so their content went unanalysed without a word.
+    They are recognised now and reported as not unpacked (an info finding), never claimed as analysed."""
+    heads = {"payload.7z": b"7z\xbc\xaf\x27\x1c\x00\x04", "payload.rar": b"Rar!\x1a\x07\x01\x00",
+             "payload.cab": b"MSCF\x00\x00\x00\x00"}
+    for name, head in heads.items():
+        src = tmp_path / name
+        src.write_bytes(head + bytes(range(256)) * 32)
+        res = Extractor(tmp_path / f"w_{name}", Limits()).run(src, name)
+        assert res.artifacts[0].extraction == "unsupported", name
+        assert "not unpacked" in res.artifacts[0].extraction_note
+        manifest = run_analysis(src)
+        assert any(f["rule_id"] == "extraction-unsupported" for f in manifest["findings"]), name

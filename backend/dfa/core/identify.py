@@ -40,6 +40,9 @@ class FormatInfo:
 FORMAT_DESCRIPTIONS = {
     "elf": "ELF executable/object",
     "zip": "ZIP archive",
+    "7z": "7-Zip archive (not unpacked)",
+    "rar": "RAR archive (not unpacked)",
+    "cab": "Microsoft Cabinet archive (not unpacked)",
     "tar": "POSIX tar archive",
     "gzip": "gzip compressed data",
     "bzip2": "bzip2 compressed data",
@@ -82,7 +85,8 @@ FORMAT_DESCRIPTIONS = {
 CONTAINER_FORMATS = {"zip", "tar", "gzip", "bzip2", "xz", "lzma", "zstd", "lz4", "lz4_legacy", "lzop", "cramfs",
                      "esp_image", "esp_flash",
                      "erofs", "android_sparse", "parrot_plf", "dji_imah", "ihex", "px4", "apj", "fw_json",
-                     "squashfs", "ext", "fat", "cpio", "uimage", "dfu", "romfs", "cromfs", "disk_image", "ubi", "ubifs", "jffs2"}
+                     "squashfs", "ext", "fat", "cpio", "uimage", "dfu", "romfs", "cromfs", "disk_image", "ubi", "ubifs", "jffs2",
+                     "7z", "rar", "cab"}
 
 
 def _fmt(name: str, **details) -> FormatInfo:
@@ -128,6 +132,12 @@ def detect_format_bytes(head: bytes, size: int) -> FormatInfo:
         return _fmt("elf")
     if head[:4] in (b"PK\x03\x04", b"PK\x05\x06"):
         return _fmt("zip")
+    if head.startswith(b"7z\xbc\xaf\x27\x1c"):
+        return _fmt("7z")
+    if head.startswith((b"Rar!\x1a\x07\x00", b"Rar!\x1a\x07\x01\x00")):
+        return _fmt("rar")
+    if head.startswith(b"MSCF\x00\x00\x00\x00"):
+        return _fmt("cab")
     if len(head) >= 262 and head[257:262] == b"ustar":
         return _fmt("tar")
     if head.startswith(b"\x1f\x8b"):

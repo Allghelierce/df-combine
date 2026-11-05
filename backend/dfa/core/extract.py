@@ -1843,7 +1843,18 @@ def _dir_size(path: Path) -> int:
     return total
 
 
+def _not_unpacked(self: Extractor, art: Artifact) -> list[Artifact]:
+    """Archive formats that are recognised but not unpacked: say so (an info finding names the gap) rather than
+    treating them as raw data. Their unpackers create links while extracting, which would need the same
+    by-name care as debugfs; until then the content is reported as not analysed."""
+    raise UnsupportedFormat(f"{art.format_description.split(' (')[0]} detected; this format is not unpacked, so "
+                            "its contents were not analysed")
+
+
 HANDLERS: dict[str, Callable[[Extractor, Artifact], list[Artifact]]] = {
+    "7z": _not_unpacked,
+    "rar": _not_unpacked,
+    "cab": _not_unpacked,
     "zip": Extractor.h_zip,
     "tar": Extractor.h_tar,
     "gzip": Extractor.h_gzip,
