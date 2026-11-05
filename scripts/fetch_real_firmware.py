@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import sys
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -106,6 +108,27 @@ SAMPLES = {
 }
 
 
+def download(src: str, tmp: Path, attempts: int = 5) -> None:
+    """GitHub's release CDN and S3 sometimes answer 5xx/429 or drop the connection; such errors are retried
+    with backoff (2, 4, 8, 16 s). Anything else, or the last failure, stops with the URL named."""
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(src, timeout=300) as r, tmp.open("wb") as fp:  # noqa: S310
+                while chunk := r.read(1 << 20):
+                    fp.write(chunk)
+            return
+        except urllib.error.HTTPError as exc:
+            if (exc.code < 500 and exc.code != 429) or attempt == attempts:
+                raise SystemExit(f"download of {src} failed: HTTP {exc.code} {exc.reason}") from None
+            reason = f"HTTP {exc.code}"
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            if attempt == attempts:
+                raise SystemExit(f"download of {src} failed: {exc}") from None
+            reason = str(exc)
+        print(f"  attempt {attempt} failed ({reason}); retrying in {2 ** attempt}s", flush=True)
+        time.sleep(2 ** attempt)
+
+
 def fetch(dest: Path, names: list[str] | None = None) -> dict[str, Path]:
     dest.mkdir(parents=True, exist_ok=True)
     out = {}
@@ -115,12 +138,10 @@ def fetch(dest: Path, names: list[str] | None = None) -> dict[str, Path]:
         p = dest / name
         p.parent.mkdir(parents=True, exist_ok=True)
         if not (p.exists() and hashlib.sha256(p.read_bytes()).hexdigest() == sha):
-            print(f"downloading {name} ({size:,} bytes) - {desc}")
+            print(f"downloading {name} ({size:,} bytes) - {desc}", flush=True)
             tmp = p.with_suffix(p.suffix + ".part")
             src = url[0] if url and not url[0].endswith("/") else (url[0] if url else BASE) + Path(name).name
-            with urllib.request.urlopen(src, timeout=300) as r, tmp.open("wb") as fp:  # noqa: S310
-                while chunk := r.read(1 << 20):
-                    fp.write(chunk)
+            download(src, tmp)
             digest = hashlib.sha256(tmp.read_bytes()).hexdigest()
             if digest != sha:
                 tmp.unlink()
