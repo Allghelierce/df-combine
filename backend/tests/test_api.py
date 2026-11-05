@@ -381,3 +381,13 @@ def test_px4_container_with_non_finite_numbers_stays_viewable(client, settings, 
         db.get(Scan, s["id"]).identification = {**ident, "board_id": float("nan"), "odd": [float("inf")]}
     d = client.get(f"/api/scans/{s['id']}")
     assert d.status_code == 200 and d.json()["identification"]["odd"] == [None]
+
+
+def test_pdf_shows_spoofing_characters_as_escapes():
+    """Like the UI, the PDF shows a reversing U+202E or a zero-width character from a firmware name as an escape
+    instead of applying or hiding it; newlines in descriptions still break lines."""
+    from reportlab.lib.styles import getSampleStyleSheet
+
+    from dfa.reports.export import _p
+    para = _p("key in /bin/evil‮txt.exe​\nsecond line", getSampleStyleSheet()["BodyText"])
+    assert para.text == "key in /bin/evil\\u202etxt.exe\\u200b<br/>second line"

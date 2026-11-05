@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import re
 from datetime import UTC, datetime
 from xml.sax.saxutils import escape
 
@@ -101,8 +102,19 @@ def _clip(text: str, limit: int, max_lines: int = 30) -> str:
     return text + CLIPPED if cut else text
 
 
+# controls (newline excepted), bidirectional overrides/isolates and zero-width characters
+_HIDDEN = re.compile("[\x00-\x09\x0b-\x1f\x7f-\x9f\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]")
+
+
+def _visible(text: str) -> str:
+    """Names and evidence come from the firmware: show characters that would act or vanish (a reversing
+    U+202E, zero-width ones) as escapes such as \\u202e, like the UI does."""
+    return _HIDDEN.sub(lambda m: f"\\u{ord(m.group()):04x}", text)
+
+
 def _p(text, style, limit: int = 2000) -> Paragraph:
-    return Paragraph(escape(_clip(str(text if text is not None else "-"), limit)).replace("\n", "<br/>"), style)
+    return Paragraph(escape(_visible(_clip(str(text if text is not None else "-"), limit))).replace("\n", "<br/>"),
+                     style)
 
 
 def pdf_report(scan: Scan) -> bytes:
@@ -239,8 +251,8 @@ def pdf_report(scan: Scan) -> bytes:
                      colWidths=[20 * mm, 158 * mm])
         head.setStyle(TableStyle([("BACKGROUND", (0, 0), (0, 0), SEV_COLORS.get(f.severity, colors.grey)),
                                   ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
-        ev = "<br/>".join(escape(_clip(f"{e.get('value', '')}" + (f"  [{e['location']}]" if e.get("location") else ""),
-                                       400, 1).replace("\n", " "))
+        ev = "<br/>".join(escape(_visible(_clip(f"{e.get('value', '')}" + (f"  [{e['location']}]" if e.get("location")
+                                                                             else ""), 400, 1).replace("\n", " ")))
                           for e in (f.evidence or [])[:8])
         rows = [
             ("Classification", CLASSIFICATION_LABELS.get(f.classification, f.classification)

@@ -112,7 +112,9 @@ access the scan directory only through `dfa/safefs.py`:
   grows about tenfold when parsed), deeply nested JSON is rejected, and its shape is checked before use,
   down to each finding's field types and enum values; lone surrogates (bytes that are not UTF-8) are
   shown as `\xNN`, so no sandbox output can break the database, the JSON API or the reports, and
-  the UI turns only absolute http(s) references into links;
+  the UI turns only absolute http(s) references into links; the UI and the PDF show control,
+  bidirectional-override and zero-width characters in names and evidence as escapes (`\u202e`), so
+  a file named `evil<U+202E>txt.exe` cannot pose as `evilexe.txt`;
 * JSON from untrusted sources (`.px4`/`.apj` containers, the manifest, cwe_checker, Ghidra,
   FwAnalyzer and FACT output) is parsed with `NaN`/`Infinity`, overflowing floats and integers of
   more than 40 digits as `null` (`dfa/core/safejson.py`): before, a container with `"board_id": NaN`
