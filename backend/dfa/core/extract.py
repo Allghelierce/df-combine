@@ -410,6 +410,8 @@ class Extractor:
             art.extraction_note = f"{type(exc).__name__}: {str(exc)[:300]}"
             self.result.warnings.append(f"{art.name}: extraction failed ({art.extraction_note})")
             children = self._salvage(art)
+            if not any(c.size for c in children):  # nothing (or only empty files) came out
+                children += self._carve_failed(art)
         if sized:  # whatever happened above: a damaged or unsupported image must not hide what follows it
             try:
                 children += self._after_own_extent(art)
@@ -447,6 +449,31 @@ class Extractor:
                     return []
             return self._trailing_data(art, path, end, "the ELF file's own data")
         return self._trailing_data(art, path, end, f"the {art.format_description} ({end:,} bytes declared)")
+
+    def _carve_failed(self, art: Artifact) -> list[Artifact]:
+        """An image or archive that could not be unpacked, and left nothing to salvage, is carved like raw data:
+        what it holds - or what a forged header claims as its own, such as a SquashFS superblock claiming the rest
+        of a flash dump - is still analysed. Only the extent it declares is carved; data after it is examined as
+        trailing data, as for any image. Objects of its own kind whose length is only claimed by a header are not
+        carved from it: forged claims would nest (each failing in turn) and could hide what they claim again."""
+        if art.size < 4096 or art.format in ("raw", "cortexm_raw"):
+            return []
+        try:
+            scan_to = (self._data_after_end(art) if art.format in OWN_EXTENT_FORMATS else None) or art.size
+            skip = {_CLAIMED_KIND[art.format]} if art.format in _CLAIMED_KIND else set()
+            children = self._carve(art, self.root / f"{art.id:05d}.carved.d", scan_to, skip)
+        except LimitExceeded as exc:
+            self.result.warnings.append(f"{art.name}: not carved after the failure (limit exceeded: {exc})")
+            self.result.limits_hit.append(str(exc))
+            return [a for a in self.result.artifacts if a.parent_id == art.id]
+        except Exception as exc:  # noqa: BLE001 - contained like the failure itself
+            self.result.warnings.append(f"{art.name}: not carved after the failure ({type(exc).__name__}: "
+                                        f"{str(exc)[:200]})")
+            return [a for a in self.result.artifacts if a.parent_id == art.id]
+        if children:
+            self.result.warnings.append(f"{art.name}: carved like raw data instead ({len(children)} embedded "
+                                        "object(s) found)")
+        return children
 
     def _salvage(self, art: Artifact) -> list[Artifact]:
         """After a failure, register whatever was safely written so it is still analysed."""
@@ -1108,6 +1135,10 @@ class Extractor:
         if reason:
             raise LimitExceeded(reason)
         if proc.returncode not in (0, None):
+            if not _has_files(out):  # nothing at all came out (an empty filesystem exits 0): the image is unreadable
+                last = next((ln.strip() for ln in reversed(output.splitlines()) if ln.strip()), "")
+                raise ToolError(f"{Path(cmd[0]).name} exited with status {proc.returncode}"
+                                + (f" ({last[:200]})" if last else ""))
             # Partial output is still useful; record and keep going.
             self.result.warnings.append(f"{art.name}: {cmd[0]} exited with status {proc.returncode}")
 
@@ -1431,12 +1462,19 @@ class Extractor:
         raise UnsupportedFormat(f"{art.format_description}: unpacking this format is not supported yet")
 
     # ---- carving -----------------------------------------------------------
-    def _carve(self, art: Artifact) -> list[Artifact]:
-        """Carve well-delimited embedded objects out of raw images."""
+    def _carve(self, art: Artifact, out_dir: Path | None = None, scan_to: int | None = None,
+               skip: set[str] | frozenset[str] = frozenset()) -> list[Artifact]:
+        """Carve well-delimited embedded objects out of raw images (objects starting before ``scan_to``, not of
+        the kinds in ``skip``)."""
         src = self.path_of(art.id)
+        scan_to = art.size if scan_to is None else scan_to
         found: list[tuple[int, int, str]] = []  # (offset, length, kind)
         with src.open("rb") as fp:
-            for off, kind in _scan_magics(fp, art.size, self.limits.max_carves_per_file * 8):
+            for off, kind in _scan_magics(fp, scan_to, self.limits.max_carves_per_file * 8):
+                if off >= scan_to:
+                    break
+                if kind in skip:
+                    continue
                 # a 7z is only reported, not unpacked: what lies inside the length it claims is still carved
                 solid = [(o, ln) for o, ln, k in found if k != "7z"]
                 if kind == "zip_end":  # a zip's end record says where the archive starts: carve back to there
@@ -1465,7 +1503,11 @@ class Extractor:
                     break
             if not found:
                 return []
-            out = self._out_dir(art)
+            if out_dir is None:
+                out = self._out_dir(art)
+            else:
+                out = out_dir
+                out.mkdir(exist_ok=False)
             children = []
             for off, length, kind in found:
                 name = f"carved_{off:08x}.{kind}"
@@ -1494,6 +1536,18 @@ class Extractor:
 
 class UnsupportedFormat(Exception):
     pass
+
+
+class ToolError(RuntimeError):
+    """An external unpacker failed without extracting anything."""
+
+
+def _has_files(root: Path) -> bool:
+    """Whether a tree holds at least one regular file (links are not followed)."""
+    for dirpath, _dirs, files in os.walk(root):
+        if any(os.path.isfile(p) and not os.path.islink(p) for p in (os.path.join(dirpath, f) for f in files)):
+            return True
+    return False
 
 
 class _Bounded:
@@ -1698,6 +1752,10 @@ class _GzipMemberReader:
         """File offset just after the member (valid once read() returned b"")."""
         return self.fp.tell() - len(self.d.unused_data) - len(self.tail)
 
+
+# Carved kinds whose length a header claims (rather than one found by decoding the data), by the format they carve as.
+_CLAIMED_KIND = {"squashfs": "squashfs", "zip": "zip_end", "uimage": "uimage", "romfs": "romfs", "cromfs": "cromfs",
+                 "cpio": "cpio", "elf": "elf"}
 
 CARVE_MAGICS = {
     b"hsqs": "squashfs",

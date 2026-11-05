@@ -1346,6 +1346,57 @@ def test_data_after_a_damaged_image_is_still_examined_and_names_do_not_clash(tmp
         assert {"data-after-image", "pem-private-key"} <= rules, (name, rules)
 
 
+def test_a_failed_image_is_carved_like_raw_data(tmp_path, run_analysis):
+    """A forged SquashFS superblock claiming the rest of a flash dump (unsquashfs rejects it: "Bad id count") hid
+    everything after it from carving, and an image or archive that failed to unpack hid everything inside it.
+    Such an image is now carved like raw data, within the extent it declares (data after it stays trailing data)."""
+    import struct
+    import subprocess
+    if not shutil.which("mksquashfs"):
+        pytest.skip("mksquashfs unavailable")
+    tree = tmp_path / "rom"
+    (tree / "etc").mkdir(parents=True)
+    (tree / "etc" / "passwd").write_text("root:x:0:0::/root:/bin/ash\n")
+    sqfs = tmp_path / "rom.squashfs"
+    subprocess.run(["mksquashfs", str(tree), str(sqfs), "-noappend", "-quiet"], check=True, capture_output=True)
+    rom = sqfs.read_bytes()
+    used = struct.unpack_from("<Q", rom, 40)[0]
+    payload, noise = _key_payload(), _noise(8192, 31)
+    flash = bytearray(noise + rom + b"\xff" * (-len(rom) % 65536) + payload + _noise(4096, 32))
+    struct.pack_into("<Q", flash, len(noise) + 40, len(flash) - len(noise))  # bytes_used: the rest of the dump
+    inflated = bytearray(rom[:used] + payload + b"\x00" * 4096)
+    struct.pack_into("<Q", inflated, 40, len(inflated))  # claims the appended payload as its own
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("fw/rootfs.tar.gz", payload)
+        zf.writestr("fw/pad.bin", _noise(8192, 33))
+    damaged = bytearray(b.getvalue())
+    cd = damaged.rfind(b"PK\x01\x02")
+    damaged[cd + 3] = 0  # central directory signature damaged: zipfile rejects the whole archive
+    pad = b"\xff" * (-len(rom) % 65536)
+    chain = bytearray(noise + rom + pad + rom + pad + payload + _noise(4096, 34))  # a forged claim inside another
+    for at in (len(noise), len(noise) + len(rom) + len(pad)):
+        struct.pack_into("<Q", chain, at + 40, len(chain) - at)
+    cases = {"flash.bin": flash, "inflated.sqfs": inflated, "damaged.zip": damaged, "chain.bin": chain}
+    for name, data in cases.items():
+        src = tmp_path / name
+        src.write_bytes(bytes(data))
+        ex = Extractor(tmp_path / f"w_{name}", Limits())
+        res = ex.run(src, name)
+        assert any(a.extraction == "failed" for a in res.artifacts), name  # the failure is still reported
+        assert ex.budget.bytes_written <= 3 * len(data), name  # forged claims do not nest into copies of copies
+        files = {a.name: ex.path_of(a.id).read_bytes() for a in res.artifacts if a.origin == "extracted"}
+        assert b"BEGIN RSA PRIVATE KEY" in files.get("/etc/ssl/server.key", b""), (name, res.warnings)
+        rules = [f["rule_id"] for f in run_analysis(src)["findings"]]
+        assert rules.count("pem-private-key") == 1, (name, rules)  # once: not also as trailing data
+    small = tmp_path / "small.sqfs"  # under 4 KiB nothing is carved (as for raw data)
+    small.write_bytes(bytes(inflated[:used]) + payload)
+    struct.pack_into("<Q", buf := bytearray(small.read_bytes()), 40, len(buf))
+    small.write_bytes(bytes(buf))
+    res = Extractor(tmp_path / "w_small", Limits()).run(small, small.name)
+    assert res.artifacts[0].extraction == "failed" and len(res.artifacts) == 1
+
+
 def test_carving_stays_disjoint_bounded_and_unhidden(tmp_path, run_analysis):
     """Zips carved back from forged end records nested and overlapped (100 near-full copies from 1 MB, past the
     carve limit); a stored member was also carved on its own (two findings for one key); a forged 7z header

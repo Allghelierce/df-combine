@@ -221,10 +221,15 @@ boundary for hostile samples.
   in either place passed as raw data, its contents unanalysed). Carved regions stay disjoint (a zip
   carved back from its end record replaces the regions
   inside it and may not nest or cross others), and a 7-Zip archive, which is only reported, does
-  not hide what lies inside the length it claims. Limits that remain: the extent of an ELF or an
-  image comes from its own headers, so a section claiming the appended bytes hides them, and a
-  forged SquashFS superblock claiming the rest of a raw image still hides what follows it from
-  carving (that extraction is then reported as failed);
+  not hide what lies inside the length it claims. An image or archive that fails to unpack and
+  leaves nothing to salvage (a forged SquashFS superblock claiming the rest of a flash dump, which
+  unsquashfs rejects; a zip with a damaged central directory) is carved like raw data within the
+  extent it declares, so what it holds or hides is still analysed (objects of its own kind whose
+  length only a header claims are not carved from it: forged claims cannot nest into copies of
+  copies, or hide the same bytes again); an external unpacker that exits
+  with an error without extracting anything marks the image as failed (it used to be reported as
+  unpacked). The limit that remains: the extent of an ELF or an image that still unpacks comes from
+  its own headers, so a section or block count claiming the appended bytes hides them;
 * symlinks, hardlinks, device nodes and FIFOs are **never created** - they are recorded in the
   manifest; external unpacker output is walked and such entries removed;
 * files created with `O_EXCL|O_NOFOLLOW`, mode 0644 (setuid/setgid recorded, never applied);
