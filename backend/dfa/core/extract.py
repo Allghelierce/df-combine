@@ -21,6 +21,7 @@ from __future__ import annotations
 import bz2
 import contextlib
 import hashlib
+import heapq
 import json
 import lzma
 import os
@@ -105,8 +106,6 @@ class ExtractionResult:
     filesystems: list[dict] = field(default_factory=list)
     limits_hit: list[str] = field(default_factory=list)
     stats: dict = field(default_factory=dict)
-    # artifact id -> byte ranges (start, end) copied verbatim into carved children (not part of the manifest)
-    copied: dict[int, list[tuple[int, int]]] = field(default_factory=dict)
 
 
 # ----------------------------------------------------------------- helpers
@@ -202,6 +201,7 @@ class Extractor:
         self._dir_meta: dict[int, dict[str, tuple[int, int, int]]] = {}  # container -> dir -> (mode, uid, gid)
         self._tree_roots: dict[int, tuple[Path, bool]] = {}  # artifact id -> (root, written by external tool)
         self._registered: set[int] = set()
+        self._no_failure_carve: set[int] = set()  # same-kind objects carved out of a failed image
         # Unpackers that may follow links they create themselves are only allowed inside the container sandbox.
         self.in_container = os.environ.get("DFA_IN_SANDBOX") == "1"
         self._progress = progress or (lambda msg: None)
@@ -423,6 +423,15 @@ class Extractor:
             except Exception as exc:  # noqa: BLE001 - contained like any parser error
                 self.result.warnings.append(f"{art.name}: data after it not examined ({type(exc).__name__}: "
                                             f"{str(exc)[:200]})")
+        if art.format == "zip" and (lead := art.details.get("prepended_bytes")):  # a zip ending the file
+            try:
+                children += self._leading_data(art, int(lead))
+            except LimitExceeded as exc:
+                self.result.warnings.append(f"{art.name}: data before it not examined (limit exceeded: {exc})")
+                self.result.limits_hit.append(str(exc))
+            except Exception as exc:  # noqa: BLE001 - contained like any parser error
+                self.result.warnings.append(f"{art.name}: data before it not examined ({type(exc).__name__}: "
+                                            f"{str(exc)[:200]})")
         for child in children:
             if self.budget.files_created > self.limits.max_files:
                 break
@@ -456,14 +465,15 @@ class Extractor:
         """An image or archive that could not be unpacked, and left nothing to salvage, is carved like raw data:
         what it holds - or what a forged header claims as its own, such as a SquashFS superblock claiming the rest
         of a flash dump - is still analysed. Only the extent it declares is carved; data after it is examined as
-        trailing data, as for any image. Objects of its own kind whose length is only claimed by a header are not
-        carved from it: forged claims would nest (each failing in turn) and could hide what they claim again."""
-        if art.size < 4096 or art.format in ("raw", "cortexm_raw"):
+        trailing data, as for any image. Of its own kind (a header claiming a length, as the failed one did) only the
+        first object is carved - the real image behind a forged header - and it shadows nothing inside its range, so
+        a claim forged inside the forged one hides nothing either; if it fails too, it is not carved again (forged
+        claims cannot nest into copies of copies)."""
+        if art.size < 4096 or art.format in ("raw", "cortexm_raw") or art.id in self._no_failure_carve:
             return []
         try:
             scan_to = (self._data_after_end(art) if art.format in OWN_EXTENT_FORMATS else None) or art.size
-            skip = {_CLAIMED_KIND[art.format]} if art.format in _CLAIMED_KIND else set()
-            children = self._carve(art, self.root / f"{art.id:05d}.carved.d", scan_to, skip)
+            children = self._carve(art, self.root / f"{art.id:05d}.carved.d", scan_to, _CLAIMED_KIND.get(art.format))
         except LimitExceeded as exc:
             self.result.warnings.append(f"{art.name}: not carved after the failure (limit exceeded: {exc})")
             self.result.limits_hit.append(str(exc))
@@ -564,8 +574,17 @@ class Extractor:
                 if dest.exists():
                     self.result.warnings.append(f"{art.name}: duplicate member {name!r} skipped")
                     continue
-                with zf.open(zi) as member:
-                    if not self._member_write(art, name, member, dest, compressed_size=max(zi.compress_size, 1)):
+                try:
+                    with zf.open(zi) as member:
+                        if not self._member_write(art, name, member, dest, compressed_size=max(zi.compress_size, 1)):
+                            continue
+                except (zipfile.BadZipFile, zlib.error, lzma.LZMAError, EOFError, NotImplementedError, RuntimeError,
+                        OSError) as exc:  # a damaged or unsupported member: the others are still analysed
+                    if isinstance(exc, OSError) and exc.errno is not None:
+                        raise  # the disk, not the member (e.g. no space left)
+                    self.result.warnings.append(f"{art.name}: member {name!r} could not be read "
+                                                f"({type(exc).__name__}: {str(exc)[:200]})")
+                    if not dest.exists():
                         continue
                 self._note_meta(dest, mode=(mode & 0o7777) or None)
         self._record_fs(art, "zip", out, **({"unix_modes": True} if unix else {}))
@@ -688,7 +707,34 @@ class Extractor:
                                     f"analysed separately as {name}")
         child = self._child(art, dest, name, "carved")
         child.details["carved_offset"] = hex(off)
-        self.result.copied.setdefault(art.id, []).append((off, off + size))
+        return [child]
+
+    def _leading_data(self, art: Artifact, n: int) -> list[Artifact]:
+        """Data before an archive that ends the file (a vendor header, a self-extracting stub, the rest of a flash
+        dump): the archive's handler reads only its members, so what precedes them is analysed as an artifact of
+        its own, unless it is padding."""
+        n = min(n, art.size)
+        src = self.path_of(art.id)
+        with src.open("rb") as fp:
+            pos, data = 0, False
+            while pos < n and (chunk := fp.read(min(COPY_CHUNK, n - pos))):
+                if _NOT_PADDING.search(chunk):
+                    data = True
+                    break
+                pos += len(chunk)
+            if not data or n <= 8:
+                return []
+            name = "leading_00000000.bin"
+            ldir = self.root / f"{art.id:05d}.leading.d"  # _out_dir names are "<id>_<name>.d": no clash
+            ldir.mkdir(exist_ok=True)
+            dest = ldir / name
+            if dest.exists():
+                return []
+            fp.seek(0)
+            self._write_stream(_Bounded(fp, n), dest, label=name)
+        self.result.warnings.append(f"{art.name}: {n} bytes before the archive analysed separately as {name}")
+        child = self._child(art, dest, name, "carved")
+        child.details["carved_offset"] = "0x0"
         return [child]
 
     def h_gzip(self, art: Artifact) -> list[Artifact]:
@@ -1466,21 +1512,30 @@ class Extractor:
 
     # ---- carving -----------------------------------------------------------
     def _carve(self, art: Artifact, out_dir: Path | None = None, scan_to: int | None = None,
-               skip: set[str] | frozenset[str] = frozenset()) -> list[Artifact]:
-        """Carve well-delimited embedded objects out of raw images (objects starting before ``scan_to``, not of
-        the kinds in ``skip``)."""
+               once: str | None = None) -> list[Artifact]:
+        """Carve well-delimited embedded objects out of raw images (objects starting before ``scan_to``). Of kind
+        ``once`` (a failed image's own) only the first object is carved, and its range shadows nothing."""
         src = self.path_of(art.id)
         scan_to = art.size if scan_to is None else scan_to
         found: list[tuple[int, int, str]] = []  # (offset, length, kind)
+        examined = attempts = 0
+        once_kind = "zip" if once == "zip_end" else once  # as it is recorded in found
         with src.open("rb") as fp:
-            for off, kind in _scan_magics(fp, scan_to, self.limits.max_carves_per_file * 8):
+            for off, kind in _scan_magics(fp, scan_to):
                 if off >= scan_to:
                     break
-                if kind in skip:
+                examined += 1
+                if examined > MAX_CARVE_HITS or attempts >= MAX_CARVE_ATTEMPTS:  # a flood of magic bytes
+                    self.result.warnings.append(f"{art.name}: carving stopped at {off:#x} after {examined - 1:,} "
+                                                f"signatures ({attempts:,} checked); objects after it were not carved")
+                    self.result.limits_hit.append("max_carve_candidates")
+                    break
+                if kind == once and any(k == once_kind for _o, _ln, k in found):
                     continue
                 # a 7z is only reported, not unpacked: what lies inside the length it claims is still carved
-                solid = [(o, ln) for o, ln, k in found if k != "7z"]
+                solid = [(o, ln) for o, ln, k in found if k not in ("7z", once_kind)]
                 if kind == "zip_end":  # a zip's end record says where the archive starts: carve back to there
+                    attempts += 1
                     extent = _zip_extent(fp, off, art.size)
                     if extent is None or extent[0] == 0:
                         continue
@@ -1490,11 +1545,13 @@ class Extractor:
                     # inside it - its stored members - are unpacked from the zip, so they are not carved again
                     if any(o < stop and start < o + ln and not (start <= o and o + ln <= stop) for o, ln in solid):
                         continue
-                    found = [r for r in found if r[2] == "7z" or not (start <= r[0] and r[0] + r[1] <= stop)]
+                    if once_kind != "zip":  # (a zip carved once shadows nothing: what it contains stays)
+                        found = [r for r in found if r[2] == "7z" or not (start <= r[0] and r[0] + r[1] <= stop)]
                     found.append((start, length, "zip"))
                 else:
                     if off == 0 or any(o <= off < o + ln for o, ln in solid):
                         continue
+                    attempts += 1
                     length = _carve_length(fp, off, kind, art.size)
                     if length and kind in ("gz", "xz"):
                         length = _stream_length(fp, off, kind, self.limits.max_file_bytes)
@@ -1502,6 +1559,8 @@ class Extractor:
                         continue
                     found.append((off, length, kind))
                 if len(found) >= self.limits.max_carves_per_file:
+                    self.result.warnings.append(f"{art.name}: carving stopped at {off:#x} after "
+                                                f"{len(found)} embedded objects (limit); later ones were not carved")
                     self.result.limits_hit.append("max_carves_per_file")
                     break
             if not found:
@@ -1530,9 +1589,10 @@ class Extractor:
                     dest = new
                 else:
                     self._write_stream(_Bounded(fp, length), dest, label=name)
-                    self.result.copied.setdefault(art.id, []).append((off, off + length))
                 c = self._child(art, dest, name, "carved")
                 c.details["carved_offset"] = hex(off)
+                if kind == once_kind:
+                    self._no_failure_carve.add(c.id)
                 children.append(c)
         art.details["carved_objects"] = len(children)
         return children
@@ -1789,32 +1849,27 @@ def _zip_extent(fp: BinaryIO, end_record: int, size: int) -> tuple[int, int] | N
     return start, end - start
 
 
-def _scan_magics(fp: BinaryIO, size: int, max_hits: int):
-    chunk = 4 * 1024**2
-    overlap = 16
-    pos = 0
-    hits = 0
+# Carving examines at most this many signature hits per file, and checks at most this many candidates (a flood of
+# magic bytes must neither take unbounded time nor, as a silent cut-off, hide what follows it: both limits are reported)
+MAX_CARVE_HITS = 1_000_000
+MAX_CARVE_ATTEMPTS = 4096
+
+
+def _scan_magics(fp: BinaryIO, size: int):
+    """(offset, kind) of every carve signature before ``size``, in offset order; read in 4 MiB chunks, found lazily."""
+    chunk, overlap, pos = 4 * 1024**2, 16, 0
     while pos < size:
         fp.seek(pos)
         block = fp.read(chunk + overlap)
         if not block:
             break
-        found = []
-        for magic, kind in CARVE_MAGICS.items():
-            start = 0
-            while True:
-                i = block.find(magic, start)
-                if i < 0 or i >= chunk:
-                    break
-                found.append((pos + i, kind))
-                start = i + 1
-                if len(found) > max_hits:
-                    break
-        for item in sorted(found):
-            yield item
-            hits += 1
-            if hits >= max_hits:
-                return
+
+        def hits(magic: bytes, kind: str, block: bytes = block, pos: int = pos):
+            i = block.find(magic)
+            while 0 <= i < chunk:
+                yield pos + i, kind
+                i = block.find(magic, i + 1)
+        yield from heapq.merge(*(hits(m, k) for m, k in CARVE_MAGICS.items()))
         pos += chunk
 
 

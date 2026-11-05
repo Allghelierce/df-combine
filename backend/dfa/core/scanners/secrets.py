@@ -63,12 +63,13 @@ def _hash_kind(h: str) -> str:
 
 def scan(ctx: ScanContext) -> list[Finding]:
     out: list[Finding] = []
+    secret_of: dict[int, tuple[int, str]] = {}  # id(finding) -> (artifact id, the secret it reports)
     for art in ctx.content_artifacts():
         path = ctx.fs_path(art)
         text = ctx.text(art)
         base = path.rsplit("/", 1)[-1]
         if text is not None:
-            out += _pem_findings(ctx, art, text, in_binary=False)
+            out += _pem_findings(ctx, art, text, in_binary=False, keys=secret_of)
             if base in ("shadow", "shadow-", "passwd", "passwd-") and "/etc/" in path:
                 out += _account_findings(ctx, art, text, base.rstrip("-"))
             if base == "authorized_keys" or base == "authorized_keys2":
@@ -93,24 +94,34 @@ def scan(ctx: ScanContext) -> list[Finding]:
             if base in CREDENTIAL_FILES or path.endswith("/.aws/credentials"):
                 out += _credential_file(ctx, art, text, base)
             out += _assignment_findings(ctx, art, text)
-            out += _token_findings(ctx, art, ((0, ln) for ln in text.splitlines()), in_binary=False)
+            out += _token_findings(ctx, art, ((0, ln) for ln in text.splitlines()), in_binary=False, keys=secret_of)
         else:
-            # Binary content: only high-signal patterns (PEM blocks, tokens). Regions carved verbatim into child
-            # artifacts are left to those (a key in a stored zip member is reported once, for the member).
-            strings = [(o, s) for o, s in ctx.strings(art) if ctx.outside_children(art, o)]
+            # Binary content: only high-signal patterns (PEM blocks, tokens).
+            strings = ctx.strings(art)
             joined = "\n".join(s for _, s in strings if "PRIVATE KEY" in s or "-----" in s or len(s) > 60)
             if "PRIVATE KEY" in joined:
-                out += _pem_findings(ctx, art, _rebuild_pem_text(ctx, art), in_binary=True)
-            out += _token_findings(ctx, art, strings, in_binary=True)
-    return out
+                out += _pem_findings(ctx, art, _rebuild_pem_text(ctx, art), in_binary=True, keys=secret_of)
+            out += _token_findings(ctx, art, strings, in_binary=True, keys=secret_of)
+    return _without_repeats_in_descendants(ctx, out, secret_of)
+
+
+def _without_repeats_in_descendants(ctx: ScanContext, findings: list[Finding],
+                                    keys: dict[int, tuple[int, str]]) -> list[Finding]:
+    """A secret inside data that was also unpacked or carved (a key in a stored zip member of a flash dump, in an
+    executable's overlay) is found twice: in the container's bytes and in the file. The container's finding is
+    dropped only when a descendant reports that very secret - nothing found only in the container is lost."""
+    parent = {a.id: a.parent_id for a in ctx.artifacts}
+    reported: set[tuple[int, str]] = set()  # (ancestor artifact id, secret) pairs a descendant reports
+    for aid, secret in keys.values():
+        p, hops = parent.get(aid), 0
+        while p is not None and hops < 64:
+            reported.add((p, secret))
+            p, hops = parent.get(p), hops + 1
+    return [f for f in findings if keys.get(id(f)) not in reported]
 
 
 def _rebuild_pem_text(ctx: ScanContext, art) -> str:
     raw = ctx.paths[art.id].read_bytes()[: ctx.limits.max_scan_bytes_per_file]
-    if copied := ctx.copied.get(art.id):
-        raw = bytearray(raw)
-        for start, end in copied:
-            raw[start:end] = bytes(len(raw[start:end]))  # carved into a child: analysed there
     return raw.decode("latin-1")
 
 
@@ -139,7 +150,8 @@ def pem_body(raw: str) -> str | None:
     return body
 
 
-def _pem_findings(ctx: ScanContext, art, text: str, in_binary: bool) -> list[Finding]:
+def _pem_findings(ctx: ScanContext, art, text: str, in_binary: bool,
+                  keys: dict[int, tuple[int, str]] | None = None) -> list[Finding]:
     out = []
     path = ctx.fs_path(art)
     base = path.rsplit("/", 1)[-1]
@@ -150,7 +162,8 @@ def _pem_findings(ctx: ScanContext, art, text: str, in_binary: bool) -> list[Fin
         valid = body is not None and len(body) >= 64
         if not valid and in_binary:
             continue  # PEM marker strings of a parser/library (header and footer constants), not a key
-        fp = hashlib.sha256((body or "").encode()).hexdigest()[:16]
+        digest = hashlib.sha256((body or "").encode()).hexdigest()
+        fp = digest[:16]
         host_key = bool(re.search(r"(ssh_host_.*_key|dropbear_.*host_key)$", base))
         if host_key:
             title = "SSH host private key embedded in image"
@@ -186,6 +199,8 @@ def _pem_findings(ctx: ScanContext, art, text: str, in_binary: bool) -> list[Fin
                 evidence=[Evidence("string", f"-----BEGIN {kind}----- (body sha256 prefix {fp}, {len(body)} b64 chars)",
                                    path + f" @ offset {m.start():#x}")],
                 cwe="CWE-321", tags=["crypto", "self-test"]))
+            if keys is not None:
+                keys[id(out[-1])] = (art.id, f"pem:{digest}")
             continue
         out.append(Finding(
             title=title, description=desc, severity=sev, classification=C.detected,
@@ -196,6 +211,8 @@ def _pem_findings(ctx: ScanContext, art, text: str, in_binary: bool) -> list[Fin
                                path + (f" @ offset {m.start():#x}" if in_binary else ""))],
             cwe="CWE-321", references=["https://cwe.mitre.org/data/definitions/321.html"],
             tags=["credentials", "crypto"]))
+        if keys is not None:
+            keys[id(out[-1])] = (art.id, f"pem:{digest}")
     if in_binary or out:
         return out
     hdr = PEM_HEADER_RE.search(text)
@@ -374,7 +391,8 @@ def _assignment_findings(ctx: ScanContext, art, text: str) -> list[Finding]:
     return out
 
 
-def _token_findings(ctx: ScanContext, art, lines, in_binary: bool) -> list[Finding]:
+def _token_findings(ctx: ScanContext, art, lines, in_binary: bool,
+                    keys: dict[int, tuple[int, str]] | None = None) -> list[Finding]:
     out = []
     seen = set()
     path = ctx.fs_path(art)
@@ -394,4 +412,6 @@ def _token_findings(ctx: ScanContext, art, lines, in_binary: bool) -> list[Findi
                     remediation="Revoke the credential if it is real and remove it from the firmware.",
                     evidence=[Evidence("string", redact(tok, 6), path + (f" @ {off:#x}" if in_binary else ""))],
                     cwe="CWE-798", tags=["credentials"]))
+                if keys is not None:
+                    keys[id(out[-1])] = (art.id, f"token:{tok}")
     return out

@@ -200,7 +200,11 @@ boundary for hostile samples.
   rejected; output paths re-checked to resolve inside the extraction root; bytes that are not UTF-8
   become a literal `\xNN` in the name on disk and in the manifest (tar, zip, external unpacker
   output), and a zip entry flagged UTF-8 whose name is not no longer makes the whole zip unreadable
-  (zip64 archives included; the central directory is located as zipfile itself locates it);
+  (zip64 archives included; the central directory is located as zipfile itself locates it, only
+  local headers before the central directory are patched, and zipfile must then read the very
+  directory that was walked - a patch placed in the archive comment could otherwise forge an end
+  record and a decoy directory); one member that cannot be read (bad CRC, unsupported method, a
+  missing local header) is reported and skipped instead of failing the whole archive;
 * content cannot be hidden from analysis behind a tar end-of-archive marker or a damaged tar header
   (reading continues, with a warning giving the bytes skipped), behind padding after a gzip, xz or
   zstd stream (0xFF padding used to fail the whole stream), in the later archives of an initramfs,
@@ -218,15 +222,21 @@ boundary for hostile samples.
   object, PKCS#7 id, DER SEQUENCE of the declared length, at most 16 KiB); a marker alone is not
   enough. A zip behind other data (a vendor header, a self-extracting stub) or inside a raw image
   is found from its end record, a zip64 archive from its zip64 end record (before, a zip64 archive
-  in either place passed as raw data, its contents unanalysed). Carved regions stay disjoint (a zip
+  in either place passed as raw data, its contents unanalysed); the data before a zip that ends the
+  file is analysed as an artifact of its own (the zip's handler reads only its members, so a flash
+  dump ending in a small zip went unanalysed). Carved regions stay disjoint (a zip
   carved back from its end record replaces the regions
   inside it and may not nest or cross others), and a 7-Zip archive, which is only reported, does
   not hide what lies inside the length it claims. An image or archive that fails to unpack and
   leaves nothing to salvage (a forged SquashFS superblock claiming the rest of a flash dump, which
   unsquashfs rejects; a zip with a damaged central directory) is carved like raw data within the
-  extent it declares, so what it holds or hides is still analysed (objects of its own kind whose
-  length only a header claims are not carved from it: forged claims cannot nest into copies of
-  copies, or hide the same bytes again); an external unpacker that exits
+  extent it declares, so what it holds or hides is still analysed. Of its own kind only the first
+  object is carved - the real image behind a forged copy of its superblock - and its range shadows
+  nothing, so a claim forged inside the forged one hides nothing either; if that object fails too, it
+  is not carved again (forged claims cannot nest into copies of copies). Carving examines every
+  signature (up to a million per file, and checks up to 4,096 candidates); before, it stopped silently
+  after 256 signatures, valid or not, so a flood of magic bytes hid everything after it - both limits
+  are reported when reached. An external unpacker that exits
   with an error without extracting anything marks the image as failed (it used to be reported as
   unpacked). The limit that remains: the extent of an ELF or an image that still unpacks comes from
   its own headers, so a section or block count claiming the appended bytes hides them;

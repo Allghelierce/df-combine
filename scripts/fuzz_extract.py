@@ -9,7 +9,7 @@ the extractor looks for. For every input:
 - the analysis completes: an exception out of analyze.run loses the whole scan;
 - no hang, no MemoryError or crash: each input runs in a forked child with an address-space limit (RLIMIT_AS), as
   the local sandbox runs the analysis, so a leak or a native abort is caught and charged to the input;
-- the manifest passes the worker's checks (json.dumps -> load_manifest);
+- the manifest passes the worker's checks (json.dumps -> load_manifest), and every built-in scanner completed;
 - every artifact path stays inside the work directory and names a regular file;
 - nothing in the work directory is a link or a special file, and its size stays within the byte budget.
 
@@ -348,6 +348,9 @@ def check(work: Path, manifest: dict) -> list[str]:
         return problems + [f"worker rejects manifest: {type(exc).__name__}: {str(exc)[:200]}"]
     if "fatal_error" in loaded:
         return problems + [f"fatal error: {loaded['fatal_error'][:200]}"]
+    for r in loaded["scanner_runs"]:  # a built-in scanner never fails on content; its findings would be lost
+        if r["status"] != "completed":
+            problems.append(f"scanner {r['name']} {r['status']}: {str(r.get('error'))[:200]}")
     base = work.resolve()
     for a in loaded["extraction"]["artifacts"]:
         if a["path"] == "<input>":

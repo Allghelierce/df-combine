@@ -43,16 +43,20 @@ def utf8_flag_fixes(path: Path) -> tuple[dict[int, int], dict[str, str]]:
                 if local == 0xFFFFFFFF:
                     local = _zip64_header_offset(cd[i + 46 + nlen:i + 46 + nlen + elen], usize, csize)
                 patches[start + i + 9] = (flags >> 8) & ~_UTF8_FLAG_HIGH & 0xFF
-                if local + concat < 0:
-                    raise ValueError("zip local header lies outside the file")
-                fp.seek(local + concat)
-                lfh = fp.read(30)
-                if len(lfh) < 30 or lfh[:4] != _LFH:
-                    raise ValueError("damaged zip local header")
-                patches[local + concat + 7] = lfh[7] & ~_UTF8_FLAG_HIGH & 0xFF
+                # a local header precedes the central directory; one claimed anywhere else is left unpatched (that
+                # member cannot be read, the others can) - patching there could forge an end record (a decoy)
+                if 0 <= local + concat <= start - 30:
+                    fp.seek(local + concat)
+                    lfh = fp.read(30)
+                    if lfh[:4] == _LFH:
+                        patches[local + concat + 7] = lfh[7] & ~_UTF8_FLAG_HIGH & 0xFF
                 # as tarfile and os.walk decode names; safe_member_path escapes the bytes after its separator check
                 shown[raw.decode("cp437")] = raw.decode("utf-8", "surrogateescape")
             i += 46 + nlen + elen + clen
+        entries = cd.count(_CDH)  # an upper bound; zipfile must not read a directory elsewhere or a longer one
+    with zipfile.ZipFile(PatchedReader(path, patches)) as zf:
+        if zf.start_dir != start or len(zf.infolist()) > entries:
+            raise ValueError("the patched archive reads a different central directory")
     return patches, shown
 
 

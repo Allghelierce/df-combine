@@ -546,6 +546,71 @@ def test_zip_name_fixes_follow_prepended_data(tmp_path):
         zipnames.utf8_flag_fixes(src)
 
 
+def test_name_fixes_cannot_make_zipfile_read_a_decoy_directory(tmp_path):
+    """Third review: a UTF-8-flagged entry whose local header 'lies' in the archive comment, at "PK\\x03\\x04\\x14PK
+    \\x0d\\x06...": clearing its flag bit there formed an end record, and zipfile read a decoy central directory
+    (listing only decoy.txt); the real member, with the secrets, went unanalysed. Local headers outside the space
+    before the central directory are not patched, and zipfile must read the directory that was walked."""
+    import struct
+    import zlib
+
+    def lfh(name, data, method, raw):  # noqa: ANN001, ANN202
+        return struct.pack("<4sHHHHHIIIHH", b"PK\x03\x04", 20, 0, method, 0, 0, zlib.crc32(data), len(raw),
+                           len(data), len(name), 0) + name + raw
+
+    def cdh(name, data, method, raw, flags, off, comment=b""):  # noqa: ANN001, ANN202
+        return struct.pack("<4sHHHHHHIIIHHHHHII", b"PK\x01\x02", 20, 20, flags, method, 0, 0, zlib.crc32(data),
+                           len(raw), len(data), len(name), 0, len(comment), 0, 0, 0, off) + name + comment
+
+    secret = b"aws_access_key_id = AKIAWERTYUIOPLKJHGFD\n"
+    co = zlib.compressobj(9, zlib.DEFLATED, -15)
+    real_raw = co.compress(secret) + co.flush()
+    decoy = b"nothing to see\n"
+    l_real, l_decoy = lfh(b"real.txt", secret, 8, real_raw), lfh(b"decoy.txt", decoy, 0, decoy)
+    cd_start = len(l_real) + len(l_decoy)
+    cd_real = cdh(b"real.txt", secret, 8, real_raw, 0, 0)
+    decoy_entry = bytearray(cdh(b"decoy.txt", decoy, 0, decoy, 0, len(l_real)))
+    struct.pack_into("<H", decoy_entry, 32, 22 + 5)
+    cd_size = len(cd_real) + len(cdh(b"bad\xff.txt", b"", 0, b"", 0x800, 0, bytes(decoy_entry)))
+    comment_pos = cd_start + cd_size + 22
+    cd_bad = cdh(b"bad\xff.txt", b"", 0, b"", 0x800, comment_pos, bytes(decoy_entry))
+    decoy_cd_off = comment_pos + 5 - (len(decoy_entry) + 22 + 5)
+    fake = (b"PK\x03\x04\x14PK\x0d\x06" + struct.pack("<HHHHII", 0, 0, 1, 1, len(decoy_entry) + 22 + 5, decoy_cd_off)
+            + b"\x00" * 5)
+    eocd = struct.pack("<4sHHHHIIH", b"PK\x05\x06", 0, 0, 2, 2, cd_size, cd_start, len(fake))
+    src = tmp_path / "e.zip"
+    src.write_bytes(l_real + l_decoy + cd_real + cd_bad + eocd + fake)
+    ex = Extractor(tmp_path / "w", Limits())
+    res = ex.run(src, src.name)
+    files = {a.name: ex.path_of(a.id).read_bytes() for a in res.artifacts if a.origin == "extracted"}
+    assert files == {"/real.txt": secret}, (files, res.warnings)
+    assert any("could not be read" in w for w in res.warnings)  # the entry with no local header, alone
+
+
+def test_one_damaged_zip_member_does_not_hide_the_others(tmp_path):
+    """A member that cannot be read (bad CRC, unsupported method) failed the whole archive: every other member
+    went unanalysed. It is reported and skipped now."""
+    import struct
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("a/broken.bin", b"A" * 64)
+        zf.writestr("etc/shadow", b"root::19000:0:99999:7:::\n")
+        zf.writestr("b/method.bin", b"B" * 64)
+    data = bytearray(b.getvalue())
+    i = data.find(b"A" * 64)
+    data[i] ^= 1  # CRC mismatch
+    for sig, at in ((b"PK\x03\x04", 8), (b"PK\x01\x02", 10)):  # b/method.bin: compression method 99 (AES)
+        j = data.rfind(sig, 0, data.find(b"PK\x01\x02") if sig == b"PK\x03\x04" else len(data))
+        struct.pack_into("<H", data, j + at, 99)
+    src = tmp_path / "fw.zip"
+    src.write_bytes(bytes(data))
+    ex = Extractor(tmp_path / "w", Limits())
+    res = ex.run(src, src.name)
+    names = {a.name for a in res.artifacts if a.origin == "extracted"}
+    assert res.artifacts[0].extraction == "ok" and "/etc/shadow" in names, (names, res.warnings)
+    assert sum("could not be read" in w for w in res.warnings) == 2
+
+
 def _zip64_archive(files: dict[bytes, bytes], prefix: bytes = b"") -> bytes:
     """A stored zip with zip64 end records, whose central directory gives each local header offset only in a
     zip64 extra field (as for members past 4 GiB). Names containing 0x80 are flagged UTF-8."""
@@ -619,15 +684,41 @@ def test_zip_name_fixes_locate_zip64_directories_as_older_zipfile_versions_do(tm
     from dfa.core.formats import zipnames
     src = tmp_path / "fw.bin"
     src.write_bytes(_zip64_archive({b"etc/user\x80dir/id_rsa": b"key", b"etc/passwd": b"x"}, b"HDR" * 7))
-    current = zipnames.utf8_flag_fixes(src)
+    patches, _shown = zipnames.utf8_flag_fixes(src)
+    with src.open("rb") as fp:
+        current = zipnames._central_directory(fp)
     real = zipfile._EndRecData
 
     def older(fp):  # noqa: ANN001, ANN202
         endrec = real(fp)
         endrec[zipfile._ECD_LOCATION] = src.stat().st_size - 22
         return endrec
-    monkeypatch.setattr(zipfile, "_EndRecData", older)
-    assert zipnames.utf8_flag_fixes(src) == current and len(current[0]) == 2
+    monkeypatch.setattr(zipfile, "_EndRecData", older)  # (only the end-record half of an older zipfile)
+    with src.open("rb") as fp:
+        assert zipnames._central_directory(fp) == current
+    assert len(patches) == 2 and current[2] == len(b"HDR" * 7)
+
+
+def test_data_before_a_zip_that_ends_the_file_is_analysed(tmp_path, run_analysis):
+    """Third review: a file ending in a zip is identified as the zip; its handler reads only the members, so the data
+    before them (a vendor header, a self-extracting stub, the rest of a flash dump) was never analysed. With zip64
+    end records accepted, an image ending in a zip64 archive lost its analysis the same way."""
+    key = b"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA" + b"C" * 64 + b"\n-----END RSA PRIVATE KEY-----\n"
+    prefix = _noise(8192, 51) + b"\x00aws AKIAHGFDSAMNBVCXZLKJ\x00" + key + _noise(8192, 52)
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w") as zf:
+        zf.writestr("readme.txt", "release notes\n")
+    for name, archive in (("classic.bin", b.getvalue()), ("zip64.bin", _zip64_archive({b"readme.txt": b"notes"}))):
+        src = tmp_path / name
+        src.write_bytes(prefix + archive)
+        manifest = run_analysis(src)
+        assert manifest["identification"]["format"] == "zip", name
+        rules = {f["rule_id"] for f in manifest["findings"]}
+        assert {"token-aws-access-key", "pem-private-key"} <= rules, (name, rules)
+    src = tmp_path / "padded.bin"  # padding before the archive is no artifact
+    src.write_bytes(b"\xff" * 4096 + b.getvalue())
+    res = Extractor(tmp_path / "w_padded", Limits()).run(src, src.name)
+    assert res.artifacts[0].format == "zip" and not any(a.name.startswith("leading_") for a in res.artifacts)
 
 
 def test_zip64_after_a_header_or_inside_a_raw_image_is_analysed(tmp_path, run_analysis):
@@ -1416,6 +1507,111 @@ def test_a_secret_in_a_carved_region_is_reported_once(tmp_path, run_analysis):
         assert len(keys) == 1 and keys[0]["affected_component"].endswith(where), (name, keys)
 
 
+def test_secrets_outside_every_unpacked_file_are_still_reported(tmp_path, run_analysis):
+    """Third review: suppressing the byte ranges carved into children (to report a key once) hid secrets that no
+    child analyses - a zip's bytes between members, a uImage's name field - and lost keys across range edges or
+    beyond the 2 MiB a text child is read. Only a secret a descendant reports itself is dropped from a container."""
+    import base64
+    import random
+    import struct
+    import zlib
+    rnd = random.Random(1)
+
+    def filler(n: int) -> bytes:  # not printable, no carve magics
+        return bytes(rnd.choice(range(0x80, 0x100)) for _ in range(n))
+
+    def pem(body: str | None = None) -> bytes:
+        body = body or base64.b64encode(rnd.randbytes(600)).decode()
+        return ("-----BEGIN RSA PRIVATE KEY-----\n" + "\n".join(body[i:i + 64] for i in range(0, len(body), 64))
+                + "\n-----END RSA PRIVATE KEY-----\n").encode()
+
+    name, data = b"a.txt", b"hello world\n"
+    lfh = struct.pack("<4sHHHHHIIIHH", b"PK\x03\x04", 20, 0, 0, 0, 0, zlib.crc32(data), len(data), len(data),
+                      len(name), 0) + name + data
+    gap = b"\x00" * 16 + b"\naws_key AKIAQWERTYUIOPASDFGH\n" + pem() + b"\x00" * 16  # between member and directory
+    cd = struct.pack("<4sHHHHHHIIIHHHHHII", b"PK\x01\x02", 20, 20, 0, 0, 0, 0, zlib.crc32(data), len(data), len(data),
+                     len(name), 0, 0, 0, 0, 0, 0) + name
+    zgap = lfh + gap + cd + struct.pack("<4sHHHHIIH", b"PK\x05\x06", 0, 0, 1, 1, len(cd), len(lfh + gap), 0)
+    payload = filler(2048)
+    hdr = bytearray(struct.pack(">IIIIIIIBBBB", 0x27051956, 0, 0, len(payload), 0x80008000, 0x80008000,
+                                zlib.crc32(payload), 5, 2, 2, 0) + b"AKIAQAZWSXEDCRFVTGBY".ljust(32, b"\x00"))
+    struct.pack_into(">I", hdr, 4, zlib.crc32(bytes(hdr)))
+    ehdr = bytearray(52)  # an ELF whose extent ends in printable bytes; the key follows outside it
+    ehdr[:7] = b"\x7fELF\x01\x01\x01"
+    struct.pack_into("<HHI", ehdr, 16, 2, 3, 1)
+    struct.pack_into("<I", ehdr, 32, 0x200)
+    struct.pack_into("<HHHHHH", ehdr, 40, 52, 32, 0, 40, 1, 0)
+    elf = bytes(ehdr) + filler(0x200 - 52) + b"\x00" * 8 + b"       export AWS_ACCESS_KEY_ID="
+    body = base64.b64encode(rnd.randbytes(600)).decode()
+    cases = {"zip_gap.bin": (filler(4096) + zgap + filler(4096), {"token-aws-access-key", "pem-private-key"}),
+             "uimage_name.bin": (filler(4096) + bytes(hdr) + payload + filler(4096), {"token-aws-access-key"}),
+             "edge.bin": (filler(4096) + elf + b"AKIAMNBVCXZLKJHGFDSA\n" + filler(4096), {"token-aws-access-key"}),
+             "pem_cpio.bin": (filler(4096) + pem(body[:400] + "07070100" + body[408:]) + b"\x00" * 32 + b"TRAILER!!!"
+                              + filler(4096), {"pem-private-key"})}
+    true = Path("/usr/bin/true")
+    if true.is_file() and true.read_bytes()[:4] == b"\x7fELF":  # a text overlay; the key 2.5 MiB into it
+        line = b"2026-11-05 12:00:00 info: service heartbeat ok\n"
+        text = bytearray(line * (3 * 1024**2 // len(line)))
+        at = 2 * 1024**2 + 512 * 1024 - (2 * 1024**2 + 512 * 1024) % len(line)
+        text[at:at + len(line)] = b"aws key AKIALKJHGFDSAPOIUYTR ok........ \n"[:len(line) - 1] + b"\n"
+        cases["text_overlay"] = (true.read_bytes() + bytes(text), {"token-aws-access-key"})
+    for name, (data, want) in cases.items():
+        src = tmp_path / name
+        src.write_bytes(data)
+        rules = {f["rule_id"] for f in run_analysis(src)["findings"]}
+        assert want <= rules, (name, rules)
+
+
+def test_a_real_image_behind_a_forged_header_or_a_flood_of_magics_is_carved(tmp_path, run_analysis, monkeypatch):
+    """Third review: a forged copy of the real SquashFS superblock, claiming the rest of the dump, hid the real root
+    filesystem behind it (objects of the failed image's own kind were not carved from it); and 256 signatures of
+    any kind (even ones that could not be valid) silently ended carving, so a gzip'd root filesystem after them
+    was never found - in a failed image as in any raw dump."""
+    import gzip
+    import struct
+    import subprocess
+
+    from dfa.core import extract
+    if not shutil.which("mksquashfs"):
+        pytest.skip("mksquashfs unavailable")
+    tree = tmp_path / "rootfs"
+    (tree / "etc").mkdir(parents=True)
+    (tree / "etc" / "shadow").write_text("root::19000:0:99999:7:::\n")
+    sq = tmp_path / "rootfs.sqsh"
+    subprocess.run(["mksquashfs", str(tree), str(sq), "-noappend", "-quiet"], check=True, capture_output=True)
+    real, noise = sq.read_bytes(), _noise(8192, 61)
+    forged = bytearray(real[:96])
+    struct.pack_into("<Q", forged, 40, 4096 + len(real) + len(noise))  # the rest of the dump
+    struct.pack_into("<I", forged, 4, 0x7FFFFFFF)  # an inode count unsquashfs rejects
+    shadow = b"root::19000:0:99999:7:::\n"
+    b = io.BytesIO()
+    with tarfile.open(fileobj=b, mode="w") as tf:
+        ti = tarfile.TarInfo("etc/shadow")
+        ti.size = len(shadow)
+        tf.addfile(ti, io.BytesIO(shadow))
+    gz = gzip.compress(b.getvalue(), mtime=0)
+    flooded = bytearray(96)
+    flooded[:4] = b"hsqs"
+    struct.pack_into("<I", flooded, 4, 0x7FFFFFFF)
+    struct.pack_into("<H", flooded, 28, 4)
+    flood = b"hsqs\x00\x00\x00\x00" * 300
+    struct.pack_into("<Q", flooded, 40, 96 + len(flood) + 4096 + len(gz) + 8192)
+    cases = {"forged_front.bin": noise + bytes(forged) + b"\xff" * (4096 - 96) + real + noise,
+             "flood_failed.bin": bytes(flooded) + flood + _noise(4096, 62) + gz + _noise(8192, 63),
+             "flood_raw.bin": _noise(8192, 64) + flood + _noise(4096, 65) + gz + _noise(8192, 66)}
+    for name, data in cases.items():
+        src = tmp_path / name
+        src.write_bytes(data)
+        rules = {f["rule_id"] for f in run_analysis(src)["findings"]}
+        assert "empty-password" in rules, (name, rules)
+    monkeypatch.setattr(extract, "MAX_CARVE_ATTEMPTS", 50)  # a flood past the limit is reported, never silent
+    src = tmp_path / "flood_raw.bin"
+    checked = b"".join(b"\x1f\x8b\x08\x00" + bytes([i]) * 12 for i in range(60))  # 60 gzip headers, none valid
+    src.write_bytes(_noise(8192, 67) + checked + _noise(4096, 68) + gz + _noise(4096, 69))
+    res = Extractor(tmp_path / "w_limit", Limits()).run(src, src.name)
+    assert "max_carve_candidates" in res.limits_hit and any("carving stopped" in w for w in res.warnings)
+
+
 def test_carving_stays_disjoint_bounded_and_unhidden(tmp_path, run_analysis):
     """Zips carved back from forged end records nested and overlapped (100 near-full copies from 1 MB, past the
     carve limit); a stored member was also carved on its own (two findings for one key); a forged 7z header
@@ -1436,8 +1632,10 @@ def test_carving_stays_disjoint_bounded_and_unhidden(tmp_path, run_analysis):
     (tmp_path / "zipend.bin").write_bytes(bytes(img))
     ex = Extractor(tmp_path / "w_zipend", Limits())
     res = ex.run(tmp_path / "zipend.bin", "zipend.bin")
-    assert len([a for a in res.artifacts if a.origin == "carved"]) <= 1
-    assert ex.budget.bytes_written <= len(img)
+    # the outer forged zip fails; carved like raw data, its first zip (a real archive behind a forged end record
+    # would be recovered) is taken once, fails too and is not carved again: never copies of copies
+    assert len([a for a in res.artifacts if a.origin == "carved"]) <= 2
+    assert ex.budget.bytes_written <= 2 * len(img)
     b = io.BytesIO()
     with zipfile.ZipFile(b, "w") as zf:
         zf.writestr("update/rootfs.tar.gz", _key_payload(), compress_type=zipfile.ZIP_STORED)
