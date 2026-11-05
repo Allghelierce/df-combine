@@ -1026,3 +1026,39 @@ def test_data_after_a_filesystem_image_that_declares_its_size(tmp_path):
         plain.write_bytes(image)
         res = Extractor(tmp_path / f"w3_{fmt}", Limits()).run(plain, plain.name)
         assert not any(a.name.startswith("trailing_") for a in res.artifacts), fmt
+
+
+def test_zip_inside_a_raw_image_is_carved(tmp_path):
+    """Raw flash dumps are the most common input, but the carver did not know zip: an archive stored inside one
+    (a configuration backup, an update package) went unanalysed. Zips are carved back from their end-of-central-
+    directory record, which says where the archive starts; a lone end signature is not taken for one."""
+    import random
+    rng = random.Random(7)
+
+    def noise(n: int) -> bytes:
+        data = bytearray(rng.randbytes(n))
+        for magic in (b"PK", b"hsqs", b"\x1f\x8b", b"CROM", b"-rom1fs-", b"070701", b"\x7fELF", b"\xfd7zXZ"):
+            data = data.replace(magic, b"\x00" * len(magic))  # keep the noise free of other signatures
+        return bytes(data)
+
+    def zipped(comment: bytes = b"") -> bytes:
+        b = io.BytesIO()
+        with zipfile.ZipFile(b, "w") as zf:
+            zf.writestr("backup/etc/shadow", "root:$1$x$y:19000::::::\n")
+            zf.comment = comment
+        return b.getvalue()
+
+    for name, archive in (("plain", zipped()), ("comment", zipped(b"config backup 2026-11-05"))):
+        img = tmp_path / f"flash-{name}.bin"
+        img.write_bytes(noise(8192) + archive + noise(4096))
+        ex = Extractor(tmp_path / f"w_{name}", Limits())
+        res = ex.run(img, img.name)
+        carved = [a for a in res.artifacts if a.origin == "carved" and a.format == "zip"]
+        assert carved and carved[0].details["carved_offset"] == hex(8192), (name, res.warnings)
+        assert ex.path_of(carved[0].id).read_bytes() == archive  # exactly the archive, comment included
+        assert "/backup/etc/shadow" in {a.name for a in res.artifacts if a.origin == "extracted"}
+    lone = tmp_path / "lone.bin"
+    lone.write_bytes(noise(8192) + b"PK\x05\x06" + b"\x00" * 6 + b"\x01\x00" + b"\x2e\x00\x00\x00" * 2 + b"\x00\x00"
+                     + noise(4096))
+    res = Extractor(tmp_path / "w_lone", Limits()).run(lone, "lone.bin")
+    assert not [a for a in res.artifacts if a.origin == "carved"]

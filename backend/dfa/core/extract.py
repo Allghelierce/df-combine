@@ -1432,6 +1432,15 @@ class Extractor:
         found: list[tuple[int, int, str]] = []  # (offset, length, kind)
         with src.open("rb") as fp:
             for off, kind in _scan_magics(fp, art.size, self.limits.max_carves_per_file * 8):
+                if kind == "zip_end":  # a zip's end record says where the archive starts: carve back to there
+                    extent = _zip_extent(fp, off, art.size)
+                    if extent is None:
+                        continue
+                    off, length, kind = extent[0], extent[1], "zip"
+                    if off == 0 or any(o <= off < o + ln for o, ln, _ in found):
+                        continue
+                    found.append((off, length, kind))
+                    continue
                 if off == 0:
                     continue
                 if any(o <= off < o + ln for o, ln, _ in found):
@@ -1689,7 +1698,28 @@ CARVE_MAGICS = {
     b"\xfd7zXZ\x00": "xz",
     b"070701": "cpio",
     b"\x7fELF": "elf",
+    b"PK\x05\x06": "zip_end",  # one per zip (local headers would be one per member)
 }
+
+
+def _zip_extent(fp: BinaryIO, end_record: int, size: int) -> tuple[int, int] | None:
+    """(start, length) of the zip whose end-of-central-directory record is at ``end_record``, if its central
+    directory and first local header are where the record says (zip64 archives are not carved)."""
+    fp.seek(end_record)
+    rec = fp.read(22)
+    if len(rec) < 22:
+        return None
+    count, cd_size, cd_off, comment = struct.unpack_from("<HIIH", rec, 10)
+    if not count or count == 0xFFFF or 0xFFFFFFFF in (cd_size, cd_off) or cd_size < 46:
+        return None
+    start, end = end_record - cd_size - cd_off, end_record + 22 + comment
+    if start < 0 or end > size:
+        return None
+    fp.seek(start + cd_off)
+    if fp.read(4) != b"PK\x01\x02":
+        return None
+    fp.seek(start)
+    return (start, end - start) if fp.read(4) == b"PK\x03\x04" else None
 
 
 def _scan_magics(fp: BinaryIO, size: int, max_hits: int):
