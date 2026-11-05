@@ -686,3 +686,30 @@ def test_compressed_streams_followed_by_padding_or_other_data(tmp_path):
     (tmp_path / "bad.tar.gz").write_bytes(bytes(bad))
     res = Extractor(tmp_path / "w_bad", Limits()).run(tmp_path / "bad.tar.gz", "bad.tar.gz")
     assert res.artifacts[0].extraction == "failed"
+
+
+def test_zstd_frames_followed_by_padding_or_other_data(tmp_path):
+    """Same as for gzip/xz: zstd failed on 0xFF padding after the last frame ("Unknown frame descriptor"). The end
+    of the complete frames is found from their headers; decoding stops there."""
+    zstandard = pytest.importorskip("zstandard")
+    b = io.BytesIO()
+    with tarfile.open(fileobj=b, mode="w") as tf:
+        ti = tarfile.TarInfo("etc/passwd")
+        ti.size = 26
+        tf.addfile(ti, io.BytesIO(b"root::0:0::/root:/bin/sh\n\n"))
+    raw = b.getvalue()
+    c = zstandard.ZstdCompressor(write_checksum=True)
+    cases = {
+        "ff.tar.zst": (c.compress(raw) + b"\xff" * 4096, False),
+        "frames.tar.zst": (c.compress(raw[:5000]) + c.compress(raw[5000:]), False),
+        "other.tar.zst": (c.compress(raw) + b"appended, not a frame" * 20, True),
+    }
+    for name, (data, trailing) in cases.items():
+        src = tmp_path / name
+        src.write_bytes(data)
+        res = Extractor(tmp_path / f"w_{name}", Limits()).run(src, name)
+        assert {a.name for a in res.artifacts if a.origin == "extracted"} == {"/etc/passwd"}, (name, res.warnings)
+        assert any(a.name.startswith("trailing_") for a in res.artifacts) == trailing, name
+    (tmp_path / "bad.tar.zst").write_bytes(c.compress(raw)[:8] + b"\x00" * 40)
+    res = Extractor(tmp_path / "w_bad", Limits()).run(tmp_path / "bad.tar.zst", "bad.tar.zst")
+    assert res.artifacts[0].extraction == "failed"

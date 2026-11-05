@@ -198,6 +198,10 @@ boundary for hostile samples.
   rejected; output paths re-checked to resolve inside the extraction root; bytes that are not UTF-8
   become a literal `\xNN` in the name on disk and in the manifest (tar, zip, external unpacker
   output), and a zip entry flagged UTF-8 whose name is not no longer makes the whole zip unreadable;
+* content cannot be hidden from analysis behind a tar end-of-archive marker or a damaged tar header
+  (reading continues, with a warning giving the bytes skipped), or behind padding after a gzip, xz
+  or zstd stream (0xFF padding used to fail the whole stream); data after the last stream that is
+  not padding is analysed as an artifact of its own;
 * symlinks, hardlinks, device nodes and FIFOs are **never created** - they are recorded in the
   manifest; external unpacker output is walked and such entries removed;
 * files created with `O_EXCL|O_NOFOLLOW`, mode 0644 (setuid/setgid recorded, never applied);

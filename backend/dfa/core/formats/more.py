@@ -6,6 +6,7 @@ chunk) and use explicit memory/window limits; parsers validate offsets against t
 """
 from __future__ import annotations
 
+import os
 import struct
 import zlib
 from dataclasses import dataclass, field
@@ -19,6 +20,64 @@ ZSTD_MAX_WINDOW = 1 << 27  # 128 MiB decoder window limit
 
 
 # ----------------------------------------------------------------------------- decompressors
+ZSTD_MAGIC = 0xFD2FB528
+MAX_ZSTD_BLOCKS = 2_000_000  # a hostile file of 3-byte blocks must not keep the walk busy for minutes
+
+
+def zstd_frames_end(fp: BinaryIO, size: int) -> int | None:
+    """Offset just past the last complete zstd frame (or skippable frame) of the run starting at offset 0,
+    found from frame and block headers alone; None when the walk is not worth it (block cap)."""
+    pos, blocks = 0, 0
+    while True:
+        fp.seek(pos)
+        head = fp.read(18)  # magic and the longest frame header
+        if len(head) < 8:
+            return pos
+        magic = int.from_bytes(head[:4], "little")
+        if 0x184D2A50 <= magic <= 0x184D2A5F:  # skippable frame: magic, 4-byte size, payload
+            nxt = pos + 8 + int.from_bytes(head[4:8], "little")
+            if nxt > size:
+                return pos
+            pos = nxt
+            continue
+        if magic != ZSTD_MAGIC or len(head) < 6:
+            return pos
+        fhd = head[4]
+        single = fhd >> 5 & 1
+        p = pos + 5 + (0 if single else 1) + (0, 1, 2, 4)[fhd & 3] + ((1 if single else 0), 2, 4, 8)[fhd >> 6]
+        while True:
+            fp.seek(p)
+            bh = fp.read(3)
+            blocks += 1
+            if len(bh) < 3 or blocks > MAX_ZSTD_BLOCKS:
+                return pos if len(bh) < 3 else None
+            v = int.from_bytes(bh, "little")
+            btype, bsize = v >> 1 & 3, v >> 3
+            if btype == 3:  # reserved: not a frame after all
+                return pos
+            p += 3 + (1 if btype == 1 else bsize)
+            if v & 1:
+                break
+        p += 4 if fhd & 4 else 0  # content checksum
+        if p > size:
+            return pos
+        pos = p
+
+
+class _Limited:
+    """At most ``n`` bytes of a file object."""
+
+    def __init__(self, fp: BinaryIO, n: int) -> None:
+        self.fp, self.left = fp, n
+
+    def read(self, size: int = -1) -> bytes:
+        if self.left <= 0:
+            return b""
+        data = self.fp.read(self.left if size is None or size < 0 else min(size, self.left))
+        self.left -= len(data)
+        return data
+
+
 class _Reader:
     def __init__(self, path: Path) -> None:
         self.fp = path.open("rb")
@@ -31,11 +90,20 @@ class _Reader:
 
 
 class ZstdReader(_Reader):
+    """Zstandard frames (several allowed). Data after the last complete frame, such as flash padding, used to
+    fail the whole decode; the frames' end is found from their headers and decoding stops there, with
+    ``trailing_offset`` for the caller. A damaged first frame still fails."""
+
     def __init__(self, path: Path) -> None:
         import zstandard
         super().__init__(path)
+        size = os.fstat(self.fp.fileno()).st_size
+        end = zstd_frames_end(self.fp, size)
+        self.fp.seek(0)
+        self.trailing_offset = end if end and end < size else None
+        src = _Limited(self.fp, end) if self.trailing_offset is not None else self.fp
         dctx = zstandard.ZstdDecompressor(max_window_size=ZSTD_MAX_WINDOW)
-        self.stream = dctx.stream_reader(self.fp, read_across_frames=True)
+        self.stream = dctx.stream_reader(src, read_across_frames=True)
 
     def read(self, size: int = -1) -> bytes:
         return self.stream.read(CHUNK)
