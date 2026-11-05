@@ -210,7 +210,17 @@ boundary for hostile samples.
   quote (listing and dumping go by inode number); data after a stream or image that is not padding
   is analysed as an artifact of its own, starting where the erased-flash padding ends, and reported:
   as a *suspicious* pattern when appended to an executable (packers, self-extracting programs,
-  droppers), as *info* after an image or archive;
+  droppers), as *info* after an image or archive. The check runs whatever happened to the image itself
+  (a damaged or unsupported image cannot hide what follows it), within the nesting limit and the
+  container's error handling; an ELF's extent comes from its tables, never from its header-size
+  field. A kernel module's appended signature is skipped only if every field checks out (relocatable
+  object, PKCS#7 id, DER SEQUENCE of the declared length, at most 16 KiB); a marker alone is not
+  enough. Carved regions stay disjoint (a zip carved back from its end record replaces the regions
+  inside it and may not nest or cross others), and a 7-Zip archive, which is only reported, does
+  not hide what lies inside the length it claims. Limits that remain: the extent of an ELF or an
+  image comes from its own headers, so a section claiming the appended bytes hides them, and a
+  forged SquashFS superblock claiming the rest of a raw image still hides what follows it from
+  carving (that extraction is then reported as failed);
 * symlinks, hardlinks, device nodes and FIFOs are **never created** - they are recorded in the
   manifest; external unpacker output is walked and such entries removed;
 * files created with `O_EXCL|O_NOFOLLOW`, mode 0644 (setuid/setgid recorded, never applied);

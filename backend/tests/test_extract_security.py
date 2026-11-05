@@ -972,8 +972,19 @@ def test_data_appended_to_an_executable_is_analysed(tmp_path):
         ti = tarfile.TarInfo("etc/passwd")
         ti.size = 26
         tf.addfile(ti, io.BytesIO(b"root::0:0::/root:/bin/sh\n\n"))
+    import struct
+
+    def signed(elf: bytes, id_type: int = 2) -> bytes:  # PKCS#7 blob, struct module_signature, marker
+        der = b"\x30\x82" + (512).to_bytes(2, "big") + bytes(range(256)) * 2
+        info = bytes([0, 0, id_type, 0, 0, 0, 0, 0]) + struct.pack(">I", len(der))
+        return elf + der + info + MODULE_SIG_MARKER
+
+    rel = bytearray(base)
+    rel[16:18] = (1).to_bytes(2, "little" if base[5] == 1 else "big")  # ET_REL, as a kernel module is
     cases = {"dropper": (base + gzip.compress(b.getvalue(), mtime=0), True),
-             "module.ko": (base + b"\x30\x82" + bytes(range(256)) * 2 + b"\0" * 12 + MODULE_SIG_MARKER, False),
+             "module.ko": (signed(bytes(rel)), False),
+             "fake-sig.ko": (signed(bytes(rel), id_type=0), True),  # not a PKCS#7 module signature: an overlay
+             "sig-on-exec": (signed(base), True),  # an executable is not a module: an overlay
              "plain": (base, False)}
     for name, (data, overlay) in cases.items():
         src = tmp_path / name
@@ -982,7 +993,9 @@ def test_data_appended_to_an_executable_is_analysed(tmp_path):
         carved = [a for a in res.artifacts if a.name.startswith("trailing_") and a.origin == "carved"]
         assert bool(carved) == overlay, (name, res.warnings)
         if overlay:
-            assert carved[0].details["carved_offset"] == hex(len(base)) and carved[0].format == "gzip"
+            assert carved[0].details["carved_offset"] == hex(len(base))
+        if name == "dropper":
+            assert carved[0].format == "gzip"
             assert "/etc/passwd" in {a.name for a in res.artifacts if a.origin == "extracted"}
     mod = Extractor(tmp_path / "w_mod2", Limits()).run(tmp_path / "module.ko", "module.ko").artifacts[0]
     assert mod.details["module_signature_bytes"] == len(cases["module.ko"][0]) - len(base)
@@ -1119,3 +1132,147 @@ def test_7z_inside_a_raw_image_is_carved_and_reported(tmp_path, run_analysis):
     img.write_bytes(bytes(noise) + bytes(broken) + bytes(noise[:4096]))
     res = Extractor(tmp_path / "w2", Limits()).run(img, img.name)
     assert not [a for a in res.artifacts if a.origin == "carved"]
+
+
+# ---------------------------------------------------------------- second review (each case failed before)
+def _key_payload() -> bytes:
+    import gzip
+    key = b"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA" + b"A" * 64 + b"\n-----END RSA PRIVATE KEY-----\n"
+    b = io.BytesIO()
+    with tarfile.open(fileobj=b, mode="w") as tf:
+        ti = tarfile.TarInfo("etc/ssl/server.key")
+        ti.size = len(key)
+        tf.addfile(ti, io.BytesIO(key))
+    return gzip.compress(b.getvalue(), mtime=0)
+
+
+def _noise(n: int, seed: int) -> bytes:
+    import random
+    data = bytearray(random.Random(seed).randbytes(n))
+    for magic in (b"PK", b"7z", b"hsqs", b"\x1f\x8b", b"CROM", b"-rom1fs-", b"070701", b"\x7fELF", b"\xfd7zXZ",
+                  b"\x27\x05\x19\x56"):
+        data = data.replace(magic, b"\x00" * len(magic))
+    return bytes(data)
+
+
+def test_hostile_elf_headers_cannot_fail_or_flood_a_scan(tmp_path, run_analysis):
+    """The ELF overlay check ran outside the per-container error handling and before the depth limit: a 64-bit
+    table entry size of 32 (struct.error), a header size of 0 (the whole file looked appended: 985 copies, then
+    RecursionError) or exhausting the budget failed the whole scan; a chain of headers nested past max_depth."""
+    import struct
+
+    def elf64(phentsize: int = 56, phnum: int = 0, ehsize: int = 64) -> bytes:
+        return (b"\x7fELF\x02\x01\x01" + b"\x00" * 9
+                + struct.pack("<HHIQQQIHHHHHH", 2, 62, 1, 0, 64 if phnum else 0, 0, 0, ehsize, phentsize, phnum, 64, 0, 0))
+
+    cases = {"phent32.elf": elf64(phentsize=32, phnum=1) + b"\x01" * 32 + b"x" * 64,
+             "ehsize0.elf": elf64(ehsize=0) + b"A" * 4096,
+             "chain.elf": b"".join(elf64() for _ in range(300))}
+    for name, data in cases.items():
+        src = tmp_path / name
+        src.write_bytes(data)
+        res = Extractor(tmp_path / f"w_{name}", Limits()).run(src, name)  # must not raise
+        assert max(a.depth for a in res.artifacts) <= Limits().max_depth, name
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w") as zf:
+        zf.writestr("bin/odd", cases["phent32.elf"])
+        zf.writestr("etc/shadow", "root:$1$abc$DEFghijklmnopqrstuv12/:19000:0:99999:7:::\n")
+    fw = tmp_path / "fw.zip"
+    fw.write_bytes(b.getvalue())
+    manifest = run_analysis(fw)
+    assert "fatal_error" not in manifest and any(f["rule_id"] == "static-password-hash" for f in manifest["findings"])
+    elf = Path("/usr/bin/true")
+    if elf.is_file() and elf.read_bytes()[:4] == b"\x7fELF":  # overlay while the byte budget runs out
+        t = io.BytesIO()
+        with tarfile.open(fileobj=t, mode="w") as tf:
+            for name, data in (("big.bin", os.urandom(3 * 1024 * 1024)), ("bin/tool", elf.read_bytes() + _key_payload())):
+                ti = tarfile.TarInfo(name)
+                ti.size = len(data)
+                tf.addfile(ti, io.BytesIO(data))
+        (tmp_path / "budget.tar").write_bytes(t.getvalue())
+        res = Extractor(tmp_path / "w_budget", Limits(max_total_bytes=2 * 1024 * 1024)).run(tmp_path / "budget.tar", "b")
+        assert res.limits_hit
+
+
+def test_overlay_check_covers_mcu_elfs_and_unvalidated_signature_markers(tmp_path, run_analysis):
+    """A Cortex-M ELF went to its own handler, which never looked past its segments, and any file ending in the
+    module-signature marker was taken for a signed module: in both cases an appended payload went unanalysed."""
+    import struct
+
+    def arm_elf(profile: bytes) -> bytes:  # minimal ARM executable with an .ARM.attributes CPU profile
+        attrs = b"A" + struct.pack("<I", 17) + b"aeabi\x00" + b"\x01" + struct.pack("<I", 7) + b"\x07" + profile
+        shstr = b"\x00.ARM.attributes\x00.shstrtab\x00"
+        code = bytes(range(256))
+        code_off, attr_off = 52 + 32, 52 + 32 + 256
+        str_off = attr_off + len(attrs)
+        sh_off = (str_off + len(shstr) + 3) & ~3
+        eh = b"\x7fELF\x01\x01\x01" + b"\x00" * 9 + struct.pack("<HHIIIIIHHHHHH", 2, 40, 1, 0x08000000, 52, sh_off,
+                                                                  0x05000000, 52, 32, 1, 40, 3, 2)
+        ph = struct.pack("<IIIIIIII", 1, code_off, 0x08000000, 0x08000000, 256, 256, 5, 4)
+        body = eh + ph + code + attrs + shstr
+        body += b"\x00" * (sh_off - len(body))
+        return body + b"\x00" * 40 + struct.pack("<IIIIIIIIII", 1, 0x70000003, 0, 0, attr_off, len(attrs), 0, 0, 1, 0) \
+            + struct.pack("<IIIIIIIIII", 17, 3, 0, 0, str_off, len(shstr), 0, 0, 1, 0)
+
+    from dfa.core.extract import MODULE_SIG_MARKER
+    samples = {"mcu.elf": arm_elf(b"M") + _key_payload(),
+               "marked": arm_elf(b"A") + _key_payload() + MODULE_SIG_MARKER}
+    for name, data in samples.items():
+        src = tmp_path / name
+        src.write_bytes(data)
+        rules = {f["rule_id"] for f in run_analysis(src)["findings"]}
+        assert {"appended-to-executable", "pem-private-key"} <= rules, (name, rules)
+
+
+def test_data_after_a_damaged_image_is_still_examined_and_names_do_not_clash(tmp_path, run_analysis):
+    """Data after a declared-size image was examined only if the image's own handler succeeded, and a container
+    whose name sanitised to 'trailing' collided with the trailing-data directory (the payload was lost)."""
+    import gzip
+    import struct
+    good = factory.romfs({"rcS": b"echo hello\n"})
+    bad = bytearray(good)
+    first = struct.unpack_from(">I", bad, 32 + 4)[0]  # the first file header of /etc points to itself: a loop
+    nxt = struct.unpack_from(">I", bad, first)[0]
+    struct.pack_into(">I", bad, first, (first & ~0xF) | (nxt & 0xF))
+    cases = {"romfs_loop": bytes(bad) + _key_payload(), "trailing.gz": gzip.compress(good + _key_payload(), mtime=0)}
+    for name, data in cases.items():
+        src = tmp_path / name
+        src.write_bytes(data)
+        rules = {f["rule_id"] for f in run_analysis(src)["findings"]}
+        assert {"data-after-image", "pem-private-key"} <= rules, (name, rules)
+
+
+def test_carving_stays_disjoint_bounded_and_unhidden(tmp_path, run_analysis):
+    """Zips carved back from forged end records nested and overlapped (100 near-full copies from 1 MB, past the
+    carve limit); a stored member was also carved on its own (two findings for one key); a forged 7z header
+    claiming the rest of the image hid everything after it."""
+    import struct
+    import zlib
+    n = 30
+    img = bytearray(_noise(64 * (n + 1), 1))
+    starts = [64 * (n + 1 - k) for k in range(1, n + 1)]
+    for s in starts:
+        img[s:s + 4] = b"PK\x03\x04"
+    cd = len(img)
+    img += b"PK\x01\x02" + _noise(42, 2) + _noise(200_000, 3)
+    for s in starts:
+        end = len(img)
+        img += b"PK\x05\x06" + b"\x00" * 6 + struct.pack("<HIIH", 1, end - cd, cd - s, 0)
+    img += _noise(4096, 4)
+    (tmp_path / "zipend.bin").write_bytes(bytes(img))
+    ex = Extractor(tmp_path / "w_zipend", Limits())
+    res = ex.run(tmp_path / "zipend.bin", "zipend.bin")
+    assert len([a for a in res.artifacts if a.origin == "carved"]) <= 1
+    assert ex.budget.bytes_written <= len(img)
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w") as zf:
+        zf.writestr("update/rootfs.tar.gz", _key_payload(), compress_type=zipfile.ZIP_STORED)
+    (tmp_path / "stored.bin").write_bytes(_noise(8192, 5) + b.getvalue() + _noise(4096, 6))
+    keys = [f for f in run_analysis(tmp_path / "stored.bin")["findings"] if f["rule_id"] == "pem-private-key"]
+    assert len(keys) == 1 and len(keys[0]["evidence"]) == 1
+    rest = _noise(2048, 7) + _key_payload() + _noise(4096, 8)
+    fields = struct.pack("<QQI", len(rest) - 8, 8, 0)  # claims everything after the header
+    fake7z = b"7z\xbc\xaf\x27\x1c\x00\x04" + struct.pack("<I", zlib.crc32(fields)) + fields
+    (tmp_path / "fake7z.bin").write_bytes(_noise(8192, 9) + fake7z + rest)
+    rules = {f["rule_id"] for f in run_analysis(tmp_path / "fake7z.bin")["findings"]}
+    assert {"extraction-unsupported", "pem-private-key"} <= rules

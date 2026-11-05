@@ -372,13 +372,14 @@ class Extractor:
     def _process(self, art: Artifact) -> None:
         handler = HANDLERS.get(art.format)
         if art.format == "elf" and not _is_mcu_elf(self.path_of(art.id)):
-            for child in self._elf_overlay(art):  # ordinary ELF files are analysed as they are; data appended
-                self._process(child)              # after their own data (an overlay) is looked at on its own
-            return
+            handler = None  # ordinary ELF files are analysed as they are; only data appended to them is unpacked
         carve = art.format in ("raw", "cortexm_raw") and art.size >= 4096
-        if handler is None and not carve:
+        sized = art.format in OWN_EXTENT_FORMATS  # images and executables whose own extent is known
+        if handler is None and not carve and not sized:
             return
         if art.depth >= self.limits.max_depth:
+            if handler is None and not carve and self._data_after_end(art) is None:
+                return  # nothing here would be unpacked
             art.extraction = "skipped"
             art.extraction_note = f"maximum nesting depth ({self.limits.max_depth}) reached"
             self.result.warnings.append(f"{art.name}: {art.extraction_note}")
@@ -389,13 +390,11 @@ class Extractor:
         try:
             if handler is not None:
                 children = handler(self, art)
-                if art.format in DECLARED_SIZE_FORMATS:  # data after the image: an overlay, another partition
-                    children += self._after_declared_size(art)
-            else:
+                art.extraction = "ok"
+            elif carve:
                 children = self._carve(art)
-                if not children:
-                    return
-            art.extraction = "ok"
+                if children:
+                    art.extraction = "ok"
         except LimitExceeded as exc:
             art.extraction = "partial"
             art.extraction_note = f"limit exceeded: {exc}"
@@ -406,39 +405,48 @@ class Extractor:
             art.extraction = "unsupported"
             art.extraction_note = str(exc)
             self.result.warnings.append(f"{art.name}: {exc}")
-            return
         except Exception as exc:  # noqa: BLE001 - any parser error is contained to this container
             art.extraction = "failed"
             art.extraction_note = f"{type(exc).__name__}: {str(exc)[:300]}"
             self.result.warnings.append(f"{art.name}: extraction failed ({art.extraction_note})")
             children = self._salvage(art)
+        if sized:  # whatever happened above: a damaged or unsupported image must not hide what follows it
+            try:
+                children += self._after_own_extent(art)
+            except LimitExceeded as exc:
+                self.result.warnings.append(f"{art.name}: data after it not examined (limit exceeded: {exc})")
+                self.result.limits_hit.append(str(exc))
+            except Exception as exc:  # noqa: BLE001 - contained like any parser error
+                self.result.warnings.append(f"{art.name}: data after it not examined ({type(exc).__name__}: "
+                                            f"{str(exc)[:200]})")
         for child in children:
             if self.budget.files_created > self.limits.max_files:
                 break
             self._process(child)
 
-    def _after_declared_size(self, art: Artifact) -> list[Artifact]:
-        path = self.path_of(art.id)
-        with path.open("rb") as fp:
-            end = _declared_image_size(art.format, fp.read(4096))
-        if not end or end >= art.size:
-            return []
-        return self._trailing_data(art, path, end, f"the {art.format_description} ({end:,} bytes declared)")
+    def _data_after_end(self, art: Artifact) -> int | None:
+        """Where the artifact's own data ends, if something follows it: an ELF file's segments, sections and
+        tables, or the size an image declares for itself."""
+        with self.path_of(art.id).open("rb") as fp:
+            end = _elf_data_end(fp, art.size) if art.format == "elf" else _declared_image_size(art.format,
+                                                                                                fp.read(4096))
+        return end if end and 0 < end < art.size else None
 
-    def _elf_overlay(self, art: Artifact) -> list[Artifact]:
-        """Data appended after an executable's own data: self-extracting and packed programs (PyInstaller, pkg)
-        carry their payload there, and so can a dropper. A signed kernel module's appended signature is known
-        and only recorded."""
+    def _after_own_extent(self, art: Artifact) -> list[Artifact]:
+        """Data after an executable's own data (an overlay: self-extracting and packed programs keep their payload
+        there, and so can a dropper) or after the size an image declares (an overlay, another partition). A
+        Linux kernel module's appended signature, checked field by field, is recorded instead."""
+        end = self._data_after_end(art)
+        if end is None:
+            return []
         path = self.path_of(art.id)
-        with path.open("rb") as fp:
-            end = _elf_data_end(fp, art.size)
-            if end is None or end >= art.size:
-                return []
-            fp.seek(art.size - len(MODULE_SIG_MARKER))
-            if fp.read() == MODULE_SIG_MARKER:
-                art.details["module_signature_bytes"] = art.size - end
-                return []
-        return self._trailing_data(art, path, end, "the ELF file's own data")
+        if art.format == "elf":
+            with path.open("rb") as fp:
+                if (sig := _module_signature_size(fp, end, art.size)) is not None:
+                    art.details["module_signature_bytes"] = sig
+                    return []
+            return self._trailing_data(art, path, end, "the ELF file's own data")
+        return self._trailing_data(art, path, end, f"the {art.format_description} ({end:,} bytes declared)")
 
     def _salvage(self, art: Artifact) -> list[Artifact]:
         """After a failure, register whatever was safely written so it is still analysed."""
@@ -610,6 +618,8 @@ class Extractor:
         """Data after the last stream or archive: flash padding (0xFF/0x00) is ignored, anything else is
         analysed as an artifact of its own instead of being dropped (it may be another image). It is written
         to a directory of its own, so it never appears inside an extracted root filesystem."""
+        if off <= 0 or off >= art.size:
+            return []  # never the whole file again (that would recurse), nothing after the end
         with src.open("rb") as fp:
             fp.seek(off)
             pos, data_at = off, None
@@ -638,9 +648,11 @@ class Extractor:
                     break
             size = art.size - off
             name = f"trailing_{off:08x}.bin"
-            tdir = self.root / f"{art.id:05d}_trailing.d"
-            tdir.mkdir()
+            tdir = self.root / f"{art.id:05d}.trailing.d"  # _out_dir names are "<id>_<name>.d": no clash
+            tdir.mkdir(exist_ok=True)
             dest = tdir / name
+            if dest.exists():
+                return []  # already examined from this offset
             fp.seek(off)
             self._write_stream(_Bounded(fp, size), dest, label=name)
         self.result.warnings.append(f"{art.name}: {size} bytes after {what} are not padding; "
@@ -972,10 +984,8 @@ class Extractor:
             ext = {"gzip": ".gz", "bzip2": ".bz2", "lzma": ".lzma"}.get(hdr["compression"], ".bin")
             dest = out / f"payload{ext}"
             self._write_stream(_Bounded(fp, size), dest, label="uImage payload")
-        children = [self._child(art, dest, f"payload{ext}", "decoded")]
-        if 64 + size < art.size:  # e.g. the root filesystem after the kernel in a sysupgrade-style image
-            children += self._trailing_data(art, src, 64 + size, "the uImage payload")
-        return children
+        # data after the payload (the root filesystem of a sysupgrade-style image): _after_own_extent
+        return [self._child(art, dest, f"payload{ext}", "decoded")]
 
     def h_cpio(self, art: Artifact) -> list[Artifact]:
         src = self.path_of(art.id)
@@ -1161,12 +1171,7 @@ class Extractor:
         root = dest if dest.exists() else out
         listed = self._squashfs_modes(art, tool, root)
         self._record_fs(art, "squashfs", root, image_artifact=art.id, **({"unix_modes": True} if listed else {}))
-        children = self._register_tree(art, root)
-        with self.path_of(art.id).open("rb") as fp:
-            end = _carve_length(fp, 0, "squashfs", art.size)
-        if end and end < art.size:  # e.g. OpenWrt's writable overlay after the SquashFS in the rootfs partition
-            children += self._trailing_data(art, self.path_of(art.id), end, "the SquashFS image")
-        return children
+        return self._register_tree(art, root)  # data after bytes_used (e.g. OpenWrt's overlay): _after_own_extent
 
     def _squashfs_modes(self, art: Artifact, tool: str, root: Path) -> bool:
         """Original modes and owners from 'unsquashfs -lln'. Extraction by an unprivileged user, as in the
@@ -1432,23 +1437,28 @@ class Extractor:
         found: list[tuple[int, int, str]] = []  # (offset, length, kind)
         with src.open("rb") as fp:
             for off, kind in _scan_magics(fp, art.size, self.limits.max_carves_per_file * 8):
+                # a 7z is only reported, not unpacked: what lies inside the length it claims is still carved
+                solid = [(o, ln) for o, ln, k in found if k != "7z"]
                 if kind == "zip_end":  # a zip's end record says where the archive starts: carve back to there
                     extent = _zip_extent(fp, off, art.size)
-                    if extent is None:
+                    if extent is None or extent[0] == 0:
                         continue
-                    off, length, kind = extent[0], extent[1], "zip"
-                    if off == 0 or any(o <= off < o + ln for o, ln, _ in found):
+                    start, length = extent
+                    stop = start + length
+                    # nested in, or crossing, a region already found: skip (carved regions stay disjoint); regions
+                    # inside it - its stored members - are unpacked from the zip, so they are not carved again
+                    if any(o < stop and start < o + ln and not (start <= o and o + ln <= stop) for o, ln in solid):
                         continue
-                    found.append((off, length, kind))
-                    continue
-                if off == 0:
-                    continue
-                if any(o <= off < o + ln for o, ln, _ in found):
-                    continue
-                length = _carve_length(fp, off, kind, art.size)
-                if length and kind in ("gz", "xz"):
-                    length = _stream_length(fp, off, kind, self.limits.max_file_bytes)
-                if length:
+                    found = [r for r in found if r[2] == "7z" or not (start <= r[0] and r[0] + r[1] <= stop)]
+                    found.append((start, length, "zip"))
+                else:
+                    if off == 0 or any(o <= off < o + ln for o, ln in solid):
+                        continue
+                    length = _carve_length(fp, off, kind, art.size)
+                    if length and kind in ("gz", "xz"):
+                        length = _stream_length(fp, off, kind, self.limits.max_file_bytes)
+                    if not length:
+                        continue
                     found.append((off, length, kind))
                 if len(found) >= self.limits.max_carves_per_file:
                     self.result.limits_hit.append("max_carves_per_file")
@@ -1777,7 +1787,8 @@ def demangle(names: list[str], timeout: int = 60) -> dict[str, str]:
     return {m: d[:300] for m, d in zip(todo, out[:len(todo)], strict=True) if d and d != m}
 
 
-DECLARED_SIZE_FORMATS = {"ext", "fat", "romfs", "cromfs", "cramfs"}
+DECLARED_SIZE_FORMATS = {"ext", "fat", "romfs", "cromfs", "cramfs", "squashfs", "uimage"}
+OWN_EXTENT_FORMATS = DECLARED_SIZE_FORMATS | {"elf"}
 
 
 def _declared_image_size(fmt: str, head: bytes) -> int | None:
@@ -1799,6 +1810,11 @@ def _declared_image_size(fmt: str, head: bytes) -> int | None:
         if fmt == "cramfs":
             off = more.cramfs_offset(head)
             return struct.unpack_from("<I", head, off + 4)[0] if off is not None else None  # includes the pad
+        if fmt == "squashfs":  # bytes_used (version 4); mksquashfs's zero padding after it is just padding
+            return struct.unpack_from("<Q", head, 40)[0] if head[:4] == b"hsqs" and head[28:30] == b"\x04\x00" else None
+        if fmt == "uimage":
+            hdr = parse_uimage_header(head[:64])
+            return 64 + hdr["data_size"] if hdr else None
     except struct.error:
         return None
     return None
@@ -1810,45 +1826,77 @@ SHT_NOBITS = 8
 
 def _elf_data_end(fp: BinaryIO, size: int) -> int | None:
     """Offset just past an ELF file's own data: header, program and section header tables, segments and
-    sections (without .bss-like ones). None if the header is not usable. Reads only the tables."""
+    sections (without .bss-like ones). None if the header is not usable. Reads only the tables. The header size
+    field is not trusted (0 would make the whole file look appended, 0xFFFF would hide a short overlay); table
+    entries shorter than the standard ones are not read."""
     fp.seek(0)
     hdr = fp.read(64)
     if len(hdr) < 52 or hdr[:4] != b"\x7fELF" or hdr[4] not in (1, 2) or hdr[5] not in (1, 2):
         return None
     e = "<" if hdr[5] == 1 else ">"
-    if hdr[4] == 1:
-        phoff, shoff = struct.unpack_from(e + "II", hdr, 28)
-        ehsize, phentsize, phnum, shentsize, shnum = struct.unpack_from(e + "HHHHH", hdr, 40)
-        ph = (e + "I", 4, e + "I", 16)  # (offset fmt, at, filesz fmt, at)
-        sh = (e + "I", 4, e + "I", 16, e + "I", 20)  # (type, at, offset, at, size, at)
-    else:
-        if len(hdr) < 64:
-            return None
-        phoff, shoff = struct.unpack_from(e + "QQ", hdr, 32)
-        ehsize, phentsize, phnum, shentsize, shnum = struct.unpack_from(e + "HHHHH", hdr, 52)
-        ph = (e + "Q", 8, e + "Q", 32)
-        sh = (e + "I", 4, e + "Q", 24, e + "Q", 32)
-    ends = [ehsize]
-    if shoff and shnum == 0 and shentsize >= 40 and shoff + shentsize <= size:  # more sections than fit e_shnum
-        fp.seek(shoff)
-        shnum = min(struct.unpack_from(sh[4], fp.read(shentsize), sh[5])[0], 1_000_000)
-    for off, count, entsize, kind in ((phoff, phnum, phentsize, "ph"), (shoff, shnum, shentsize, "sh")):
-        if not off or not count or entsize < 32 or off + count * entsize > size:
-            continue
-        ends.append(off + count * entsize)
-        fp.seek(off)
-        table = fp.read(count * entsize)
-        for i in range(0, len(table) - entsize + 1, entsize):
-            entry = table[i:i + entsize]
-            if kind == "ph":
-                start, length = struct.unpack_from(ph[0], entry, ph[1])[0], struct.unpack_from(ph[2], entry, ph[3])[0]
-            else:
-                if struct.unpack_from(sh[0], entry, sh[1])[0] == SHT_NOBITS:
-                    continue
-                start, length = struct.unpack_from(sh[2], entry, sh[3])[0], struct.unpack_from(sh[4], entry, sh[5])[0]
-            if start + length <= size:
-                ends.append(start + length)
+    try:
+        if hdr[4] == 1:
+            phoff, shoff = struct.unpack_from(e + "II", hdr, 28)
+            phentsize, phnum, shentsize, shnum = struct.unpack_from(e + "HHHH", hdr, 42)
+            ph = (e + "I", 4, e + "I", 16, 32)  # (offset fmt, at, filesz fmt, at, standard entry size)
+            sh = (e + "I", 4, e + "I", 16, e + "I", 20, 40)  # (type, at, offset, at, size, at, standard size)
+            ends = [52]
+        else:
+            if len(hdr) < 64:
+                return None
+            phoff, shoff = struct.unpack_from(e + "QQ", hdr, 32)
+            phentsize, phnum, shentsize, shnum = struct.unpack_from(e + "HHHH", hdr, 54)
+            ph = (e + "Q", 8, e + "Q", 32, 56)
+            sh = (e + "I", 4, e + "Q", 24, e + "Q", 32, 64)
+            ends = [64]
+        if shoff and shnum == 0 and shentsize >= sh[6] and shoff + shentsize <= size:  # e_shnum overflowed
+            fp.seek(shoff)
+            shnum = min(struct.unpack_from(sh[4], fp.read(shentsize), sh[5])[0], 1_000_000)
+        for off, count, entsize, kind in ((phoff, phnum, phentsize, "ph"), (shoff, shnum, shentsize, "sh")):
+            minimum = ph[4] if kind == "ph" else sh[6]
+            if not off or not count or entsize < minimum or off + count * entsize > size:
+                continue
+            ends.append(off + count * entsize)
+            fp.seek(off)
+            table = fp.read(count * entsize)
+            for i in range(0, len(table) - entsize + 1, entsize):
+                entry = table[i:i + entsize]
+                if kind == "ph":
+                    start = struct.unpack_from(ph[0], entry, ph[1])[0]
+                    length = struct.unpack_from(ph[2], entry, ph[3])[0]
+                else:
+                    if struct.unpack_from(sh[0], entry, sh[1])[0] == SHT_NOBITS:
+                        continue
+                    start = struct.unpack_from(sh[2], entry, sh[3])[0]
+                    length = struct.unpack_from(sh[4], entry, sh[5])[0]
+                if start + length <= size:
+                    ends.append(start + length)
+    except struct.error:
+        return None
     return max(ends)
+
+
+def _module_signature_size(fp: BinaryIO, end: int, size: int) -> int | None:
+    """Length of a Linux kernel module signature appended at ``end``, if that is exactly what follows the ELF
+    data: a relocatable object, a PKCS#7 signature (DER SEQUENCE) of the declared length starting at ``end``,
+    the module_signature fields (PKCS#7 id, unused fields zero) and the marker. Anything else is an overlay."""
+    tail = 12 + len(MODULE_SIG_MARKER)
+    if size - end < tail + 4 or size - end > 16384 + tail:
+        return None
+    fp.seek(0)
+    hdr = fp.read(18)
+    if int.from_bytes(hdr[16:18], "little" if hdr[5:6] == b"\x01" else "big") != 1:  # ET_REL
+        return None
+    fp.seek(size - tail)
+    info = fp.read(tail)
+    if info[12:] != MODULE_SIG_MARKER or info[:8] != b"\x00\x00\x02\x00\x00\x00\x00\x00":
+        return None
+    sig_len = int.from_bytes(info[8:12], "big")
+    fp.seek(end)
+    der = fp.read(4)
+    if end + sig_len != size - tail or der[:2] != b"\x30\x82" or int.from_bytes(der[2:4], "big") + 4 != sig_len:
+        return None
+    return size - end
 
 
 def _is_mcu_elf(path: Path) -> bool:
