@@ -436,3 +436,10 @@ def test_fact_mapping_of_real_debian_results():
     # a private key outside crypto libraries stays a high-severity finding
     other = fact.normalize(fw, "x", [], requested=requested, paths={lib: "/etc/ssl/private/device.key"})
     assert any(f.rule_id == "fact-crypto_material" and f.severity.value == "high" for f in other)
+
+
+def test_fact_file_count_tolerates_unknown():
+    # values seen on a real FACT instance
+    assert fact.files_analysed({"number_of_included_files": 1, "total_files_in_firmware": 3311}) == 3311
+    assert fact.files_analysed({"number_of_included_files": 2, "total_files_in_firmware": "unknown"}) == 3
+    assert fact.files_analysed({}) == 1

@@ -168,9 +168,7 @@ class FactAdapter(ToolAdapter):
                     components += fact_components(fw, t["label"])
                     analysis = fw.get("analysis", {}) or {}
                     entry.update({
-                        # number_of_included_files counts direct children only (1 for a .tar.gz)
-                        "files_analysed": int(meta.get("total_files_in_firmware") or 0)
-                        or 1 + int(meta.get("number_of_included_files") or 0),
+                        "files_analysed": files_analysed(meta),
                         # FACT keeps results of earlier analyses of identical files (UIDs are content hashes);
                         # plug-ins not requested in this run are not reported
                         "not_requested": sorted(p for p, r in analysis.items() if p in PLUGIN_MAP and p not in requested
@@ -337,6 +335,17 @@ MITIGATION_WEAK = {
     "RUNPATH enabled": (S.low, "a RUNPATH is set (library search path that can enable library hijacking)"),
 }
 _REAL_HASH = re.compile(r"^(\$[0-9a-z]+\$.+|[./0-9A-Za-z]{13})$")
+
+
+def files_analysed(meta: dict) -> int:
+    """FACT's file count: ``total_files_in_firmware`` (the string "unknown" for some inputs, seen on real
+    FACT for .px4 submissions), else 1 + ``number_of_included_files`` (direct children only)."""
+    def num(v) -> int:
+        try:
+            return max(0, int(v))
+        except (TypeError, ValueError):
+            return 0
+    return num(meta.get("total_files_in_firmware")) or 1 + num(meta.get("number_of_included_files"))
 
 
 def tree_tar(ctx: AdapterContext, members: list[dict], limit: int) -> bytes:
