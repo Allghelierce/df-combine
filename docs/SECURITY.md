@@ -234,7 +234,11 @@ boundary for hostile samples.
   dump), bytes between members, the archive comment - is analysed as an artifact of its own, before
   the members are read and regardless of the member-count limit (the zip's handler reads only its
   members, so a flash dump ending in a small zip went unanalysed); padding and regions of 8 bytes or
-  less are skipped, and past 64 regions the zip is marked *partial*. Carved regions stay disjoint (a zip
+  less are skipped, and past 64 regions the zip is marked *partial*. A member covers only its *real*
+  compressed data - its stored size, or its deflate stream's actual end - not the compressed size it
+  declares: zipfile stops at the stream's end and ignores any slack, so a member that over-declared
+  its compressed size could otherwise hide an unbounded payload there with no finding or warning (the
+  slack is now a gap that is analysed). Carved regions stay disjoint (a zip
   carved back from its end record replaces the regions
   inside it and may not nest or cross others), and a 7-Zip archive, which is only reported, does
   not hide what lies inside the length it claims. An image or archive that fails to unpack and
@@ -259,7 +263,10 @@ boundary for hostile samples.
   every header field is checked as zlib checks it. A 5 KB upload of gzip headers used to run
   each check to the 512 MiB limit, so the scan timed out; gzip names without a terminating NUL were
   read to the end of the file without being counted; a cpio candidate searched up to 64 MiB for
-  its trailer (347 s for a 64 MiB flood of cpio magics, and a bogus magic in front of a real archive
+  its trailer, and a failed cpio image's own-kind check walked its whole chain for every candidate,
+  twice, charging the work budget for none of it - so a zip of ~32 trailer-less header chains ran
+  about 80 minutes from under 1 MB (both walks are charged now, so the budget stops them)
+  (347 s for a 64 MiB flood of cpio magics, and a bogus magic in front of a real archive
   swallowed it - entry headers are walked now). When the decoding budget is spent, later gzip/xz
   candidates are skipped but other objects are still carved; once the scan's candidate budget is
   spent, later files are not searched, and the scan reports them once, on the input file. Before,

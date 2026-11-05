@@ -1966,3 +1966,64 @@ def test_data_inside_an_executable_that_no_section_covers_is_analysed(tmp_path, 
     assert hidden["classification"] == "suspicious" and hidden["severity"] == "low"
     (tmp_path / "plain").write_bytes(_elf_hiding(b""))  # nothing uncovered: nothing reported
     assert "uncovered-data-in-executable" not in {f["rule_id"] for f in run_analysis(tmp_path / "plain")["findings"]}
+
+
+def test_cpio_own_kind_carving_is_bounded_by_the_scan_work_budget(tmp_path):
+    """Fifth review: a failed (trailer-less) cpio of many valid headers was carved as its own kind by walking the
+    whole chain to the end for every candidate offset, twice, with no charge to the scan's work budget - only the
+    per-scan attempts counter bounded it, so a zip of ~32 such chains ran ~80 minutes from under 1 MB. The walk is
+    now charged, so the budget stops it."""
+    import struct
+    import time
+
+    from dfa.core.extract import Extractor
+    from dfa.core.identify import detect_format
+
+    def hdr(ino: int) -> bytes:
+        name = b"f%05d\x00" % ino
+        h = b"070701" + b"".join(b"%08X" % v for v in (ino, 0o100644, 0, 0, 1, 0, 0, 0, 0, 0, 0, len(name), 0))
+        blob = h + name
+        return blob + b"\x00" * (-len(blob) % 4)
+    chain = b"".join(hdr(i) for i in range(3000))  # valid headers, no TRAILER!!!
+    assert struct.unpack_from("<I", chain, 0) == struct.unpack_from("<I", b"0707", 0) or chain[:6] == b"070701"
+    (tmp_path / "x.cpio").write_bytes(chain)
+    ex = Extractor(tmp_path / "w", Limits(max_files=3000, max_total_bytes=4 * 1024 * 1024,
+                                          max_file_bytes=4 * 1024 * 1024))  # work budget = 8 MiB
+    art = ex._register(tmp_path / "x.cpio", "<input>", "x.cpio", detect_format(tmp_path / "x.cpio"), None, 0, "input")
+    before = ex._work_left
+    t0 = time.monotonic()
+    ex._carve_failed(art)
+    assert time.monotonic() - t0 < 20
+    assert ex._work_left < before  # the chain walk was charged (pre-fix: cpio left the budget untouched)
+    assert "max_carve_decode" in ex.result.limits_hit  # and the budget stopped it
+
+
+def test_zip_member_over_declaring_its_compressed_size_cannot_hide_a_payload(tmp_path, run_analysis):
+    """Fifth review: a zip member may declare a compressed size larger than its real deflate stream; zipfile stops
+    at the stream's end and ignores the slack, but _zip_gaps covered the whole declared size, so an unbounded
+    payload hidden there was neither extracted nor carved and extraction stayed 'ok' with no finding or warning."""
+    import struct
+    import zlib
+
+    co = zlib.compressobj(9, zlib.DEFLATED, -15)
+    real = co.compress(b"hello\n") + co.flush()
+    payload = _pem_block(131) + b"\x00" * 32 + b"aws AKIAQWERTYUIOPLKJHGF\x00" + gzip.compress(_SHADOW, mtime=0)
+    slack = payload + b"\x00" * 1024
+    csize = len(real) + len(slack)  # over-declared compressed size; the slack hides the payload
+    n0, d0 = b"readme.txt", b"hello, world!\n"
+    body = struct.pack("<4sHHHHHIIIHH", b"PK\x03\x04", 20, 0, 0, 0, 0, zlib.crc32(d0), len(d0), len(d0), len(n0), 0) + n0 + d0
+    off1 = len(body)
+    body += (struct.pack("<4sHHHHHIIIHH", b"PK\x03\x04", 20, 0, 8, 0, 0, zlib.crc32(b"hello\n"), csize, 6, 10, 0)
+             + b"secret.bin" + real + slack)
+    cd = len(body)
+
+    def cde(name, off, method, crc, cs, us):
+        return struct.pack("<4sHHHHHHIIIHHHHHII", b"PK\x01\x02", 20, 20, 0, method, 0, 0, crc, cs, us, len(name),
+                           0, 0, 0, 0, 0, off) + name
+    cds = (cde(n0, 0, 0, zlib.crc32(d0), len(d0), len(d0))
+           + cde(b"secret.bin", off1, 8, zlib.crc32(b"hello\n"), csize, 6))
+    data = body + cds + struct.pack("<4sHHHHIIH", b"PK\x05\x06", 0, 0, 2, 2, len(cds), cd, 0)
+    (tmp_path / "bigtail.zip").write_bytes(data)
+    m = run_analysis(tmp_path / "bigtail.zip")
+    assert {"pem-private-key", "token-aws-access-key"} <= {f["rule_id"] for f in m["findings"]}
+    assert any("region" in w for w in m["extraction"]["warnings"])  # the slack is reported, not hidden

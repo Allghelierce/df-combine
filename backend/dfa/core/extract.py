@@ -566,9 +566,9 @@ class Extractor:
             except subprocess.TimeoutExpired:
                 return False
             return r.returncode == 0
-        if kind == "cpio":  # its entry headers walked to the trailer
+        if kind == "cpio":  # its entry headers walked to the trailer, charged to the work budget
             with src.open("rb") as fp:
-                return _cpio_length(fp, off, art.size, self.limits.max_files, complete=True) == length
+                return self._cpio_chain_length(fp, off, art.size, note, complete=True) == length
         return False  # ROMFS, CROMFS, ELF: no check without unpacking it, so not carved
 
     def _salvage(self, art: Artifact) -> list[Artifact]:
@@ -838,6 +838,39 @@ class Extractor:
         self._regions.add(child.id)
         return child
 
+    def _zip_member_clen(self, fp: BinaryIO, data_at: int, zi: zipfile.ZipInfo, size: int) -> int | None:
+        """The real compressed length of a zip member's data, so bytes it over-declares in compress_size are left
+        as a gap to analyse rather than hidden. zipfile stops a stored member at its uncompressed size and a
+        deflated one at the stream's end, ignoring anything the declared compressed size claims beyond that - an
+        unbounded hiding spot. Returns None (fall back to the declared size) for an unknown method, a stream that
+        does not decode (h_zip then reports the member), or once the scan's work budget is spent. The bytes read
+        and decoded are charged to that budget."""
+        avail = size - data_at
+        declared = min(zi.compress_size, max(avail, 0))
+        if zi.compress_type == zipfile.ZIP_STORED:
+            return min(zi.file_size, declared)
+        if zi.compress_type != zipfile.ZIP_DEFLATED or declared > self._work_left:
+            return None
+        d = zlib.decompressobj(-zlib.MAX_WBITS)
+        consumed = produced = 0
+        fp.seek(data_at)
+        try:
+            while not d.eof:
+                chunk = fp.read(min(64 * 1024, declared - consumed))
+                if not chunk:
+                    return None  # truncated: h_zip reports the member; cover the declared size
+                consumed += len(chunk)
+                out = d.decompress(chunk, COPY_CHUNK)
+                produced += len(out)
+                while d.unconsumed_tail and not d.eof and produced <= self.limits.max_file_bytes:
+                    produced += len(d.decompress(d.unconsumed_tail, COPY_CHUNK))
+                if produced > self.limits.max_file_bytes:
+                    return None  # a zip bomb member; h_zip's ratio check handles it, cover the declared size
+        except zlib.error:
+            return None
+        self._work_left -= consumed + produced
+        return consumed - len(d.unused_data)
+
     def _zip_gaps(self, art: Artifact, zf: zipfile.ZipFile) -> tuple[list[Artifact], dict[int, int]]:
         """Bytes of a zip that neither a member nor the central directory accounts for: what precedes the first
         member (a vendor header, a self-extracting stub, an earlier archive or the rest of a flash dump), lies
@@ -858,7 +891,8 @@ class Extractor:
                     continue
                 nlen, elen = struct.unpack_from("<HH", h, 26)
                 data_at[lho] = lho + 30 + nlen + elen
-                end = data_at[lho] + zi.compress_size
+                clen = self._zip_member_clen(fp, data_at[lho], zi, art.size)
+                end = data_at[lho] + (zi.compress_size if clen is None else clen)
                 if zi.flag_bits & 0x08:  # a data descriptor follows the data
                     fp.seek(end)
                     sig = fp.read(4) == b"PK\x07\x08"
@@ -1747,6 +1781,8 @@ class Extractor:
                         length = self._gzip_member_length(fp, off, members, note)
                     elif length and kind == "xz":
                         length = self._xz_length(fp, off, note)
+                    elif length and kind == "cpio":  # walk the chain, charged to the work budget
+                        length = self._cpio_chain_length(fp, off, art.size, note)
                     if not length:
                         continue
                     if kind == own_kind and not self._own_kind_valid(art, kind, off, length, checks, note):
@@ -1832,6 +1868,18 @@ class Extractor:
         if length == TOO_BIG:
             note("a compressed stream decodes to more than the per-file limit", "max_file_bytes")
             return None
+        return length
+
+    def _cpio_chain_length(self, fp: BinaryIO, off: int, size: int, note: Callable[[str, str], None],
+                           complete: bool = False) -> int | None:
+        """Length of the cpio chain at ``off`` (see the module-level _cpio_length), with the bytes walked charged to
+        the scan's work budget; None once the budget is spent (reported), so a flood of header-only chains - each
+        walked anew because it never checks out and so never advances the carver - cannot run a scan out of time."""
+        if self._work_left <= 0:
+            note("checking limit reached", "max_carve_decode")
+            return None
+        length, walked = _cpio_length(fp, off, size, self.limits.max_files, complete=complete)
+        self._work_left -= walked
         return length
 
 
@@ -2436,11 +2484,12 @@ def _all_erased(fp: BinaryIO, size: int) -> bool:
 _HEX_FIELDS = re.compile(rb"[0-9A-Fa-f]{104}")
 
 
-def _cpio_length(fp: BinaryIO, off: int, size: int, max_entries: int, complete: bool = False) -> int | None:
-    """Length of the newc cpio archive at ``off``, from walking its entry headers to the TRAILER!!! entry (rounded
-    up to the 512-byte blocks cpio writes, within the file). An archive damaged after some entries is carved up to
-    its last valid entry (an entry that does not check out ends the walk) unless ``complete`` is set; None if the
-    first one does not check out."""
+def _cpio_length(fp: BinaryIO, off: int, size: int, max_entries: int, complete: bool = False) -> tuple[int | None, int]:
+    """(length of the newc cpio archive at ``off``, bytes walked to find it). The length comes from walking the
+    entry headers to the TRAILER!!! entry (rounded up to the 512-byte blocks cpio writes, within the file). An
+    archive damaged after some entries is carved up to its last valid entry (an entry that does not check out ends
+    the walk) unless ``complete`` is set; None if the first one does not check out. The bytes walked (returned for
+    the scan's work budget) grow with the chain, so a flood of header-only chains cannot be checked for free."""
     pos, good = off, None
     for _ in range(max_entries + 1):
         fp.seek(pos)
@@ -2453,10 +2502,10 @@ def _cpio_length(fp: BinaryIO, off: int, size: int, max_entries: int, complete: 
         if not 0 < namesize <= 4096 or data_at + filesize > size:
             break
         if fp.read(namesize) == b"TRAILER!!!\x00":
-            return min((name_at + 10 - off + 511) // 512 * 512, size - off)
+            return min((name_at + 10 - off + 511) // 512 * 512, size - off), name_at + namesize - off
         pos = off + ((data_at - off + filesize + 3) & ~3)
         good = min(pos, size) - off
-    return None if complete else good
+    return (None if complete else good), pos - off
 
 
 def _carve_length(fp: BinaryIO, off: int, kind: str, size: int, max_entries: int = 20_000) -> int | None:
@@ -2491,8 +2540,8 @@ def _carve_length(fp: BinaryIO, off: int, kind: str, size: int, max_entries: int
         if flags & 0xE0:
             return None
         return size - off  # upper bound; reader stops at end of member
-    if kind == "cpio":  # (a search for the trailer read up to 64 MiB per candidate: a flood took minutes)
-        return _cpio_length(fp, off, size, max_entries)
+    if kind == "cpio":  # a cheap first-header gate; the chain walk is charged to the work budget in _carve
+        return size - off if head[:6] == b"070701" and _HEX_FIELDS.match(head, 6) else None
     if kind == "7z":  # signature header: CRC over the next-header offset/size/CRC, which give the length
         if len(head) < 32 or zlib.crc32(head[12:32]) != struct.unpack_from("<I", head, 8)[0]:
             return None
