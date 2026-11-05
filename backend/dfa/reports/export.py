@@ -201,8 +201,11 @@ def pdf_report(scan: Scan) -> bytes:
             risky = b.get("risky_call_sites") or {}
             rtxt = ", ".join(f"{k} x{v}" for k, v in sorted(risky.items(), key=lambda kv: -kv[1])[:8]) \
                 if isinstance(risky, dict) else str(risky)[:200]
+            if not rtxt:
+                # library calls are recognised by name; stripped raw images have none to recognise
+                rtxt = "n/a (raw image without symbol names)" if b.get("mode") == "raw" else "none found"
             brow.append([_p(b.get("binary", ""), small), _p(b.get("function_count", "-"), small),
-                         _p(b.get("instruction_count", "-"), small), _p(rtxt or "none", small)])
+                         _p(b.get("instruction_count", "-"), small), _p(rtxt, small)])
         bt = Table(brow, colWidths=[70 * mm, 22 * mm, 26 * mm, 60 * mm], repeatRows=1)
         bt.setStyle(grid)
         story.append(bt)
