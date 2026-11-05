@@ -15,6 +15,7 @@ SAMPLES = [
     "px4_fmu-v2_default.px4", "px4_fmu-v5_default.px4", "px4_fmu-v6x_default.px4",
     "ark_can-flow_canbootloader.px4", "px4_fmu-v2_default.elf",
     "px4_v1.15.0_fmu-v5_default.px4", "px4_v1.16.2_fmu-v5_default.px4",
+    "cubepilot_cubeorange_default.px4", "holybro_kakuteh7_default.px4",
     "debian11-armhf-rootfs-20210816.tar.gz", "alpine3.15.0-arm64-rootfs.tar.gz",
     "esp/bootloader_esp32.bin", "esp/bootloader_esp32c3.bin", "esp/esp8266_deepsleep.bin",
     "esp/esp_idf_blink_esp32s2.bin", "esp/partitions_singleapp.bin",

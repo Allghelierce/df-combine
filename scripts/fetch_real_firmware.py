@@ -35,6 +35,11 @@ SAMPLES = {
                                "PX4 v1.17.0 for FMUv2 (Pixhawk 1), official .px4 container"),
     "ark_can-flow_canbootloader.px4": ("36394d7c70153cbc19ea77259fd5c3205fb263194134e62d0ce865e04103a202", 21687,
                                        "PX4 CAN bootloader for ARK Flow"),
+    # STM32H7 boards (128 KiB bootloader sector: application at 0x08020000)
+    "cubepilot_cubeorange_default.px4": ("153f7532061bb79c99209e174d2383d65a8a85ac033578f984f9ee70d74c3076",
+                                         1806473, "PX4 v1.17.0 for CubePilot CubeOrange (STM32H7)"),
+    "holybro_kakuteh7_default.px4": ("0cb298edc1872ed56d89f4d6473375e03ec7f19abbe77896d083385bd2c1e56f", 1665724,
+                                     "PX4 v1.17.0 for Holybro Kakute H7 (STM32H743)"),
     # earlier official releases of the same board (versioned folders of the same bucket)
     "px4_v1.15.0_fmu-v5_default.px4": (
         "792eb47d9241a279b83e532f3a24c99833e10856b6c4f35eb23c46bca7f64a66", 1897294,

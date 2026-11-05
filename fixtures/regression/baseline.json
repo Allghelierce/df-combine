@@ -430,6 +430,45 @@
    "owned_files": 0
   }
  },
+ "cubepilot_cubeorange_default.px4": {
+  "components": [
+   "nuttx 11.0.0",
+   "px4 1.17.0"
+  ],
+  "extraction": {
+   "artifacts": 77,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 3,
+    "cromfs": 1,
+    "empty": 2,
+    "px4": 1,
+    "text": 66,
+    "xz": 4
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:drone:px4-cbrk_supply_chk": 3
+  },
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": 140,
+   "board_name": "CubeOrange",
+   "endianness": "little",
+   "format": "px4",
+   "os_hint": "bare-metal",
+   "platform": "PX4",
+   "platform_version": "1.17.0",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
  "debian11-armhf-rootfs-20210816.tar.gz": {
   "components": [
    "glibc 2.31",
@@ -621,6 +660,46 @@
    "os_hint": null,
    "platform": "Unknown",
    "platform_version": null,
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "holybro_kakuteh7_default.px4": {
+  "components": [
+   "nuttx 11.0.0",
+   "px4 1.17.0"
+  ],
+  "extraction": {
+   "artifacts": 80,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1,
+    "cromfs": 1,
+    "empty": 2,
+    "px4": 1,
+    "text": 71,
+    "xz": 4
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:drone:px4-cbrk_supply_chk": 4,
+   "builtin:drone:px4-cbrk_supply_chk-sim": 6
+  },
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": 1048,
+   "board_name": "KAKUTEH7",
+   "endianness": "little",
+   "format": "px4",
+   "os_hint": "bare-metal",
+   "platform": "PX4",
+   "platform_version": "1.17.0",
    "vehicle_type": null
   },
   "packages": {

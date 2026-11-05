@@ -29,7 +29,7 @@ Debian/Alpine images, or esptool's published ESP images — never synthetic data
 | ESP32/ESP8266 | Real esptool images: chip, checksum, SHA-256, ESP-IDF app descriptor; flash layouts with partition tables. |
 | Reports | PDF (components, vulnerable packages, Ghidra summary), JSON, SARIF 2.1.0, CycloneDX 1.5 SBOM with purls/CPEs. |
 | Authentication and authorisation | Users/roles, scrypt, hashed session and API tokens, CSRF header, login throttling, per-user visibility, upload rate/size/disk limits (`tests/test_auth.py`, `tests/test_api.py`). |
-| Regression suite and CI | 28 pinned real samples with committed signatures (`tests/test_regression_real.py`). All four CI jobs pass on GitHub's runners (PR #2), including `real-samples`, which fetches the pinned samples (SHA-256 checked), exports the Debian/Alpine root filesystems and runs the real-sample regression and format tests (46 passed, 1 skipped). |
+| Regression suite and CI | 30 pinned real samples with committed signatures (`tests/test_regression_real.py`). All four CI jobs pass on GitHub's runners (PR #2), including `real-samples`, which fetches the pinned samples (SHA-256 checked), exports the Debian/Alpine root filesystems and runs the real-sample regression and format tests (46 passed, 1 skipped). |
 
 ## Partially working
 
