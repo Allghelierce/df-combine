@@ -27,6 +27,8 @@ class ScanContext:
     limits: Limits
     elf: dict[int, dict] = field(default_factory=dict)  # artifact id -> ElfInfo dict
     category: dict[int, str] = field(default_factory=dict)
+    # artifact id -> (start, end, child id): byte ranges copied verbatim into a child artifact
+    copied: dict[int, list[tuple[int, int, int]]] = field(default_factory=dict)
     _strings: dict[int, list[tuple[int, str]]] = field(default_factory=dict)
     _text: dict[int, str | None] = field(default_factory=dict)
 

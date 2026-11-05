@@ -607,8 +607,10 @@ def test_one_damaged_zip_member_does_not_hide_the_others(tmp_path):
     ex = Extractor(tmp_path / "w", Limits())
     res = ex.run(src, src.name)
     names = {a.name for a in res.artifacts if a.origin == "extracted"}
-    assert res.artifacts[0].extraction == "ok" and "/etc/shadow" in names, (names, res.warnings)
-    assert sum("could not be read" in w for w in res.warnings) == 2
+    assert "/etc/shadow" in names, (names, res.warnings)
+    assert "/a/broken.bin" in names  # its data was read (bad CRC): kept, as unzip keeps it
+    # incomplete, so the archive's own bytes are still scanned and the gap is reported
+    assert res.artifacts[0].extraction == "partial" and "2 member(s) could not be read" in res.artifacts[0].extraction_note
 
 
 def _zip64_archive(files: dict[bytes, bytes], prefix: bytes = b"") -> bytes:
@@ -1480,12 +1482,14 @@ def test_a_failed_image_is_carved_like_raw_data(tmp_path, run_analysis):
         assert b"BEGIN RSA PRIVATE KEY" in files.get("/etc/ssl/server.key", b""), (name, res.warnings)
         rules = [f["rule_id"] for f in run_analysis(src)["findings"]]
         assert rules.count("pem-private-key") == 1, (name, rules)  # once: not also as trailing data
-    small = tmp_path / "small.sqfs"  # under 4 KiB nothing is carved (as for raw data)
+    small = tmp_path / "small.sqfs"  # a small failed image is carved too (unlike raw data, at any size)
     small.write_bytes(bytes(inflated[:used]) + payload)
     struct.pack_into("<Q", buf := bytearray(small.read_bytes()), 40, len(buf))
     small.write_bytes(bytes(buf))
-    res = Extractor(tmp_path / "w_small", Limits()).run(small, small.name)
-    assert res.artifacts[0].extraction == "failed" and len(res.artifacts) == 1
+    ex = Extractor(tmp_path / "w_small", Limits())
+    res = ex.run(small, small.name)
+    files = {a.name: ex.path_of(a.id).read_bytes() for a in res.artifacts if a.origin == "extracted"}
+    assert res.artifacts[0].extraction == "failed" and b"BEGIN RSA" in files.get("/etc/ssl/server.key", b"")
 
 
 def test_a_secret_in_a_carved_region_is_reported_once(tmp_path, run_analysis):
@@ -1648,3 +1652,155 @@ def test_carving_stays_disjoint_bounded_and_unhidden(tmp_path, run_analysis):
     (tmp_path / "fake7z.bin").write_bytes(_noise(8192, 9) + fake7z + rest)
     rules = {f["rule_id"] for f in run_analysis(tmp_path / "fake7z.bin")["findings"]}
     assert {"extraction-unsupported", "pem-private-key"} <= rules
+
+
+# ---------------------------------------------------------------- fourth review (each case failed before)
+def _zip_of_members(members: list[dict], base: int = 0) -> bytes:
+    """A hand-made zip: members are dicts of name, data, method (0/8), crc (override), cd_off_delta, lfh_name and
+    lfh_flags; the offsets written in the central directory are relative to ``base``."""
+    import struct
+    import zlib
+    body, cds = b"", b""
+    for m in members:
+        data, method = m["data"], m.get("method", 0)
+        if method == 8:
+            co = zlib.compressobj(9, zlib.DEFLATED, -15)
+            raw = co.compress(data) + co.flush()
+        else:
+            raw = data
+        crc = m.get("crc", zlib.crc32(data))
+        off = len(body)
+        body += struct.pack("<4sHHHHHIIIHH", b"PK\x03\x04", 20, m.get("lfh_flags", 0), method, 0, 0, crc, len(raw),
+                            len(data), len(m.get("lfh_name", m["name"])), 0) + m.get("lfh_name", m["name"]) + raw
+        cds += struct.pack("<4sHHHHHHIIIHHHHHII", b"PK\x01\x02", 20, 20, 0, method, 0, 0, crc, len(raw), len(data),
+                           len(m["name"]), 0, 0, 0, 0, 0, off + m.get("cd_off_delta", 0)) + m["name"]
+    return body + cds + struct.pack("<4sHHHHIIH", b"PK\x05\x06", 0, 0, len(members), len(members), len(cds),
+                                    len(body) + base, 0)
+
+
+def _pem_block(seed: int, encrypted: bool = False) -> bytes:
+    import base64
+    import random
+    body = base64.b64encode(random.Random(seed).randbytes(600)).decode()
+    head = "Proc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,00112233445566778899AABBCCDDEEFF\n\n" if encrypted else ""
+    return ("-----BEGIN RSA PRIVATE KEY-----\n" + head + "\n".join(body[i:i + 64] for i in range(0, len(body), 64))
+            + "\n-----END RSA PRIVATE KEY-----\n").encode()
+
+
+_SHADOW = b"root::19000:0:99999:7:::\n"
+
+
+def test_zip_members_that_cannot_be_read_and_data_outside_the_members_are_analysed(tmp_path, run_analysis):
+    """Fourth review: a member that could not be read was dropped while the zip stayed 'ok' (its bytes then went
+    unscanned: no finding at all); some member errors still failed the whole archive; and data outside the members
+    - after a fake start signature, an earlier zip, or before a flood of members - was never analysed."""
+    import gzip
+    secrets = b"\x00\x01aws AKIAQWERTYUIOPLKJHGF\x00" + _pem_block(71)
+    t = io.BytesIO()
+    with tarfile.open(fileobj=t, mode="w") as tf:
+        for name, data in (("etc/shadow", _SHADOW), ("etc/ssl/key.pem", _pem_block(72))):
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            tf.addfile(ti, io.BytesIO(data))
+    payload = gzip.compress(t.getvalue(), mtime=0)
+    benign = [{"name": b"readme.txt", "data": b"release notes\n"}]
+    fake = b"PK\x03\x04"
+    cases = {
+        "badcrc.zip": (_zip_of_members(benign + [{"name": b"keys/device.bin", "data": secrets, "crc": 0x12345678}]),
+                       {"token-aws-access-key", "pem-private-key", "extraction-partial"}),
+        "badcrc_deflated.zip": (_zip_of_members(benign + [{"name": b"etc/shadow", "data": _SHADOW, "method": 8,
+                                                           "crc": 1}]), {"empty-password"}),
+        "lfh_utf8.zip": (_zip_of_members([{"name": b"bad\xff", "data": b"x", "lfh_flags": 0x800},
+                                          {"name": b"etc/shadow", "data": _SHADOW, "method": 8}]), {"empty-password"}),
+        "fake_start.bin": (_noise(16, 73) + fake + payload + _zip_of_members(
+            [dict(m, cd_off_delta=len(fake + payload)) for m in benign], base=len(fake + payload)),
+                           {"empty-password", "pem-private-key"}),
+        "zip_zip.bin": (_zip_of_members([{"name": b"etc/shadow", "data": _SHADOW, "method": 8}]) + _noise(64, 74)
+                        + _zip_of_members(benign), {"empty-password"}),
+    }
+    for name, (data, want) in cases.items():
+        src = tmp_path / name
+        src.write_bytes(data)
+        rules = {f["rule_id"] for f in run_analysis(src)["findings"]}
+        assert want <= rules, (name, rules)
+    src = tmp_path / "crowded.bin"  # data before the archive is analysed before its members use up the budget
+    src.write_bytes(_noise(16, 75) + payload + _zip_of_members([{"name": b"f%03d" % i, "data": b""} for i in range(80)]))
+    rules = {f["rule_id"] for f in run_analysis(src, Limits(max_files=40))["findings"]}
+    assert {"empty-password", "pem-private-key"} <= rules, rules
+
+
+def test_forged_claims_floods_and_adjusted_self_extractors(tmp_path, run_analysis):
+    """Fourth review: two forged superblocks (or a decoy image) in front of the real root filesystem, and a forged
+    end record appended to a real zip, still hid it; overlapping gzip headers over one endless deflate stream made a
+    5 KB upload run past the sandbox timeout (each candidate decoded up to 512 MiB); a self-extractor whose offsets
+    'zip -A' adjusted was not recognised."""
+    import struct
+    import subprocess
+    import time
+    import zlib
+    rules_of = lambda p, lim=None: {f["rule_id"] for f in run_analysis(p, lim)["findings"]}  # noqa: E731
+    key = _pem_block(81)
+    real_zip = _zip_of_members([{"name": b"etc/shadow", "data": _SHADOW, "method": 8},
+                                {"name": b"etc/ssl/k.pem", "data": key, "method": 8}])
+    cd_off = struct.unpack_from("<I", real_zip, len(real_zip) - 6)[0]
+    forged_end = struct.pack("<4sHHHHIIH", b"PK\x05\x06", 0, 0, 1, 1, len(real_zip) - cd_off, cd_off, 0)
+    (tmp_path / "zipend.zip").write_bytes(real_zip + forged_end)
+    assert {"empty-password", "pem-private-key"} <= rules_of(tmp_path / "zipend.zip")
+    if shutil.which("mksquashfs"):
+        tree = tmp_path / "rootfs"
+        (tree / "etc").mkdir(parents=True)
+        (tree / "etc" / "shadow").write_bytes(_SHADOW)
+        sq = tmp_path / "r.sqsh"
+        subprocess.run(["mksquashfs", str(tree), str(sq), "-noappend", "-quiet"], check=True, capture_output=True)
+        real, noise = sq.read_bytes(), _noise(8192, 82)
+
+        def forged(rest: int) -> bytes:
+            sb = bytearray(real[:96])
+            struct.pack_into("<Q", sb, 40, rest)
+            struct.pack_into("<I", sb, 4, 0x7FFFFFFF)
+            return bytes(sb) + b"\xff" * (4096 - 96)
+        rest = 2 * 4096 + len(real) + len(noise)
+        (tmp_path / "double.bin").write_bytes(noise + forged(rest) + forged(rest - 4096) + real + noise)
+        assert "empty-password" in rules_of(tmp_path / "double.bin")
+    stream = zlib.compressobj(9, zlib.DEFLATED, -15)
+    endless = stream.compress(b"\x00" * (3 * 1024 * 1024)) + stream.flush(zlib.Z_SYNC_FLUSH)  # no final block
+    n = 60
+    heads = b"".join(b"\x1f\x8b\x08\x04" + b"\x00" * 4 + b"\x00\x03" + struct.pack("<H", 16 * (n - i) - 12)
+                     + b"\x00" * 4 for i in range(n))
+    (tmp_path / "flood.bin").write_bytes(_noise(4096, 83) + heads + endless + _noise(4096, 84))
+    t0 = time.monotonic()
+    res = Extractor(tmp_path / "w_flood", Limits(max_file_bytes=1024 * 1024)).run(tmp_path / "flood.bin", "flood.bin")
+    assert time.monotonic() - t0 < 30 and "max_carve_decode" in res.limits_hit
+    assert res.artifacts[0].extraction == "partial"  # reported, not silent
+    if shutil.which("zip"):
+        d = tmp_path / "sfx"
+        (d / "etc").mkdir(parents=True)
+        (d / "etc" / "shadow").write_bytes(_SHADOW)
+        subprocess.run(["zip", "-q", "-r", str(tmp_path / "a.zip"), "etc"], cwd=d, check=True)
+        (tmp_path / "sfx.bin").write_bytes(_noise(4096, 85) + (tmp_path / "a.zip").read_bytes())
+        subprocess.run(["zip", "-q", "-A", str(tmp_path / "sfx.bin")], check=True, capture_output=True)
+        assert "empty-password" in rules_of(tmp_path / "sfx.bin")
+
+
+def test_secrets_dedupe_keeps_a_containers_own_copy(tmp_path, run_analysis):
+    """Fourth review: a container's finding was dropped whenever a descendant reported the same key body, even when
+    the container held its own copy elsewhere and the descendant's was a library self-test key or encrypted: the
+    high-severity finding disappeared."""
+    key = _pem_block(91)
+    enc = _pem_block(91, encrypted=True)
+    for name, inner, want in (("cryptolib.bin", ("usr/lib/libcrypto.so.3", b"\x00" * 64 + key), "crypto-library-test-key"),
+                              ("encrypted.bin", ("keys/enc.pem", enc), "pem-private-key")):
+        b = io.BytesIO()
+        with zipfile.ZipFile(b, "w", zipfile.ZIP_STORED) as zf:
+            zf.writestr(*inner)
+        src = tmp_path / name
+        src.write_bytes(_noise(8192, 92) + key + _noise(1024, 93) + b.getvalue() + _noise(4096, 94))
+        found = [(f["rule_id"], f["severity"]) for f in run_analysis(src)["findings"]
+                 if f["rule_id"] in ("pem-private-key", "crypto-library-test-key")]
+        assert ("pem-private-key", "high") in found and any(r == want for r, _s in found if (r, _s) != ("pem-private-key", "high")), (name, found)
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("etc/ssl/k.pem", key)
+    src = tmp_path / "once.bin"  # the same bytes reported by the member and found in the dump: once
+    src.write_bytes(_noise(8192, 95) + b.getvalue() + _noise(4096, 96))
+    assert [f["rule_id"] for f in run_analysis(src)["findings"]].count("pem-private-key") == 1

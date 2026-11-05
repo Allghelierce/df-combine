@@ -116,7 +116,31 @@ def zip_at_end(fp: BinaryIO, size: int) -> int | None:
     if fp.read(22)[20:22] != b"\x00\x00":
         return None
     start = zip_start(fp, size - 22)
+    if start is None:  # offsets counted from the file's start (zip -A adjusts a self-extractor's): the first member
+        start = _first_member_at(fp, size - 22)  # follows the stub
     return start if start else None
+
+
+def _first_member_at(fp: BinaryIO, end_record: int) -> int | None:
+    """Where the first member of a zip whose offsets count from the start of the file lies (a self-extractor that
+    'zip -A' adjusted): its central directory ends at the end record, and the first entry's local header is found
+    where the entry says."""
+    fp.seek(end_record)
+    rec = fp.read(22)
+    if len(rec) < 22 or rec[:4] != b"PK\x05\x06":
+        return None
+    count, cd_size, cd_off = struct.unpack_from("<HII", rec, 10)
+    if not count or count == 0xFFFF or cd_size < 46 or cd_off + cd_size != end_record:
+        return None
+    fp.seek(cd_off)
+    cd = fp.read(46)
+    if cd[:4] != b"PK\x01\x02":
+        return None
+    (lho,) = struct.unpack_from("<I", cd, 42)
+    if not 0 < lho < cd_off:
+        return None
+    fp.seek(lho)
+    return lho if fp.read(4) == b"PK\x03\x04" else None
 
 
 def zip_start(fp: BinaryIO, end_record: int) -> int | None:

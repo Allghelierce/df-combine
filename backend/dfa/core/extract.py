@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import bz2
 import contextlib
+import errno
 import hashlib
 import heapq
+import io
 import json
 import lzma
 import os
@@ -106,6 +108,8 @@ class ExtractionResult:
     filesystems: list[dict] = field(default_factory=list)
     limits_hit: list[str] = field(default_factory=list)
     stats: dict = field(default_factory=dict)
+    # artifact id -> (start, end, child id): byte ranges copied verbatim into a child (not part of the manifest)
+    copied: dict[int, list[tuple[int, int, int]]] = field(default_factory=dict)
 
 
 # ----------------------------------------------------------------- helpers
@@ -202,6 +206,8 @@ class Extractor:
         self._tree_roots: dict[int, tuple[Path, bool]] = {}  # artifact id -> (root, written by external tool)
         self._registered: set[int] = set()
         self._no_failure_carve: set[int] = set()  # same-kind objects carved out of a failed image
+        self._partial_notes: dict[int, str] = {}  # artifact id -> why its unpacking is incomplete
+        self._regions: set[int] = set()  # regions cut out of a container (leading, gap or trailing data)
         # Unpackers that may follow links they create themselves are only allowed inside the container sandbox.
         self.in_container = os.environ.get("DFA_IN_SANDBOX") == "1"
         self._progress = progress or (lambda msg: None)
@@ -375,7 +381,9 @@ class Extractor:
         handler = HANDLERS.get(art.format)
         if art.format == "elf" and not _is_mcu_elf(self.path_of(art.id)):
             handler = None  # ordinary ELF files are analysed as they are; only data appended to them is unpacked
-        carve = art.format in ("raw", "cortexm_raw") and art.size >= 4096
+        # raw data is carved from 4 KiB (a root filesystem holds many small files), a region cut out of a container
+        # (data before, between or after its members or its own extent) at any size
+        carve = art.format in ("raw", "cortexm_raw") and (art.size >= 4096 or art.id in self._regions)
         sized = art.format in OWN_EXTENT_FORMATS  # images and executables whose own extent is known
         if handler is None and not carve and not sized:
             return
@@ -397,6 +405,9 @@ class Extractor:
                 children = self._carve(art)
                 if children:
                     art.extraction = "ok"
+            if note := self._partial_notes.pop(art.id, None):  # unpacked, but not all of it
+                art.extraction, art.extraction_note = "partial", note
+                self.result.warnings.append(f"{art.name}: {note}")
         except LimitExceeded as exc:
             art.extraction = "partial"
             art.extraction_note = f"limit exceeded: {exc}"
@@ -422,15 +433,6 @@ class Extractor:
                 self.result.limits_hit.append(str(exc))
             except Exception as exc:  # noqa: BLE001 - contained like any parser error
                 self.result.warnings.append(f"{art.name}: data after it not examined ({type(exc).__name__}: "
-                                            f"{str(exc)[:200]})")
-        if art.format == "zip" and (lead := art.details.get("prepended_bytes")):  # a zip ending the file
-            try:
-                children += self._leading_data(art, int(lead))
-            except LimitExceeded as exc:
-                self.result.warnings.append(f"{art.name}: data before it not examined (limit exceeded: {exc})")
-                self.result.limits_hit.append(str(exc))
-            except Exception as exc:  # noqa: BLE001 - contained like any parser error
-                self.result.warnings.append(f"{art.name}: data before it not examined ({type(exc).__name__}: "
                                             f"{str(exc)[:200]})")
         for child in children:
             if self.budget.files_created > self.limits.max_files:
@@ -465,12 +467,12 @@ class Extractor:
         """An image or archive that could not be unpacked, and left nothing to salvage, is carved like raw data:
         what it holds - or what a forged header claims as its own, such as a SquashFS superblock claiming the rest
         of a flash dump - is still analysed. Only the extent it declares is carved; data after it is examined as
-        trailing data, as for any image. Of its own kind (a header claiming a length, as the failed one did) only the
-        first object is carved - the real image behind a forged header - and it shadows nothing inside its range, so
-        a claim forged inside the forged one hides nothing either; if it fails too, it is not carved again (forged
-        claims cannot nest into copies of copies)."""
-        if art.size < 4096 or art.format in ("raw", "cortexm_raw") or art.id in self._no_failure_carve:
-            return []
+        trailing data, as for any image. An object of its own kind is carved only if it checks out where it lies
+        (zipfile reads it, unsquashfs lists it, a uImage's data CRC matches): forged claims are neither copied nor
+        allowed to shadow anything, while the real image behind them is unpacked; one that fails all the same is
+        not carved again."""
+        if art.size < 64 or art.format in ("raw", "cortexm_raw") or art.id in self._no_failure_carve:
+            return []  # (any size: a small zip whose forged end record failed it still holds the real one)
         try:
             scan_to = (self._data_after_end(art) if art.format in OWN_EXTENT_FORMATS else None) or art.size
             children = self._carve(art, self.root / f"{art.id:05d}.carved.d", scan_to, _CLAIMED_KIND.get(art.format))
@@ -486,6 +488,32 @@ class Extractor:
             self.result.warnings.append(f"{art.name}: carved like raw data instead ({len(children)} embedded "
                                         "object(s) found)")
         return children
+
+    def _own_kind_valid(self, art: Artifact, kind: str, off: int, length: int, checks: list[int]) -> bool:
+        """Whether an object of a failed image's own kind checks out where it lies, without copying it."""
+        src = self.path_of(art.id)
+        if kind == "zip":
+            return _zip_region_valid(src, off, length)
+        if kind == "uimage":
+            with src.open("rb") as fp:
+                fp.seek(off)
+                head = fp.read(64)
+                crc, left = 0, length - 64
+                while left > 0 and (chunk := fp.read(min(COPY_CHUNK, left))):
+                    crc = zlib.crc32(chunk, crc)
+                    left -= len(chunk)
+            return left == 0 and len(head) == 64 and crc & 0xFFFFFFFF == struct.unpack_from(">I", head, 24)[0]
+        if kind == "squashfs" and (tool := self._external_tools.get("unsquashfs")):
+            checks[0] += 1
+            if checks[0] > 16:  # each check runs the tool
+                return False
+            try:  # a listing reads the inode, directory and id tables (a forged superblock fails here)
+                r = subprocess.run([tool, "-lln", "-o", str(off), str(src)], capture_output=True,
+                                   stdin=subprocess.DEVNULL, timeout=min(60, self.limits.tool_timeout_s))
+            except subprocess.TimeoutExpired:
+                return False
+            return r.returncode == 0
+        return False  # ROMFS, CROMFS, cpio, ELF: no check without unpacking it, so not carved
 
     def _salvage(self, art: Artifact) -> list[Artifact]:
         """After a failure, register whatever was safely written so it is still analysed."""
@@ -544,8 +572,11 @@ class Extractor:
                 self.result.warnings.append(f"{art.name}: {len(shown)} member name(s) flagged UTF-8 are not UTF-8 "
                                             "(shown with \\xNN escapes)")
             infos = zf.infolist()
+            gaps, data_at = self._zip_gaps(art, zf)  # first: neither the entry count nor the members crowd them out
             if len(infos) > self.limits.max_files:
                 raise LimitExceeded(f"zip declares {len(infos)} entries (limit {self.limits.max_files})")
+            stored: dict[str, tuple[int, int]] = {}  # member file -> its bytes in the archive (stored members)
+            unreadable: list[str] = []
             # Unix modes are only meaningful for archives made on Unix (create_system 3); others carry none
             unix = bool(infos) and sum(1 for zi in infos if zi.create_system == 3) * 2 > len(infos)
             for zi in infos:
@@ -578,17 +609,30 @@ class Extractor:
                     with zf.open(zi) as member:
                         if not self._member_write(art, name, member, dest, compressed_size=max(zi.compress_size, 1)):
                             continue
-                except (zipfile.BadZipFile, zlib.error, lzma.LZMAError, EOFError, NotImplementedError, RuntimeError,
-                        OSError) as exc:  # a damaged or unsupported member: the others are still analysed
-                    if isinstance(exc, OSError) and exc.errno is not None:
-                        raise  # the disk, not the member (e.g. no space left)
+                except _MEMBER_ERRORS as exc:  # a damaged or unsupported member: the others are still analysed
+                    if isinstance(exc, OSError) and exc.errno in _DISK_ERRNOS:
+                        raise  # the disk or a resource limit, not the member
+                    unreadable.append(name)
                     self.result.warnings.append(f"{art.name}: member {name!r} could not be read "
                                                 f"({type(exc).__name__}: {str(exc)[:200]})")
+                    if "CRC" in str(exc):  # its data was read: kept, as unzip keeps it (with the warning above)
+                        with contextlib.suppress(*_MEMBER_ERRORS), zf.open(zi) as member:
+                            member._expected_crc = None  # zipfile.ZipExtFile: no CRC check on this read
+                            self._member_write(art, name, member, dest, compressed_size=max(zi.compress_size, 1))
                     if not dest.exists():
                         continue
+                if zi.compress_type == zipfile.ZIP_STORED and zi.header_offset in data_at:
+                    stored[str(dest)] = (data_at[zi.header_offset], data_at[zi.header_offset] + zi.compress_size)
                 self._note_meta(dest, mode=(mode & 0o7777) or None)
+        if unreadable:  # the archive's own bytes are then scanned, and the gap is reported
+            self._partial_notes[art.id] = (f"{len(unreadable)} member(s) could not be read: "
+                                           + ", ".join(repr(n) for n in unreadable[:5]))
         self._record_fs(art, "zip", out, **({"unix_modes": True} if unix else {}))
-        return self._register_tree(art, out)
+        members = self._register_tree(art, out)
+        for c in members:
+            if (r := stored.get(str(self.path_of(c.id)))) is not None:
+                self.result.copied.setdefault(art.id, []).append((*r, c.id))
+        return gaps + members
 
     def h_tar(self, art: Artifact) -> list[Artifact]:
         src = self.path_of(art.id)
@@ -707,35 +751,86 @@ class Extractor:
                                     f"analysed separately as {name}")
         child = self._child(art, dest, name, "carved")
         child.details["carved_offset"] = hex(off)
+        self.result.copied.setdefault(art.id, []).append((off, art.size, child.id))
+        self._regions.add(child.id)
         return [child]
 
-    def _leading_data(self, art: Artifact, n: int) -> list[Artifact]:
-        """Data before an archive that ends the file (a vendor header, a self-extracting stub, the rest of a flash
-        dump): the archive's handler reads only its members, so what precedes them is analysed as an artifact of
-        its own, unless it is padding."""
-        n = min(n, art.size)
-        src = self.path_of(art.id)
+    def _region_artifact(self, art: Artifact, src: Path, start: int, end: int, name: str, kind: str) -> Artifact | None:
+        """A region of an artifact that its own handler does not read, as an artifact of its own (in a directory of
+        its own, so it never appears inside an extracted tree), unless it is padding or only a few bytes."""
+        if end - start <= 8:
+            return None
         with src.open("rb") as fp:
-            pos, data = 0, False
-            while pos < n and (chunk := fp.read(min(COPY_CHUNK, n - pos))):
+            fp.seek(start)
+            pos = start
+            while pos < end and (chunk := fp.read(min(COPY_CHUNK, end - pos))):
                 if _NOT_PADDING.search(chunk):
-                    data = True
                     break
                 pos += len(chunk)
-            if not data or n <= 8:
-                return []
-            name = "leading_00000000.bin"
-            ldir = self.root / f"{art.id:05d}.leading.d"  # _out_dir names are "<id>_<name>.d": no clash
-            ldir.mkdir(exist_ok=True)
-            dest = ldir / name
+            else:
+                return None
+            rdir = self.root / f"{art.id:05d}.{kind}.d"  # _out_dir names are "<id>_<name>.d": no clash
+            rdir.mkdir(exist_ok=True)
+            dest = rdir / name
             if dest.exists():
-                return []
-            fp.seek(0)
-            self._write_stream(_Bounded(fp, n), dest, label=name)
-        self.result.warnings.append(f"{art.name}: {n} bytes before the archive analysed separately as {name}")
+                return None
+            fp.seek(start)
+            self._write_stream(_Bounded(fp, end - start), dest, label=name)
         child = self._child(art, dest, name, "carved")
-        child.details["carved_offset"] = "0x0"
-        return [child]
+        child.details["carved_offset"] = hex(start)
+        self.result.copied.setdefault(art.id, []).append((start, end, child.id))
+        self._regions.add(child.id)
+        return child
+
+    def _zip_gaps(self, art: Artifact, zf: zipfile.ZipFile) -> tuple[list[Artifact], dict[int, int]]:
+        """Bytes of a zip that neither a member nor the central directory accounts for: what precedes the first
+        member (a vendor header, a self-extracting stub, an earlier archive or the rest of a flash dump), lies
+        between members, or is the archive comment. zipfile reads only the members, so these are analysed as
+        artifacts of their own - before the members, which cannot crowd them out of the file budget. Also returns
+        where each member's data starts (by local header offset)."""
+        src = self.path_of(art.id)
+        covered: list[tuple[int, int]] = []
+        data_at: dict[int, int] = {}
+        with src.open("rb") as fp:
+            for zi in zf.infolist():
+                lho = zi.header_offset
+                if not 0 <= lho <= art.size - 30:
+                    continue
+                fp.seek(lho)
+                h = fp.read(30)
+                if h[:4] != b"PK\x03\x04":
+                    continue
+                nlen, elen = struct.unpack_from("<HH", h, 26)
+                data_at[lho] = lho + 30 + nlen + elen
+                end = data_at[lho] + zi.compress_size
+                if zi.flag_bits & 0x08:  # a data descriptor follows the data
+                    fp.seek(end)
+                    sig = fp.read(4) == b"PK\x07\x08"
+                    wide = zi.compress_size >= 0xFFFFFFFF or zi.file_size >= 0xFFFFFFFF
+                    end += 4 * sig + (20 if wide else 12)
+                covered.append((lho, min(end, art.size)))
+        comment = len(zf.comment)
+        covered.append((zf.start_dir, art.size - comment))  # the directory and the end records
+        gaps, pos = [], 0
+        for a, b in sorted(covered):
+            if a > pos:
+                gaps.append((pos, a))
+            pos = max(pos, b)
+        if pos < art.size:
+            gaps.append((pos, art.size))
+        children: list[Artifact] = []
+        for i, (a, b) in enumerate(gaps):
+            if i >= 64:
+                self._partial_notes[art.id] = (f"{len(gaps) - 64} more regions outside the members not analysed "
+                                               "separately (its own bytes are scanned)")
+                break
+            name = "leading_00000000.bin" if a == 0 else f"gap_{a:08x}.bin"
+            if c := self._region_artifact(art, src, a, b, name, "gaps"):
+                children.append(c)
+        if children:
+            self.result.warnings.append(f"{art.name}: {len(children)} region(s) outside its members analysed "
+                                        "separately (" + ", ".join(c.name for c in children[:4]) + ")")
+        return children, data_at
 
     def h_gzip(self, art: Artifact) -> list[Artifact]:
         return self._decompress(art, lambda p: _ConcatenatedStreams(p, b"\x1f\x8b", _GzipMemberReader),
@@ -1512,41 +1607,47 @@ class Extractor:
 
     # ---- carving -----------------------------------------------------------
     def _carve(self, art: Artifact, out_dir: Path | None = None, scan_to: int | None = None,
-               once: str | None = None) -> list[Artifact]:
-        """Carve well-delimited embedded objects out of raw images (objects starting before ``scan_to``). Of kind
-        ``once`` (a failed image's own) only the first object is carved, and its range shadows nothing."""
+               own: str | None = None) -> list[Artifact]:
+        """Carve well-delimited embedded objects out of raw images (objects starting before ``scan_to``). Objects of
+        kind ``own`` (a failed image's own) are carved only if they check out where they lie."""
         src = self.path_of(art.id)
         scan_to = art.size if scan_to is None else scan_to
         found: list[tuple[int, int, str]] = []  # (offset, length, kind)
         examined = attempts = 0
-        once_kind = "zip" if once == "zip_end" else once  # as it is recorded in found
+        decode_left = 2 * self.limits.max_file_bytes  # test-decoding of gzip/xz candidates, all of them together
+        checks = [0]  # own-kind checks that run an external tool
+        own_kind = "zip" if own == "zip_end" else own  # as it is recorded in found
+
+        def cut(off: int, why: str, limit: str) -> None:
+            self.result.warnings.append(f"{art.name}: carving stopped at {off:#x}: {why}; objects after it were not "
+                                        "carved")
+            self.result.limits_hit.append(limit)
+            self._partial_notes[art.id] = f"carving stopped at {off:#x} ({why})"
+
         with src.open("rb") as fp:
             for off, kind in _scan_magics(fp, scan_to):
                 if off >= scan_to:
                     break
                 examined += 1
                 if examined > MAX_CARVE_HITS or attempts >= MAX_CARVE_ATTEMPTS:  # a flood of magic bytes
-                    self.result.warnings.append(f"{art.name}: carving stopped at {off:#x} after {examined - 1:,} "
-                                                f"signatures ({attempts:,} checked); objects after it were not carved")
-                    self.result.limits_hit.append("max_carve_candidates")
+                    cut(off, f"{examined - 1:,} signatures seen, {attempts:,} checked", "max_carve_candidates")
                     break
-                if kind == once and any(k == once_kind for _o, _ln, k in found):
-                    continue
                 # a 7z is only reported, not unpacked: what lies inside the length it claims is still carved
-                solid = [(o, ln) for o, ln, k in found if k not in ("7z", once_kind)]
+                solid = [(o, ln) for o, ln, k in found if k != "7z"]
                 if kind == "zip_end":  # a zip's end record says where the archive starts: carve back to there
                     attempts += 1
                     extent = _zip_extent(fp, off, art.size)
-                    if extent is None or extent[0] == 0:
-                        continue
+                    if extent is None or (extent[0] == 0 and extent[1] >= art.size):
+                        continue  # not a zip, or this very file
                     start, length = extent
                     stop = start + length
                     # nested in, or crossing, a region already found: skip (carved regions stay disjoint); regions
                     # inside it - its stored members - are unpacked from the zip, so they are not carved again
                     if any(o < stop and start < o + ln and not (start <= o and o + ln <= stop) for o, ln in solid):
                         continue
-                    if once_kind != "zip":  # (a zip carved once shadows nothing: what it contains stays)
-                        found = [r for r in found if r[2] == "7z" or not (start <= r[0] and r[0] + r[1] <= stop)]
+                    if own_kind == "zip" and not self._own_kind_valid(art, "zip", start, length, checks):
+                        continue
+                    found = [r for r in found if r[2] == "7z" or not (start <= r[0] and r[0] + r[1] <= stop)]
                     found.append((start, length, "zip"))
                 else:
                     if off == 0 or any(o <= off < o + ln for o, ln in solid):
@@ -1554,14 +1655,18 @@ class Extractor:
                     attempts += 1
                     length = _carve_length(fp, off, kind, art.size)
                     if length and kind in ("gz", "xz"):
-                        length = _stream_length(fp, off, kind, self.limits.max_file_bytes)
+                        if decode_left <= 0:
+                            cut(off, "test-decoding limit reached", "max_carve_decode")
+                            break
+                        length, produced = _stream_length(fp, off, kind, min(self.limits.max_file_bytes, decode_left))
+                        decode_left -= produced
                     if not length:
+                        continue
+                    if kind == own_kind and not self._own_kind_valid(art, kind, off, length, checks):
                         continue
                     found.append((off, length, kind))
                 if len(found) >= self.limits.max_carves_per_file:
-                    self.result.warnings.append(f"{art.name}: carving stopped at {off:#x} after "
-                                                f"{len(found)} embedded objects (limit); later ones were not carved")
-                    self.result.limits_hit.append("max_carves_per_file")
+                    cut(off, f"{len(found)} embedded objects carved (limit)", "max_carves_per_file")
                     break
             if not found:
                 return []
@@ -1591,7 +1696,9 @@ class Extractor:
                     self._write_stream(_Bounded(fp, length), dest, label=name)
                 c = self._child(art, dest, name, "carved")
                 c.details["carved_offset"] = hex(off)
-                if kind == once_kind:
+                if kind not in ("gz", "xz"):  # a verbatim copy of its range
+                    self.result.copied.setdefault(art.id, []).append((off, off + length, c.id))
+                if kind == own_kind:
                     self._no_failure_carve.add(c.id)
                 children.append(c)
         art.details["carved_objects"] = len(children)
@@ -1600,6 +1707,13 @@ class Extractor:
 
 class UnsupportedFormat(Exception):
     pass
+
+
+# Errors one zip member can raise when it cannot be read (unsupported method, bad CRC, a missing or inconsistent
+# local header, a name that does not decode); OSErrors with one of _DISK_ERRNOS concern the disk, not the member.
+_MEMBER_ERRORS = (zipfile.BadZipFile, zlib.error, lzma.LZMAError, EOFError, NotImplementedError, RuntimeError,
+                  ValueError, OSError)
+_DISK_ERRNOS = {errno.ENOSPC, errno.EDQUOT, errno.EROFS, errno.EIO, errno.EMFILE, errno.ENFILE, errno.EFBIG}
 
 
 class ToolError(RuntimeError):
@@ -1612,6 +1726,52 @@ def _has_files(root: Path) -> bool:
         if any(os.path.isfile(p) and not os.path.islink(p) for p in (os.path.join(dirpath, f) for f in files)):
             return True
     return False
+
+
+class _Window(io.RawIOBase):
+    """Read-only, seekable view of ``length`` bytes of a file starting at ``start`` (for zipfile)."""
+
+    def __init__(self, fp: BinaryIO, start: int, length: int) -> None:
+        super().__init__()
+        self._fp, self._start, self._len, self._pos = fp, start, length, 0
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self._pos
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        base = {io.SEEK_SET: 0, io.SEEK_CUR: self._pos, io.SEEK_END: self._len}[whence]
+        if base + offset < 0:
+            raise OSError(errno.EINVAL, "negative seek position")
+        self._pos = base + offset
+        return self._pos
+
+    def readinto(self, buf) -> int:  # noqa: ANN001 - any writable buffer
+        n = max(0, min(len(buf), self._len - self._pos))
+        if not n:
+            return 0
+        self._fp.seek(self._start + self._pos)
+        data = self._fp.read(n)
+        memoryview(buf).cast("B")[:len(data)] = data
+        self._pos += len(data)
+        return len(data)
+
+
+def _zip_region_valid(path: Path, start: int, length: int) -> bool:
+    """Whether zipfile reads the archive at [start, start + length) of a file: its end records and central
+    directory parse (names that do not decode are fine: the zip handler reads them as bytes)."""
+    try:
+        with path.open("rb") as f, zipfile.ZipFile(_Window(f, start, length)) as zf:
+            return bool(zf.infolist())
+    except UnicodeDecodeError:
+        return True
+    except Exception:  # noqa: BLE001 - any parse error: not an archive zipfile reads
+        return False
 
 
 class _Bounded:
@@ -1758,8 +1918,9 @@ class _ConcatenatedStreams:
         return b""
 
 
-def _stream_length(fp: BinaryIO, off: int, kind: str, max_out: int) -> int | None:
-    """Compressed length of the gzip/xz stream at ``off`` (test-decode, output discarded and capped)."""
+def _stream_length(fp: BinaryIO, off: int, kind: str, max_out: int) -> tuple[int | None, int]:
+    """(compressed length of the gzip/xz stream at ``off``, bytes decoded to find it): a test-decode, its output
+    discarded and capped at ``max_out``."""
     fp.seek(off)
     if kind == "gz":
         d = zlib.decompressobj(16 + zlib.MAX_WBITS)
@@ -1774,7 +1935,7 @@ def _stream_length(fp: BinaryIO, off: int, kind: str, max_out: int) -> int | Non
             else:
                 chunk = fp.read(64 * 1024)
                 if not chunk:
-                    return None
+                    return None, produced
             consumed += len(chunk)
             out = d.decompress(chunk, COPY_CHUNK)
             produced += len(out)
@@ -1783,11 +1944,11 @@ def _stream_length(fp: BinaryIO, off: int, kind: str, max_out: int) -> int | Non
                     out = d.decompress(d.unconsumed_tail, COPY_CHUNK)
                     produced += len(out)
             if produced > max_out:
-                return None
+                return None, produced
             if d.eof:
-                return consumed - len(d.unused_data)
+                return consumed - len(d.unused_data), produced
     except (zlib.error, lzma.LZMAError, EOFError, MemoryError):
-        return None
+        return None, produced
 
 
 class _GzipMemberReader:

@@ -63,7 +63,8 @@ def _hash_kind(h: str) -> str:
 
 def scan(ctx: ScanContext) -> list[Finding]:
     out: list[Finding] = []
-    secret_of: dict[int, tuple[int, str]] = {}  # id(finding) -> (artifact id, the secret it reports)
+    # id(finding) -> (artifact id, secret, rule, severity, byte offset in a binary or None)
+    secret_of: dict[int, tuple[int, str, str, str, int | None]] = {}
     for art in ctx.content_artifacts():
         path = ctx.fs_path(art)
         text = ctx.text(art)
@@ -106,18 +107,27 @@ def scan(ctx: ScanContext) -> list[Finding]:
 
 
 def _without_repeats_in_descendants(ctx: ScanContext, findings: list[Finding],
-                                    keys: dict[int, tuple[int, str]]) -> list[Finding]:
+                                    keys: dict[int, tuple[int, str, str, str, int | None]]) -> list[Finding]:
     """A secret inside data that was also unpacked or carved (a key in a stored zip member of a flash dump, in an
     executable's overlay) is found twice: in the container's bytes and in the file. The container's finding is
-    dropped only when a descendant reports that very secret - nothing found only in the container is lost."""
+    dropped only when its occurrence lies in bytes copied verbatim into a child, and that child (or something
+    below it) reports the same secret under the same rule and severity: the same bytes, reported once. Another
+    copy of the key elsewhere in the container, or one the child reports differently, keeps its own finding."""
     parent = {a.id: a.parent_id for a in ctx.artifacts}
-    reported: set[tuple[int, str]] = set()  # (ancestor artifact id, secret) pairs a descendant reports
-    for aid, secret in keys.values():
-        p, hops = parent.get(aid), 0
-        while p is not None and hops < 64:
-            reported.add((p, secret))
-            p, hops = parent.get(p), hops + 1
-    return [f for f in findings if keys.get(id(f)) not in reported]
+    below: dict[int, set[tuple[str, str, str]]] = {}  # artifact id -> what it or its descendants report
+    for aid, secret, rule, sev, _off in keys.values():
+        a, hops = aid, 0
+        while a is not None and hops < 64:
+            below.setdefault(a, set()).add((secret, rule, sev))
+            a, hops = parent.get(a), hops + 1
+
+    def repeated(f: Finding) -> bool:
+        if (k := keys.get(id(f))) is None or k[4] is None:
+            return False
+        aid, secret, rule, sev, off = k
+        return any(start <= off < end and (secret, rule, sev) in below.get(child, ())
+                   for start, end, child in ctx.copied.get(aid, ()))
+    return [f for f in findings if not repeated(f)]
 
 
 def _rebuild_pem_text(ctx: ScanContext, art) -> str:
@@ -151,7 +161,7 @@ def pem_body(raw: str) -> str | None:
 
 
 def _pem_findings(ctx: ScanContext, art, text: str, in_binary: bool,
-                  keys: dict[int, tuple[int, str]] | None = None) -> list[Finding]:
+                  keys: dict[int, tuple[int, str, str, str, int | None]] | None = None) -> list[Finding]:
     out = []
     path = ctx.fs_path(art)
     base = path.rsplit("/", 1)[-1]
@@ -200,7 +210,8 @@ def _pem_findings(ctx: ScanContext, art, text: str, in_binary: bool,
                                    path + f" @ offset {m.start():#x}")],
                 cwe="CWE-321", tags=["crypto", "self-test"]))
             if keys is not None:
-                keys[id(out[-1])] = (art.id, f"pem:{digest}")
+                f = out[-1]
+                keys[id(f)] = (art.id, f"pem:{digest}", f.rule_id, str(f.severity), m.start() if in_binary else None)
             continue
         out.append(Finding(
             title=title, description=desc, severity=sev, classification=C.detected,
@@ -212,7 +223,8 @@ def _pem_findings(ctx: ScanContext, art, text: str, in_binary: bool,
             cwe="CWE-321", references=["https://cwe.mitre.org/data/definitions/321.html"],
             tags=["credentials", "crypto"]))
         if keys is not None:
-            keys[id(out[-1])] = (art.id, f"pem:{digest}")
+            f = out[-1]
+            keys[id(f)] = (art.id, f"pem:{digest}", f.rule_id, str(f.severity), m.start() if in_binary else None)
     if in_binary or out:
         return out
     hdr = PEM_HEADER_RE.search(text)
@@ -392,7 +404,7 @@ def _assignment_findings(ctx: ScanContext, art, text: str) -> list[Finding]:
 
 
 def _token_findings(ctx: ScanContext, art, lines, in_binary: bool,
-                    keys: dict[int, tuple[int, str]] | None = None) -> list[Finding]:
+                    keys: dict[int, tuple[int, str, str, str, int | None]] | None = None) -> list[Finding]:
     out = []
     seen = set()
     path = ctx.fs_path(art)
@@ -413,5 +425,6 @@ def _token_findings(ctx: ScanContext, art, lines, in_binary: bool,
                     evidence=[Evidence("string", redact(tok, 6), path + (f" @ {off:#x}" if in_binary else ""))],
                     cwe="CWE-798", tags=["credentials"]))
                 if keys is not None:
-                    keys[id(out[-1])] = (art.id, f"token:{tok}")
+                    f = out[-1]
+                    keys[id(f)] = (art.id, f"token:{tok}", f.rule_id, str(f.severity), off if in_binary else None)
     return out
