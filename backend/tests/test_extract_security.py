@@ -338,3 +338,70 @@ def test_permission_image_carries_original_modes(tmp_path):
     assert "." in rows
     assert fs["special_dirs"] == {"/tmp": 0o1777}  # for reporting which bit FwAnalyzer's offender has
     assert not (tmp_path / "w").rglob("su") or all(not (f.stat().st_mode & 0o4000) for f in (tmp_path / "w").rglob("su"))
+
+
+def test_generated_hostile_archives_keep_extraction_invariants(tmp_path):
+    """Property check with seeded random tar/zip archives: traversal and absolute names, links to /etc, hard
+    links, devices, FIFOs, setuid modes, control characters, duplicates. After every run nothing exists outside
+    the work directory, nothing below it is a link or special file, nothing is setuid/setgid or world-writable,
+    and the extractor either completes or raises one of its declared errors (scripts-level version: 1,500)."""
+    import io
+    import os
+    import random
+    import stat
+    import tarfile
+    import warnings
+    import zipfile
+
+    from dfa.core.extract import Extractor
+    from dfa.core.formats.simplefs import FormatError
+    from dfa.core.limits import LimitExceeded, Limits
+    rng = random.Random(20261105)
+    pieces = ["..", ".", "", "etc", "bin", "a b", "x‮y", "été", "CON", "-rf", "~", "a" * 300, "\x01c",
+              "back\\slash", "c:", "dir", "dir/../..", "//", "./.."]
+
+    def name() -> str:
+        n = "/".join(rng.choice(pieces) for _ in range(rng.randint(1, 5)))
+        n = ("/" + n) if rng.random() < 0.2 else n
+        return ("../" * rng.randint(1, 8) + "escape") if rng.random() < 0.1 else n[:600]
+
+    produced = 0
+    for i in range(120):
+        case = tmp_path / f"c{i}"
+        (case / "canary").mkdir(parents=True)
+        src = case / ("in.tar" if i % 5 < 3 else "in.zip")
+        buf = io.BytesIO()
+        if src.suffix == ".tar":
+            with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tf:
+                for _ in range(rng.randint(1, 10)):
+                    ti = tarfile.TarInfo(name())
+                    ti.type = rng.choice([tarfile.REGTYPE] * 4 + [tarfile.DIRTYPE, tarfile.SYMTYPE, tarfile.LNKTYPE,
+                                                                   tarfile.CHRTYPE, tarfile.FIFOTYPE])
+                    ti.mode = rng.choice([0o644, 0o4755, 0o2755, 0o777, 0o7777])
+                    data = b""
+                    if ti.type in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+                        ti.linkname = rng.choice(["/etc/passwd", "../../../../etc/shadow", name(), "/"])
+                    elif ti.type == tarfile.REGTYPE:
+                        data = rng.randbytes(rng.randint(0, 512))
+                        ti.size = len(data)
+                    tf.addfile(ti, io.BytesIO(data) if data else None)
+        else:
+            with warnings.catch_warnings(), zipfile.ZipFile(buf, "w") as zf:
+                warnings.simplefilter("ignore")  # duplicate names are part of the test
+                for _ in range(rng.randint(1, 10)):
+                    zi = zipfile.ZipInfo(name())
+                    zi.create_system, zi.external_attr = 3, rng.choice([0o100644, 0o104755, 0o120777, 0o010644]) << 16
+                    zf.writestr(zi, rng.choice([b"/etc/passwd", b"../../../x", rng.randbytes(64)]))
+        src.write_bytes(buf.getvalue())
+        work = case / "work"
+        try:
+            produced += len(Extractor(work, Limits()).run(src, src.name).artifacts) - 1
+        except (FormatError, LimitExceeded, ValueError):
+            pass
+        assert not any((case / "canary").iterdir()) and set(os.listdir(case)) <= {"canary", "work", src.name}, i
+        for dirpath, dirnames, filenames in os.walk(work):
+            for n in dirnames + filenames:
+                st = os.lstat(os.path.join(dirpath, n))
+                assert stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode), (i, n)
+                assert not st.st_mode & 0o6002, (i, n, oct(st.st_mode))
+    assert produced > 150  # the archives really were extracted (not all rejected up front)
