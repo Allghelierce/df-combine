@@ -155,6 +155,18 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+class _SkipCountingTarInfo(tarfile.TarInfo):
+    """Counts the blocks tarfile skips with ignore_zeros (zero blocks, damaged headers) on its TarFile."""
+
+    @classmethod
+    def fromtarfile(cls, tarfile_):  # noqa: ANN001, ANN206 - tarfile's own signature
+        try:
+            return super().fromtarfile(tarfile_)
+        except (tarfile.EOFHeaderError, tarfile.InvalidHeaderError):
+            tarfile_.dfa_skipped_blocks = getattr(tarfile_, "dfa_skipped_blocks", 0) + 1
+            raise
+
+
 def _unused_name(directory: Path, name: str) -> Path:
     p = directory / name
     n = 1
@@ -495,12 +507,16 @@ class Extractor:
     def h_tar(self, art: Artifact) -> list[Artifact]:
         src = self.path_of(art.id)
         out = self._out_dir(art)
-        with tarfile.open(src, mode="r:") as tf:
+        # ignore_zeros: keep reading after an end-of-archive marker (concatenated archives) and past a damaged
+        # header; tarfile would otherwise stop silently there, leaving everything after it unanalysed.
+        with tarfile.open(src, mode="r:", ignore_zeros=True, tarinfo=_SkipCountingTarInfo) as tf:
             count = 0
+            skipped = seen = 0  # blocks skipped before a member (trailing end-of-archive padding is not counted)
             for ti in tf:
                 count += 1
                 if count > self.limits.max_files:
                     raise LimitExceeded(f"tar has more than {self.limits.max_files} entries")
+                skipped, seen = skipped + getattr(tf, "dfa_skipped_blocks", 0) - seen, getattr(tf, "dfa_skipped_blocks", 0)
                 if ti.isdir():
                     with contextlib.suppress(UnsafePath):
                         d = str(safe_member_path(ti.name)).strip("/")
@@ -529,6 +545,10 @@ class Extractor:
                 if not self._member_write(art, ti.name, fobj, dest):
                     continue
                 self._note_meta(dest, mode=ti.mode & 0o7777, uid=ti.uid, gid=ti.gid)
+        if skipped:
+            self.result.warnings.append(f"{art.name}: {skipped * 512} bytes skipped between members (an "
+                                        "end-of-archive marker or a damaged header); the members after them were "
+                                        "extracted too")
         self._record_fs(art, "tar", out)
         return self._register_tree(art, out)
 
@@ -1081,7 +1101,7 @@ class Extractor:
                     continue  # the root line itself, device numbers, names with newlines
                 mode = _ls_mode(m.group(1).decode("ascii"))
                 rel = escape_surrogates(m.group(4).split(b"/", 1)[1].decode("utf-8", "surrogateescape"))
-                if mode is None or not rel:
+                if mode is None or not rel or any(part in ("", ".", "..") for part in rel.split("/")):
                     continue
                 if stat.S_ISREG(mode):
                     files[rel] = (mode & 0o7777, int(m.group(2)), int(m.group(3)))
@@ -1098,9 +1118,9 @@ class Extractor:
             self.result.warnings.append(f"{art.name}: no original permissions (unsquashfs listing incomplete)")
             return False
         for rel, (mode, uid, gid) in files.items():
-            p = root / rel
-            if str(p) in self._pending_meta or p.is_file():
-                self._pending_meta[str(p)] = {"mode": mode, "uid": uid, "gid": gid}
+            key = str(root / rel)
+            if key in self._pending_meta:  # only files the tree walk recorded: a listed "../x" matches nothing
+                self._pending_meta[key] = {"mode": mode, "uid": uid, "gid": gid}
         self._dir_meta.setdefault(art.id, {}).update(dirs)
         return True
 

@@ -603,3 +603,33 @@ def test_squashfs_keeps_original_permissions_when_extracted_unprivileged(tmp_pat
     manifest = run_analysis(img)
     setuid = [f for f in manifest["findings"] if f["rule_id"] == "setuid-files"]
     assert setuid and {"/bin/su", "/bin/bad\\x80"} <= {e["value"].split(" (mode")[0] for e in setuid[0]["evidence"]}
+
+
+def test_tar_members_after_an_end_marker_or_a_damaged_header_are_not_hidden(tmp_path):
+    """tarfile (and GNU tar) stop silently at an end-of-archive marker or a header with a bad checksum, so
+    content placed after one went unanalysed (archive reported "ok"). Reading continues past them, with a
+    warning; a pax global header (git archive) is not mistaken for skipped data."""
+    def tar(members: list[tuple[str, bytes]], **kw) -> bytes:
+        b = io.BytesIO()
+        with tarfile.open(fileobj=b, mode="w", **kw) as tf:
+            for name, data in members:
+                ti = tarfile.TarInfo(name)
+                ti.size = len(data)
+                tf.addfile(ti, io.BytesIO(data))
+        return b.getvalue()
+
+    bad = bytearray(tar([("etc/junk", b"x" * 10)], format=tarfile.USTAR_FORMAT)[:1024])
+    bad[148:156] = b"0000000\x00"  # wrong header checksum
+    cases = {
+        "normal.tar": (tar([("a", b"1"), ("b/c", b"2")], format=tarfile.PAX_FORMAT, pax_headers={"comment": "x"}),
+                       {"/a", "/b/c"}, False),
+        "concat.tar": (tar([("one", b"1")]) + tar([("two", b"2")]), {"/one", "/two"}, True),
+        "damaged.tar": (tar([("etc/passwd", b"root::0:0::/:/bin/sh\n")])[:-1024 * 9] + bytes(bad)
+                        + tar([("root/.ssh/id_rsa", b"key")]), {"/etc/passwd", "/root/.ssh/id_rsa"}, True),
+    }
+    for name, (data, expected, warned) in cases.items():
+        src = tmp_path / name
+        src.write_bytes(data)
+        res = Extractor(tmp_path / f"w_{name}", Limits()).run(src, name)
+        assert {a.name for a in res.artifacts if a.origin == "extracted"} == expected, name
+        assert any("skipped between members" in w for w in res.warnings) == warned, (name, res.warnings)
