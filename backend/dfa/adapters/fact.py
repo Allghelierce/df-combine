@@ -35,6 +35,8 @@ from .base import AdapterContext, AdapterResult, ToolAdapter
 
 FACT_OPAQUE_CONTAINERS = {"px4", "apj", "fw_json", "ihex", "dfu"}
 
+CLOCK_SKEW_S = 60  # tolerated difference between our clock and the FACT host's
+
 PLUGIN_MAP = {
     # plugin: (severity, classification, title prefix, cwe)
     "crypto_material": (S.high, C.detected, "Cryptographic material", "CWE-321"),
@@ -111,6 +113,7 @@ class FactAdapter(ToolAdapter):
                     "release_date": "1970-01-01", "tags": "drone-firmware-analyzer",
                     "requested_analysis_systems": list(self.settings.fact_plugins),
                 }
+                submitted = time.time()
                 r = self._put_once_more_on_reset(c, payload)
                 if r.status_code not in (200, 201) or not r.json().get("uid"):
                     failed += 1
@@ -119,7 +122,7 @@ class FactAdapter(ToolAdapter):
                     continue
                 uid = r.json()["uid"]
                 ctx.log(f"FACT: submitted {t['label']} as {uid}; waiting for unpacking and analysis")
-                state, fw = self._wait(c, uid)
+                state, fw = self._wait(c, uid, submitted)
                 entry: dict = {"target": t["label"], "uid": uid, "status": state}
                 if fw:
                     (out_dir / f"firmware_{i}.json").write_text(json.dumps(fw, indent=1)[:50_000_000])
@@ -173,13 +176,13 @@ class FactAdapter(ToolAdapter):
             time.sleep(2)
             return c.put("/rest/firmware", json=payload)
 
-    def _wait(self, c: httpx.Client, uid: str) -> tuple[str, dict | None]:
+    def _wait(self, c: httpx.Client, uid: str, submitted: float = 0.0) -> tuple[str, dict | None]:
         """Poll until FACT finishes. Returns ('completed' | 'cancelled' | 'timeout', firmware summary or None);
         on timeout or cancellation the summary holds whatever FACT had analysed by then."""
         deadline = time.monotonic() + self.settings.fact_timeout_s
         while time.monotonic() < deadline:
             time.sleep(self.settings.fact_poll_s)
-            state = self._state(c, uid)
+            state = self._state(c, uid, submitted)
             if state == "running":
                 continue
             fw = self._fetch(c, uid)
@@ -203,10 +206,13 @@ class FactAdapter(ToolAdapter):
             return None
 
     @staticmethod
-    def _state(c: httpx.Client, uid: str) -> str:
+    def _state(c: httpx.Client, uid: str, since: float = 0.0) -> str:
         """'running' | 'finished' | 'cancelled' | 'unknown' from FACT's status endpoint
         (system_status.backend.analysis.{current_analyses, recently_finished_analyses,
-        recently_canceled_analyses}, unpacking.unpacking_queue)."""
+        recently_canceled_analyses}, unpacking.unpacking_queue).
+
+        FACT UIDs are content hashes, so a re-submitted file has the same UID as an earlier run: finished
+        and cancelled entries only count if FACT stamped them (time_finished) after our submission."""
         try:
             r = c.get("/rest/status")
             data = r.json()
@@ -214,12 +220,17 @@ class FactAdapter(ToolAdapter):
             return "running"
         backend = data.get("system_status", {}).get("backend", {}) or {}
         analysis = backend.get("analysis", {}) or {}
-        if uid in (analysis.get("recently_canceled_analyses") or {}):
-            return "cancelled"
-        if uid in (analysis.get("recently_finished_analyses") or {}):
-            return "finished"
         if uid in (analysis.get("current_analyses") or {}):
             return "running"
+
+        def ours(entries: dict) -> bool:
+            entry = (entries or {}).get(uid)
+            return isinstance(entry, dict) and float(entry.get("time_finished") or 0) >= since - CLOCK_SKEW_S
+
+        if ours(analysis.get("recently_canceled_analyses")):
+            return "cancelled"
+        if ours(analysis.get("recently_finished_analyses")):
+            return "finished"
         queued = (backend.get("unpacking", {}) or {}).get("unpacking_queue", 0) or 0
         return "running" if queued or analysis.get("analysis_main_scheduler", 0) else "unknown"
 

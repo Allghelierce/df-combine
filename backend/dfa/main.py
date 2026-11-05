@@ -492,10 +492,10 @@ def create_app(settings: Settings | None = None, start_worker: bool | None = Non
         if q:
             needle = q.lower()
             pk = [x for x in pk if needle in x["name"].lower() or needle in (x.get("source") or "").lower()]
-        owners = inv.get("owners") or {}
         from collections import Counter
-        files = Counter(owners.values())
-        items = [{**x, "owned_files": files.get(x["name"], 0)} for x in pk[offset:offset + limit]]
+        files = Counter((inv.get("owners") or {}).values()) if "owners" in inv else None  # None: not recorded
+        items = [{**x, "owned_files": files.get(x["name"], 0) if files is not None else None}
+                 for x in pk[offset:offset + limit]]
         return {"distro": inv.get("distro"), "managers": inv.get("managers", []), "total": len(pk),
                 "items": items}
 

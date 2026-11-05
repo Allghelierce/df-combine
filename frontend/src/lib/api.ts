@@ -49,7 +49,7 @@ export interface PackageItem {
   arch?: string | null;
   database?: string;
   purl?: string;
-  owned_files?: number;
+  owned_files?: number | null;
   vulnerabilities?: VulnRef[];
 }
 

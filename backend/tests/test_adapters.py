@@ -227,8 +227,9 @@ class SlowFact(FakeFact):
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         if request.url.path == "/rest/status":
+            import time as _t
             analysis = {"current_analyses": {} if self.cancel else {"abc_123": {}},
-                        "recently_canceled_analyses": {"abc_123": {}} if self.cancel else {}}
+                        "recently_canceled_analyses": {"abc_123": {"time_finished": _t.time()}} if self.cancel else {}}
             return httpx.Response(200, json={"system_status": {"backend": {"analysis": analysis}}})
         if request.url.path == "/rest/firmware/abc_123":
             return httpx.Response(200, json={"firmware": {"meta_data": {"number_of_included_files": 3311}, "analysis": {
@@ -256,3 +257,29 @@ def test_fact_timeout_or_cancel_keeps_partial_results(settings, tmp_path, monkey
         assert "did not finish within" in res.message
     assert sub["partial"] and "partial results so far" in res.message and "3312 file(s)" in res.message
     assert any("SshRsaPrivateKeyBlock" in f.title for f in res.findings)  # what FACT had already found is kept
+
+
+def test_fact_resubmission_ignores_previous_runs_entries(settings, tmp_path, monkeypatch):
+    """FACT UIDs are content hashes: an old 'cancelled' entry for the same file must not end a new run."""
+    import time as _t
+    settings.fact_url, settings.fact_poll_s, settings.fact_timeout_s = "http://fact.test", 0, 20
+    fake = FakeFact()
+    base_handler = fake.handler
+
+    def handler(request):
+        if request.url.path == "/rest/status":
+            fake.status_calls += 1
+            running = {"abc_123": {}} if fake.status_calls < 3 else {}
+            return httpx.Response(200, json={"system_status": {"backend": {"analysis": {
+                "current_analyses": running,
+                "recently_canceled_analyses": {"abc_123": {"time_finished": _t.time() - 3600}},
+                "recently_finished_analyses": {"abc_123": {"time_finished": _t.time()}} if not running else {}}}}})
+        return base_handler(request)
+    ad = fact.FactAdapter(settings)
+    monkeypatch.setattr(ad, "_client", lambda: httpx.Client(base_url="http://fact.test",
+                                                            transport=httpx.MockTransport(handler)))
+    inp = tmp_path / "fw.bin"
+    inp.write_bytes(b"firmware")
+    res = ad.execute(ctx_for(settings, {"identification": {}}, tmp_path, input_path=inp))
+    assert res.status == "completed", res.message
+    assert fake.status_calls >= 3  # waited while FACT listed the new run as current

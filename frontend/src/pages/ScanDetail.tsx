@@ -173,7 +173,7 @@ export default function ScanDetail() {
             <li key={s.key} className={`step ${s.state}`} title={s.note}>
               <span className="step-dot" />
               <span className="step-label">{s.label}</span>
-              <span className="step-state">{s.state}</span>
+              <span className="step-state">{s.note === "timeout" ? "timeout" : s.state}</span>
             </li>
           ))}
         </ol>
@@ -597,7 +597,9 @@ function Components({ scan }: { scan: Scan }) {
                     </td>
                     <td className="mono small">{p.version}</td>
                     <td className="mono small muted">{p.source && p.source !== p.name ? `${p.source} ${p.source_version ?? ""}` : "–"}</td>
-                    <td className="small">{p.owned_files ?? 0}</td>
+                    <td className="small" title={p.owned_files == null ? "file ownership was not recorded for this scan" : undefined}>
+                      {p.owned_files ?? "–"}
+                    </td>
                     <td>{p.vulnerabilities?.length ? <VulnList vulns={p.vulnerabilities} /> : <span className="muted small">none listed</span>}</td>
                   </tr>
                 ))}
