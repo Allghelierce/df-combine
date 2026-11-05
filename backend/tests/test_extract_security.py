@@ -884,3 +884,72 @@ def test_archives_that_are_not_unpacked_are_reported_not_hidden(tmp_path, run_an
         assert "not unpacked" in res.artifacts[0].extraction_note
         manifest = run_analysis(src)
         assert any(f["rule_id"] == "extraction-unsupported" for f in manifest["findings"]), name
+
+
+def test_trailing_data_after_tar_and_the_other_compressors(tmp_path):
+    """Found by review: data after a tar's end-of-archive marker, and after bzip2, lzma (alone), LZ4 and lzop data,
+    was dropped without a word. It now goes through the same trailing-data check as gzip/xz/zstd: padding and a
+    tiny tail (a kernel's size field) are ignored, anything else is analysed as an artifact of its own, starting
+    where a known format begins."""
+    import bz2
+    import gzip
+    import lzma
+    import subprocess
+
+    def tar(members: list[tuple[str, bytes]]) -> bytes:
+        b = io.BytesIO()
+        with tarfile.open(fileobj=b, mode="w") as tf:
+            for name, data in members:
+                ti = tarfile.TarInfo(name)
+                ti.size = len(data)
+                tf.addfile(ti, io.BytesIO(data))
+        return b.getvalue()
+
+    payload = tar([("etc/passwd", b"root::0:0::/root:/bin/sh\n")])
+    tail = b"appended content, not padding " * 40
+    cases: dict[str, tuple[bytes, bool]] = {
+        "junk.tar": (payload + tail, True),
+        "pad.tar.bz2": (bz2.compress(payload) + b"\xff" * 4096, False),
+        "multi.tar.bz2": (bz2.compress(payload[:5000]) + bz2.compress(payload[5000:]), False),
+        "tail.tar.bz2": (bz2.compress(payload) + tail, True),
+        "tail.tar.lzma": (lzma.compress(payload, format=lzma.FORMAT_ALONE) + tail, True),
+    }
+    lz4 = pytest.importorskip("lz4.frame")
+    cases["tail.tar.lz4"] = (lz4.compress(payload) + tail, True)
+    import lz4.block
+    legacy = b"\x02\x21\x4c\x18" + (lambda blk: len(blk).to_bytes(4, "little") + blk)(
+        lz4.block.compress(payload, store_size=False))
+    cases["kernel.lz4"] = (legacy + len(payload).to_bytes(4, "little"), False)  # size field after the data
+    if shutil.which("lzop"):
+        (tmp_path / "p.tar").write_bytes(payload)
+        subprocess.run(["lzop", "-q", "-f", str(tmp_path / "p.tar"), "-o", str(tmp_path / "p.tar.lzo")], check=True)
+        cases["tail.tar.lzo"] = ((tmp_path / "p.tar.lzo").read_bytes() + tail, True)
+    for name, (data, trailing) in cases.items():
+        src = tmp_path / name
+        src.write_bytes(data)
+        res = Extractor(tmp_path / f"w_{name}", Limits()).run(src, name)
+        assert res.artifacts[0].extraction != "failed", (name, res.artifacts[0].extraction_note)
+        if name != "kernel.lz4":
+            assert "/etc/passwd" in {a.name for a in res.artifacts if a.origin == "extracted"}, name
+        carved = [a for a in res.artifacts if a.name.startswith("trailing_") and a.origin == "carved"]
+        assert bool(carved) == trailing, (name, res.warnings)
+        if carved:  # starts exactly where the appended content does
+            assert ex_bytes(tmp_path / f"w_{name}", carved[0]).startswith(tail[:30]), name
+
+    if shutil.which("mkfs.ext4"):  # an ext image after padding starts on its block, boot-block zeros included
+        img = tmp_path / "ext.img"
+        tree = tmp_path / "exttree"
+        (tree / "etc").mkdir(parents=True)
+        (tree / "etc" / "group").write_text("root:x:0:\n")
+        subprocess.run(["mkfs.ext4", "-q", "-F", "-d", str(tree), "-b", "1024", str(img), "1M"], check=True,
+                       capture_output=True)
+        gz = gzip.compress(payload, mtime=0)
+        src = tmp_path / "with-ext.tar.gz"
+        src.write_bytes(gz + b"\x00" * (-len(gz) % 4096) + img.read_bytes())
+        res = Extractor(tmp_path / "w_ext", Limits()).run(src, src.name)
+        carved = [a for a in res.artifacts if a.name.startswith("trailing_") and a.origin == "carved"]
+        assert carved and carved[0].format == "ext" and carved[0].details["carved_offset"] == hex(-(-len(gz) // 4096) * 4096)
+
+
+def ex_bytes(work: Path, art) -> bytes:
+    return (work / art.path).read_bytes()

@@ -52,7 +52,7 @@ from .formats.simplefs import (
     parse_partitions,
     romfs_size,
 )
-from .identify import FormatInfo, detect_format, parse_uimage_header
+from .identify import HEAD_BYTES, FormatInfo, detect_format, detect_format_bytes, parse_uimage_header
 from .limits import ExtractionBudget, LimitExceeded, Limits
 from .text import escape_surrogates
 
@@ -515,8 +515,10 @@ class Extractor:
         with tarfile.open(src, mode="r:", ignore_zeros=True, tarinfo=_SkipCountingTarInfo) as tf:
             count = 0
             skipped = seen = 0  # blocks skipped before a member (trailing end-of-archive padding is not counted)
+            end = 0  # where the last member's data ends: anything after it but padding is analysed on its own
             for ti in tf:
                 count += 1
+                end = max(end, ti.offset_data + (-(-ti.size // 512) * 512 if ti.isreg() else 0))
                 if count > self.limits.max_files:
                     raise LimitExceeded(f"tar has more than {self.limits.max_files} entries")
                 skipped, seen = skipped + getattr(tf, "dfa_skipped_blocks", 0) - seen, getattr(tf, "dfa_skipped_blocks", 0)
@@ -553,7 +555,10 @@ class Extractor:
                                         "end-of-archive marker or a damaged header); the members after them were "
                                         "extracted too")
         self._record_fs(art, "tar", out)
-        return self._register_tree(art, out)
+        children = self._register_tree(art, out)
+        if end < art.size:  # e.g. an image appended after the archive's end-of-archive marker
+            children += self._trailing_data(art, src, end, "the tar archive")
+        return children
 
     def _decompress(self, art: Artifact, opener: Callable[[Path], BinaryIO], suffixes: Iterable[str]) -> list[Artifact]:
         src = self.path_of(art.id)
@@ -587,13 +592,23 @@ class Extractor:
                     break
                 pos += len(chunk)
             if data_at is None:
-                art.details["trailing_padding_bytes"] = art.size - off
+                if art.size > off:
+                    art.details["trailing_padding_bytes"] = art.size - off
                 return []
-            # start after the padding, but back on the 4 KiB boundary when only zeros lie in between: an image
-            # placed on an erase block may begin with zeros itself (ext's boot block)
+            if art.size - data_at <= 8:  # a size field or checksum after the data (kernel images), not content
+                art.details["trailing_bytes"] = art.size - off
+                return []
+            # start after the padding, or back on the 4 KiB boundary when only zeros lie in between (an image placed
+            # on an erase block may begin with zeros itself: ext's boot block); prefer whichever starts a known format
             cand = max(off, data_at - data_at % 4096)
             fp.seek(cand)
-            off = cand if not fp.read(data_at - cand).strip(b"\x00") else data_at
+            zeros_only = not fp.read(data_at - cand).strip(b"\x00")
+            off = data_at
+            for start in dict.fromkeys((data_at, cand) if zeros_only else (data_at,)):
+                fp.seek(start)
+                if detect_format_bytes(fp.read(HEAD_BYTES), art.size - start).format not in ("raw", "text", "empty"):
+                    off = start
+                    break
             size = art.size - off
             name = f"trailing_{off:08x}.bin"
             tdir = self.root / f"{art.id:05d}_trailing.d"
@@ -612,7 +627,7 @@ class Extractor:
                                 (".gz", ".tgz"))
 
     def h_bzip2(self, art: Artifact) -> list[Artifact]:
-        return self._decompress(art, lambda p: bz2.open(p, "rb"), (".bz2", ".tbz2"))
+        return self._decompress(art, lambda p: _ConcatenatedStreams(p, b"BZh", _Bz2StreamReader), (".bz2", ".tbz2"))
 
     def h_xz(self, art: Artifact) -> list[Artifact]:
         return self._decompress(art, lambda p: _ConcatenatedStreams(p, b"\xfd7zXZ\x00", _XzStreamReader),
@@ -1472,6 +1487,9 @@ class _LzmaReader:
         while True:
             if self.d.eof:
                 if self.fmt != lzma.FORMAT_XZ:
+                    end = self.fp.tell() - len(self.d.unused_data) - len(self.pending)
+                    if end < os.fstat(self.fp.fileno()).st_size:
+                        self.trailing_offset = end
                     return b""
                 rest = self.d.unused_data + self.pending
                 self.pending = b""
@@ -1518,6 +1536,14 @@ class _XzStreamReader:
         return self.fp.tell() - len(self.d.unused_data)
 
 
+class _Bz2StreamReader(_XzStreamReader):
+    """Exactly one bzip2 stream starting at the current position (same decompressor API as lzma)."""
+
+    def __init__(self, fp: BinaryIO) -> None:  # noqa: D107 - see the class docstring
+        self.fp = fp
+        self.d = bz2.BZ2Decompressor()  # type: ignore[assignment]
+
+
 class _ConcatenatedStreams:
     """Consecutive gzip members or xz streams in a file (both formats allow several), decoded one by one.
 
@@ -1543,7 +1569,7 @@ class _ConcatenatedStreams:
         while self.cur is not None:
             try:
                 out = self.cur.read(size)
-            except (zlib.error, lzma.LZMAError, EOFError):
+            except (zlib.error, lzma.LZMAError, EOFError, OSError):  # bz2 raises OSError("Invalid data stream")
                 if self.first or self.started:
                     raise
                 self.trailing_offset, self.cur = self.start, None  # began like a stream, but is not one
@@ -1551,7 +1577,7 @@ class _ConcatenatedStreams:
             if out:
                 self.started = True
                 return out
-            pos = self.cur.end_offset()
+            pos = end = self.cur.end_offset()
             self.fp.seek(pos)
             while (chunk := self.fp.read(64 * 1024)) and not chunk.strip(b"\x00"):
                 pos += len(chunk)  # zero padding (xz stream padding, dd'ed images)
@@ -1563,8 +1589,8 @@ class _ConcatenatedStreams:
                 self.fp.seek(pos)
                 self.start, self.first, self.started = pos, False, False
                 self.cur = self.member(self.fp)
-            else:
-                self.trailing_offset, self.cur = pos, None
+            else:  # from the stream's end: the zeros may belong to what follows (an ext image's boot block)
+                self.trailing_offset, self.cur = end, None
         return b""
 
 

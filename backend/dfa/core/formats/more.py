@@ -79,8 +79,17 @@ class _Limited:
 
 
 class _Reader:
+    """``trailing_offset``: where data after the last stream/block starts, for the caller to look at."""
+
     def __init__(self, path: Path) -> None:
         self.fp = path.open("rb")
+        self.size = os.fstat(self.fp.fileno()).st_size
+        self.trailing_offset: int | None = None
+
+    def _ends_at(self, pos: int) -> bytes:
+        if pos < self.size:
+            self.trailing_offset = pos
+        return b""
 
     def __enter__(self):
         return self
@@ -126,7 +135,7 @@ class Lz4FrameReader(_Reader):
                 if len(rest) < 4:
                     rest += self.fp.read(4 - len(rest))
                 if rest[:4] != self.MAGIC:
-                    return b""
+                    return self._ends_at(self.fp.tell() - len(rest))
                 self.d, self.pending = self._new(), rest  # concatenated frame
             if self.d.needs_input:
                 data, self.pending = self.pending or self.fp.read(64 * 1024), b""
@@ -158,8 +167,9 @@ class Lz4LegacyReader(_Reader):
             n = struct.unpack("<I", hdr)[0]
             if n == 0x184C2102:  # next concatenated stream
                 continue
-            if n == 0 or n > self.BLOCK + 65536:
-                return b""  # trailing data (e.g. kernel size field)
+            if n == 0 or n > self.BLOCK + 65536 or n > self.size - self.fp.tell():
+                # not a block (the format has no end marker): a kernel's size field, or other trailing data
+                return self._ends_at(self.fp.tell() - 4)
             block = self.fp.read(n)
             if len(block) < n:
                 raise EOFError("truncated LZ4 legacy block")
@@ -205,7 +215,7 @@ class LzopReader(_Reader):
             return b""
         dst_len = struct.unpack(">I", hdr)[0]
         if dst_len == 0:
-            return b""
+            return self._ends_at(self.fp.tell())
         if dst_len > 64 * 1024 * 1024:
             raise FormatError("lzop block too large")
         src_len = struct.unpack(">I", self.fp.read(4))[0]
