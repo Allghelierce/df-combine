@@ -391,14 +391,20 @@ def iter_cromfs(fp: BinaryIO, base: int, total_size: int, max_entries: int,
             raise FormatError("unterminated CROMFS name")
         return raw.split(b"\x00", 1)[0].decode("utf-8", "replace")
 
+    # Each directory's own list is walked completely before any of its subdirectories (stack of child lists).
     stack: list[tuple[int, str, int]] = [(hdr["root"], "", 0)]
     while stack:
         off, prefix, depth = stack.pop()
         while off:
             if off >= hdr["fsize"]:
                 break  # NuttX's cromfs_offset2addr() maps offsets >= cv_fsize to NULL: end of the list
-            if off in seen or off < 20:
-                raise FormatError("CROMFS node loop or offset inside the volume header")
+            if off < 20:
+                raise FormatError("CROMFS node offset inside the volume header")
+            if off in seen:
+                # The list runs into a node that is already listed. Real PX4 v1.15 images do this: the last
+                # entry of a subdirectory points to the parent's next entry ("threaded" lists), which the
+                # parent's list - walked first - has already yielded. It ends this list; it also ends a loop.
+                break
             seen.add(off)
             fp.seek(base + off)
             raw = fp.read(20)

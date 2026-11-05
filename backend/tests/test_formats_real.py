@@ -40,13 +40,29 @@ def test_cromfs_extracted_and_scanned(tmp_path, run_analysis):
     assert any(f["rule_id"] == "px4-cbrk_io_safety" for f in m["findings"])
 
 
-def test_cromfs_rejects_loops():
+def test_cromfs_loops_end_the_list():
+    """A peer pointing back to an already-listed node ends the list (no revisit, no endless walk)."""
     vol = bytearray(factory.cromfs({"a": b"x"}))
-    # make the file node's peer point back to the directory node
     import struct
-    struct.pack_into("<I", vol, 40 + 12, 20)
+    struct.pack_into("<I", vol, 40 + 12, 20)  # the file node's peer points back to the first node
+    entries = [e.name for e, _ in iter_cromfs(io.BytesIO(bytes(vol)), 0, len(vol), 100, 1 << 20)]
+    assert entries == ["init.d", "init.d/a"]
+    struct.pack_into("<I", vol, 40 + 12, 8)  # an offset inside the volume header is still malformed
     with pytest.raises(FormatError):
         list(iter_cromfs(io.BytesIO(bytes(vol)), 0, len(vol), 100, 1 << 20))
+
+
+@pytest.mark.skipif(not (REAL / "px4_v1.15.0_fmu-v5_default.px4").exists(), reason="PX4 v1.15.0 sample not fetched")
+def test_real_px4_v1_15_threaded_cromfs(run_analysis):
+    """PX4 v1.15.0's /etc CROMFS ends subdirectory lists by pointing to the parent's next entry; all files are
+    extracted at their real paths (no 'loop' error, nothing listed twice or under the wrong directory)."""
+    m = run_analysis(REAL / "px4_v1.15.0_fmu-v5_default.px4")
+    arts = m["extraction"]["artifacts"]
+    assert not [a for a in arts if a.get("extraction") == "failed"]
+    names = [a["name"] for a in arts if a.get("origin") == "extracted"]
+    assert len(names) == len(set(names))
+    assert {"/init.d/rcS", "/extras/px4_io-v2_default.bin", "/init.d/airframes/4001_quad_x"} <= set(names)
+    assert not any(n.startswith("/extras/init.d") for n in names)
 
 
 def test_cromfs_offset_at_or_past_fsize_ends_the_list():

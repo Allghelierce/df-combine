@@ -26,7 +26,7 @@ APSITL = "https://dronekit-assets.s3.amazonaws.com/sitl/"
 BETAFLIGHT = "https://github.com/betaflight/betaflight/releases/download/"
 INAV = "https://github.com/iNavFlight/inav/releases/download/"
 SAMPLES = {
-    # name: (sha256, size, description[, url])
+    # name: (sha256, size, description[, url]) - url is a base (ending in '/') or the file's full URL
     "px4_fmu-v5_default.px4": ("b50b275507da4cb0e218c943c2aff5359e3f0914c18f6b563494b925c0a0e403", 1881838,
                                "PX4 v1.17.0 for FMUv5 (Pixhawk 4), official .px4 container"),
     "px4_fmu-v6x_default.px4": ("3206a5f445d85be730a4f6158d8fdd414b9cfab27fa84bbc05c6a6752deac284", 1824468,
@@ -35,6 +35,14 @@ SAMPLES = {
                                "PX4 v1.17.0 for FMUv2 (Pixhawk 1), official .px4 container"),
     "ark_can-flow_canbootloader.px4": ("36394d7c70153cbc19ea77259fd5c3205fb263194134e62d0ce865e04103a202", 21687,
                                        "PX4 CAN bootloader for ARK Flow"),
+    # earlier official releases of the same board (versioned folders of the same bucket)
+    "px4_v1.15.0_fmu-v5_default.px4": (
+        "792eb47d9241a279b83e532f3a24c99833e10856b6c4f35eb23c46bca7f64a66", 1897294,
+        "PX4 v1.15.0 for FMUv5 ('threaded' CROMFS directory lists)",
+        "https://px4-travis.s3.amazonaws.com/Firmware/v1.15.0/px4_fmu-v5_default.px4"),
+    "px4_v1.16.2_fmu-v5_default.px4": (
+        "0eda4323502126a2ee0a017a3e5b1e024327db5fc19b82cd0bb5562331a1bdfe", 1909718,
+        "PX4 v1.16.2 for FMUv5", "https://px4-travis.s3.amazonaws.com/Firmware/v1.16.2/px4_fmu-v5_default.px4"),
     "px4_fmu-v2_default.elf": ("372115d6f53b76a024ef03de640ed5132a61c4b5bfe668cc5c447e4a322d917e", 22976388,
                                "PX4 v1.17.0 FMUv2 unstripped ELF (symbols + DWARF)"),
     "px4_fmu-v5_default.elf": ("4ff1bbb8b9ae1be361b2d5e0993fce4981bacf17373e34f20954bb4c0e219432", 47202280,
@@ -104,7 +112,7 @@ def fetch(dest: Path, names: list[str] | None = None) -> dict[str, Path]:
         if not (p.exists() and hashlib.sha256(p.read_bytes()).hexdigest() == sha):
             print(f"downloading {name} ({size:,} bytes) - {desc}")
             tmp = p.with_suffix(p.suffix + ".part")
-            src = (url[0] if url else BASE) + Path(name).name
+            src = url[0] if url and not url[0].endswith("/") else (url[0] if url else BASE) + Path(name).name
             with urllib.request.urlopen(src, timeout=300) as r, tmp.open("wb") as fp:  # noqa: S310
                 while chunk := r.read(1 << 20):
                     fp.write(chunk)

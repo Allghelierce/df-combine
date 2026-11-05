@@ -875,5 +875,87 @@
    "distro": null,
    "owned_files": 0
   }
+ },
+ "px4_v1.15.0_fmu-v5_default.px4": {
+  "components": [
+   "nuttx 11.0.0",
+   "px4 1.15.0"
+  ],
+  "extraction": {
+   "artifacts": 84,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 3,
+    "cromfs": 1,
+    "empty": 1,
+    "px4": 1,
+    "text": 74,
+    "xz": 4
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:drone:px4-cbrk_io_safety": 5,
+   "builtin:drone:px4-cbrk_io_safety-sim": 5,
+   "builtin:drone:px4-cbrk_supply_chk": 1,
+   "builtin:drone:px4-cbrk_supply_chk-sim": 5
+  },
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": 50,
+   "board_name": null,
+   "endianness": "little",
+   "format": "px4",
+   "os_hint": "bare-metal",
+   "platform": "PX4",
+   "platform_version": "1.15.0",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "px4_v1.16.2_fmu-v5_default.px4": {
+  "components": [
+   "nuttx 11.0.0",
+   "px4 1.16.2"
+  ],
+  "extraction": {
+   "artifacts": 85,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 3,
+    "cromfs": 1,
+    "empty": 2,
+    "px4": 1,
+    "text": 74,
+    "xz": 4
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:drone:px4-cbrk_supply_chk": 1,
+   "builtin:drone:px4-cbrk_supply_chk-sim": 6
+  },
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": 50,
+   "board_name": null,
+   "endianness": "little",
+   "format": "px4",
+   "os_hint": "bare-metal",
+   "platform": "PX4",
+   "platform_version": "1.16.2",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
  }
 }
