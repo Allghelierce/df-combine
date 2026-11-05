@@ -41,7 +41,7 @@ from .config import Settings, get_settings
 from .db import get_session, init_engine, session_scope
 from .models import ApiToken, FindingRow, Scan, ScanEvent, User
 from .reports.export import finding_to_dict, json_report, pdf_report, scan_to_dict
-from .sandbox import resolve_mode
+from .sandbox import remove_workdir, resolve_mode
 from .worker import Worker
 
 log = logging.getLogger("dfa.api")
@@ -448,7 +448,10 @@ def create_app(settings: Settings | None = None, start_worker: bool | None = Non
         if scan.status == "running":
             raise HTTPException(409, "cannot delete a running scan")
         Path(scan.stored_path).unlink(missing_ok=True)
-        shutil.rmtree(settings.work_root / scan_id, ignore_errors=True)
+        try:
+            remove_workdir(scan_id, settings)
+        except Exception as exc:  # noqa: BLE001 - the record goes; leftover files are logged for the operator
+            log.warning("could not remove work directory of scan %s: %s", scan_id, exc)
         db.delete(scan)
         db.commit()
         return Response(status_code=204)

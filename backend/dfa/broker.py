@@ -76,13 +76,16 @@ class BrokerHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         if not self._authorized():
             return self._send(401, {"error": "unauthorized"})
-        if self.path != "/v1/jobs":
+        if self.path not in ("/v1/jobs", "/v1/workdirs"):
             return self._send(404, {"error": "not found"})
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0 or length > MAX_BODY:
             return self._send(400, {"error": "missing or oversized request body"})
         try:
             req = json.loads(self.rfile.read(length))
+            if self.path == "/v1/workdirs":
+                self.executor.workdir(req["scan_id"], req["action"])
+                return self._send(200, {"status": "ok"})
             profile, scan_id, params = req["profile"], req["scan_id"], req.get("params") or {}
             if profile not in PROFILES or not isinstance(params, dict):
                 raise JobRejected("unknown profile or malformed params")
@@ -109,7 +112,9 @@ def serve(socket_path: Path, settings: Settings, mode: int = 0o660, group: str |
     socket_path.parent.mkdir(parents=True, exist_ok=True)
     if socket_path.exists() or socket_path.is_symlink():
         socket_path.unlink()
-    handler = type("Handler", (BrokerHandler,), {"executor": DockerJobExecutor(settings), "token": token})
+    executor = DockerJobExecutor(settings)
+    executor.secure_work_root()
+    handler = type("Handler", (BrokerHandler,), {"executor": executor, "token": token})
     server = ThreadingUnixServer(str(socket_path), handler)
     os.chmod(socket_path, mode)
     if group:

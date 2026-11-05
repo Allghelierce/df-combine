@@ -101,7 +101,7 @@ def test_profile_command_is_hardened(settings):
 def test_job_output_is_handed_back_to_the_worker(settings, monkeypatch):
     """The broker chowns the writable tree to the tool UID for the job and back to the worker afterwards."""
     settings.ensure_dirs()
-    os.chown(settings.work_root, 12345, 12346)  # the (unprivileged) worker owns the work root
+    os.chown(settings.data_dir, 12345, 12346)  # the (unprivileged) worker owns the data directory
     sid = str(uuid.uuid4())
     (settings.uploads_dir / f"{sid}.bin").write_bytes(b"x")
     work = settings.work_root / sid
@@ -178,6 +178,38 @@ def test_broker_never_chowns_through_symlinks(settings, tmp_path):
     assert after == before
 
 
+@pytest.mark.skipif(os.getuid() != 0, reason="broker-managed directories need root (as the broker runs)")
+def test_broker_owns_work_root_and_manages_scan_dirs(settings, tmp_path):
+    """The worker cannot replace work/<id> (a bind-mount source) because only the broker can write the
+    work root; the broker resets and removes scan directories without following links."""
+    settings.ensure_dirs()
+    os.chown(settings.data_dir, 12345, 12346)
+    os.chown(settings.work_root, 12345, 12346)  # as left by an older version
+    victim = tmp_path / "outside"
+    victim.mkdir()
+    (victim / "keep.txt").write_text("x")
+    ex = DockerJobExecutor(settings)
+    sid = str(uuid.uuid4())
+    work = settings.work_root / sid
+    work.mkdir()
+    (work / "files").mkdir()
+    (work / "files" / "a.bin").write_bytes(b"1")
+    (work / "files" / "link").symlink_to(victim)  # attacker-chosen link inside the tree
+    ex.workdir(sid, "reset")
+    st = os.stat(settings.work_root)
+    assert (st.st_uid, st.st_gid, st.st_mode & 0o777) == (0, 0, 0o755)
+    assert list(work.iterdir()) == [] and (os.stat(work).st_uid, os.stat(work).st_gid) == (12345, 12346)
+    assert (victim / "keep.txt").exists()  # the link was removed, not followed
+    os.rmdir(work)
+    work.symlink_to(victim)  # a link where the scan directory should be
+    ex.workdir(sid, "reset")
+    assert work.is_dir() and not work.is_symlink() and (victim / "keep.txt").exists()
+    ex.workdir(sid, "remove")
+    assert not work.exists() and (victim / "keep.txt").exists()
+    with pytest.raises(JobRejected):
+        ex.workdir("../etc", "reset")
+
+
 def _with_streams(proc):
     import io
     proc.stdout, proc.stderr = io.BytesIO(), io.BytesIO()
@@ -252,3 +284,34 @@ def test_docker_mode_filesystems(settings, fixtures, key):
     if key == "ext4":
         assert arts["/bin/busybox"]["mode"] == 0o4755
     assert any(f["rule_id"] == "empty-password" for f in res.manifest["findings"])
+
+
+def test_broker_protocol_over_unix_socket(settings, tmp_path):
+    """The real broker server and client: work directory management, rejected requests, token check."""
+    import threading
+
+    from dfa.broker import serve
+    from dfa.containers import BrokerRunner, JobError
+    settings.ensure_dirs()
+    sock = tmp_path / "b.sock"
+    server = serve(sock, settings, token="s3cret-token")
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        client = BrokerRunner(settings.model_copy(update={"broker_socket": sock, "broker_token": "s3cret-token"}))
+        sid = str(uuid.uuid4())
+        (settings.uploads_dir / f"{sid}.bin").write_bytes(b"x")
+        client.workdir(sid, "reset")
+        assert (settings.work_root / sid).is_dir()
+        client.workdir(sid, "remove")
+        assert not (settings.work_root / sid).exists()
+        with pytest.raises(JobRejected):
+            client.workdir("../../etc", "reset")
+        with pytest.raises(JobRejected):
+            client.run("shell", sid, {"cmd": "id"})  # only the fixed profiles exist
+        intruder = BrokerRunner(settings.model_copy(update={"broker_socket": sock, "broker_token": "guess"}))
+        with pytest.raises(JobError):
+            intruder.workdir(sid, "reset")
+        assert not (settings.work_root / sid).exists()
+    finally:
+        server.shutdown()
+        server.server_close()

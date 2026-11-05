@@ -185,15 +185,19 @@ def test_dji_imah_plaintext_only(tmp_path):
 
 
 def test_arch_guess_on_raw_code(tmp_path, run_analysis):
-    import os
-
     from dfa.core.formats.arch import guess_architecture
-    arm = (b"\x00\x48\x2d\xe9" + os.urandom(28) + b"\x1e\xff\x2f\xe1" + os.urandom(28)) * 200
+    rnd = random.Random(7)
+
+    def code(prologue: bytes, epilogue: bytes, n: int = 200) -> bytes:
+        # fresh filler per function: a repeated random block could itself contain another ISA's opcodes 200x
+        return b"".join(prologue + rnd.randbytes(28) + epilogue + rnd.randbytes(28) for _ in range(n))
+
+    arm = code(b"\x00\x48\x2d\xe9", b"\x1e\xff\x2f\xe1")  # push {.., lr} / bx lr
     g = guess_architecture(arm)
     assert g and g.architecture == "ARM (32-bit)"
-    mips = (b"\x27\xbd\xff\xe0" + os.urandom(24) + b"\x03\xe0\x00\x08" + os.urandom(28)) * 200
+    mips = code(b"\x27\xbd\xff\xe0", b"\x03\xe0\x00\x08")  # addiu sp, sp, -32 / jr ra
     assert guess_architecture(mips).architecture == "MIPS" and guess_architecture(mips).endianness == "big"
-    assert guess_architecture(os.urandom(1 << 20)) is None
+    assert guess_architecture(rnd.randbytes(1 << 20)) is None
     p = tmp_path / "blob.bin"
     p.write_bytes(b"\x01" * 64 + mips)
     m = run_analysis(p)

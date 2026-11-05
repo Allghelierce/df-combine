@@ -39,6 +39,9 @@ to run one of four job profiles for a scan:
 | `cwe_checker` | cwe_checker image | `cwe_checker <target> --json --quiet [--bare-metal-config …]` | `/work/tools/cwe_checker` |
 | `ghidra` | cwe_checker image | `analyzeHeadless … -postScript DfaExport.java …` | `/work/tools/ghidra` |
 
+The broker also owns the work root and is the only component that creates, resets or removes scan
+directories, so the bind-mount source of a job is never a path the worker can replace.
+
 The broker builds the complete `docker run` command itself. The request only names the profile, the
 scan ID and a few typed parameters, and the broker validates them:
 
@@ -165,11 +168,13 @@ links), `tests/test_auth.py` and `tests/test_api.py`.
 
 * The broker is root-equivalent with a rootful Docker daemon; run it on a dedicated analysis host/VM
   or with a rootless daemon / gVisor.
-* Bind-mount sources (`work/<id>`, `uploads/<id>.bin`) are checked with `lstat`, but Docker resolves
-  them again when it creates the container. A compromised worker that wins that race could get a
-  sandbox container (non-root, no capabilities, no network) to mount a different host path. Closing
-  this completely needs a work root that only the broker can write (scan directories created by the
-  broker); until then the data directory should live on a dedicated volume.
+* Bind-mount sources are re-resolved by Docker when it creates a container. The scan directory cannot
+  be swapped: the broker owns the work root (`root:root 0755`) and creates, resets and removes scan
+  directories itself (`/v1/workdirs`), so the worker can write inside its scan directory but cannot
+  replace it. The upload file (`uploads/<id>.bin`, written by the API) is checked with `lstat`; a
+  compromised API that wins the race could make a sandbox container read a different host file
+  (read-only, as a non-root user without capabilities). This protection needs the broker to run as
+  root (as in Compose); a broker running as an ordinary docker-group user cannot own the work root.
 * SQLite and local storage: single node. Put the API behind a TLS-terminating reverse proxy and set
   `DFA_SESSION_COOKIE_SECURE=true`.
 * FACT is a separate service with its own security model; only submit firmware you are allowed to

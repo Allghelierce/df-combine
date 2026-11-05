@@ -86,6 +86,30 @@ def resolve_mode(settings: Settings) -> tuple[str, str]:
     return "local", "Docker sandbox unavailable - fell back to local subprocess with rlimits (no container isolation)"
 
 
+def reset_workdir(scan_id: str, settings: Settings) -> Path:
+    """Fresh, empty work directory for a scan. With container isolation the broker (or Docker executor)
+    creates it, because only the broker may write the work root (see docs/SECURITY.md)."""
+    work = settings.work_root / scan_id
+    mode, _ = resolve_mode(settings)
+    if mode in ("docker", "broker"):
+        from .containers import get_runner
+        get_runner(settings).workdir(scan_id, "reset")
+    else:
+        if work.exists() or work.is_symlink():
+            shutil.rmtree(work) if work.is_dir() and not work.is_symlink() else work.unlink()
+        work.mkdir(parents=True)
+    return work
+
+
+def remove_workdir(scan_id: str, settings: Settings) -> None:
+    mode, _ = resolve_mode(settings)
+    if mode in ("docker", "broker"):
+        from .containers import get_runner
+        get_runner(settings).workdir(scan_id, "remove")
+    else:
+        shutil.rmtree(settings.work_root / scan_id, ignore_errors=True)
+
+
 def scan_id_for(input_path: Path, work_dir: Path, settings: Settings) -> str:
     """Container jobs address scans by id; the paths must follow the standard data-dir layout."""
     scan_id = work_dir.name
@@ -114,7 +138,8 @@ def _pump_progress(work_dir: Path, progress: Callable[[str], None] | None, seen:
 def run_analysis(input_path: Path, original_name: str, work_dir: Path, settings: Settings,
                  progress: Callable[[str], None] | None = None) -> SandboxResult:
     mode, explanation = resolve_mode(settings)
-    work_dir.mkdir(parents=True, exist_ok=True)
+    if not work_dir.is_dir():
+        work_dir.mkdir(parents=True)
     os.chmod(work_dir, 0o755)
     t0 = time.monotonic()
     if mode in ("docker", "broker"):

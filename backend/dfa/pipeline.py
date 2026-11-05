@@ -15,7 +15,7 @@ from .config import Settings
 from .core.findings import SEVERITY_ORDER, Finding, aggregate, attribute_packages, correlate, dedupe
 from .db import session_scope
 from .models import FindingRow, Scan, ScanEvent, ToolRun
-from .sandbox import SandboxError, run_analysis
+from .sandbox import SandboxError, reset_workdir, run_analysis
 
 SEVERITY_WEIGHT = {"critical": 40, "high": 15, "medium": 5, "low": 1, "info": 0}
 CLASS_WEIGHT = {"detected": 1.0, "suspicious": 0.6, "unverified": 0.5, "info": 0.0}
@@ -62,10 +62,7 @@ def process_scan(scan_id: str, settings: Settings) -> None:
         name = scan.original_filename
         s.execute(delete(ToolRun).where(ToolRun.scan_id == scan_id))
         s.execute(delete(FindingRow).where(FindingRow.scan_id == scan_id))
-    work = settings.work_root / scan_id
-    if work.exists():
-        import shutil
-        shutil.rmtree(work)
+    work = reset_workdir(scan_id, settings)
 
     # ---- stage 1: sandboxed identification / extraction / built-in scanning ----
     log_event(scan_id, "sandbox", "Starting isolated analysis (identify, extract, built-in scanners)", progress=5)

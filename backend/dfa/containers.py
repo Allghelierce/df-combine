@@ -270,8 +270,50 @@ class DockerJobExecutor:
             if work_fd != fd:
                 os.close(work_fd)
 
+    def _worker_identity(self) -> tuple[int, int]:
+        """The worker's UID/GID: owner of the data directory (it creates uploads and the database)."""
+        st = os.stat(self.settings.data_dir, follow_symlinks=False)
+        return st.st_uid, st.st_gid
+
+    def secure_work_root(self) -> None:
+        """As root, own the work root so the worker can create files inside scan directories but can never
+        replace a scan directory (a bind-mount source) with a link between our checks and Docker's mount."""
+        root = self.settings.work_root
+        root.mkdir(parents=True, exist_ok=True)
+        if os.getuid() != 0:
+            return
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            st = os.fstat(fd)
+            if (st.st_uid, st.st_gid) != (0, 0) or stat.S_IMODE(st.st_mode) != 0o755:
+                os.fchown(fd, 0, 0)
+                os.fchmod(fd, 0o755)
+        finally:
+            os.close(fd)
+
+    def workdir(self, scan_id: str, action: str) -> None:
+        """'reset': empty work/<id>, owned by the worker; 'remove': delete it. Never follows links."""
+        if not _SCAN_ID.match(scan_id or "") or action not in ("reset", "remove"):
+            raise JobRejected("invalid work directory request")
+        self.secure_work_root()
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        root_fd = os.open(self.settings.work_root, flags)
+        try:
+            _rmtree_at(root_fd, scan_id)
+            if action == "reset":
+                os.mkdir(scan_id, 0o755, dir_fd=root_fd)
+                fd = os.open(scan_id, flags, dir_fd=root_fd)
+                try:
+                    if os.getuid() == 0:
+                        os.fchown(fd, *self._worker_identity())
+                    os.fchmod(fd, 0o755)
+                finally:
+                    os.close(fd)
+        finally:
+            os.close(root_fd)
+
     def _restore_owner(self, scan_id: str, prof: Profile) -> None:
-        """Give the job's output back to the owner of the work root (the worker's UID), so an unprivileged
+        """Give the job's output back to the worker's UID (owner of the data directory), so an unprivileged
         worker can read, post-process and finally delete it."""
         sub = self._writable_subdir(prof)
         if sub is None or os.getuid() != 0:
@@ -281,8 +323,8 @@ class DockerJobExecutor:
         except JobRejected:
             return
         try:
-            st = os.stat(self.settings.work_root, follow_symlinks=False)
-            self._chown_tree_fd(fd, st.st_uid, st.st_gid, skip="tools" if sub == "" else None)
+            uid, gid = self._worker_identity()
+            self._chown_tree_fd(fd, uid, gid, skip="tools" if sub == "" else None)
         finally:
             os.close(fd)
             if work_fd != fd:
@@ -456,6 +498,9 @@ class DirectDockerRunner:
     def capabilities(self) -> dict:
         return self.executor.capabilities()
 
+    def workdir(self, scan_id: str, action: str) -> None:
+        self.executor.workdir(scan_id, action)
+
 
 class _UnixHTTPConnection(http.client.HTTPConnection):
     def __init__(self, path: str, timeout: float) -> None:
@@ -509,6 +554,30 @@ class BrokerRunner:
             return self._call("GET", "/v1/capabilities")
         except JobError as exc:
             return {"docker": False, "images": {}, "error": str(exc)}
+
+    def workdir(self, scan_id: str, action: str) -> None:
+        self._call("POST", "/v1/workdirs", {"scan_id": scan_id, "action": action}, timeout=600)
+
+
+def _rmtree_at(parent_fd: int, name: str) -> None:
+    """Remove parent/name without following any symbolic link (a link at the top is just unlinked)."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return
+    except OSError:  # a symlink or other non-directory: remove the entry itself
+        os.unlink(name, dir_fd=parent_fd)
+        return
+    try:
+        for _dirpath, dirs, files, dfd in os.fwalk(".", dir_fd=fd, topdown=False, follow_symlinks=False):
+            for entry in files + dirs:
+                if stat.S_ISDIR(os.stat(entry, dir_fd=dfd, follow_symlinks=False).st_mode):
+                    os.rmdir(entry, dir_fd=dfd)
+                else:
+                    os.unlink(entry, dir_fd=dfd)
+    finally:
+        os.close(fd)
+    os.rmdir(name, dir_fd=parent_fd)
 
 
 def get_runner(settings: Settings) -> DirectDockerRunner | BrokerRunner:
