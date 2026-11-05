@@ -1,4 +1,4 @@
-import { buildLine, formatBytes, formatDuration, imageSummary, inventoryCount, riskLabel, shortHash, toolStatusTone } from "../lib/format";
+import { buildLine, externalUrl, formatBytes, formatDuration, imageSummary, inventoryCount, riskLabel, shortHash, toolStatusTone } from "../lib/format";
 
 describe("format helpers", () => {
   it("formats bytes", () => {
@@ -48,5 +48,20 @@ describe("inventory counter", () => {
     // Debian 11 rootfs: 3,000+ artifacts, more than the rendered rows
     expect(inventoryCount(3033, 3033, 3033)).toBe("showing 1,500 of 3,033 matching · 3,033 artifacts — filter to narrow");
     expect(inventoryCount(12, 5000, 20000)).toBe("12 matching · 20,000 artifacts (first 5,000 loaded)");
+  });
+});
+
+describe("finding references", () => {
+  it("links only absolute http(s) URLs", () => {
+    expect(externalUrl("https://nvd.nist.gov/vuln/detail/CVE-2021-3711")).toBe("https://nvd.nist.gov/vuln/detail/CVE-2021-3711");
+    expect(externalUrl("HTTP://example.org")).toBe("http://example.org/");
+    expect(externalUrl("javascript:alert(1)")).toBeNull();
+    expect(externalUrl("httpx:alert(1)")).toBeNull();
+    expect(externalUrl("http:javascript:alert(1)")).toBeNull();
+    expect(externalUrl("data:text/html,<script>alert(1)</script>")).toBeNull();
+    expect(externalUrl("//evil.example/x")).toBeNull();
+    expect(externalUrl("http-proxy/../../api/scans")).toBeNull();
+    expect(externalUrl("CVE-2021-3711")).toBeNull();
+    expect(externalUrl("https://")).toBeNull();
   });
 });

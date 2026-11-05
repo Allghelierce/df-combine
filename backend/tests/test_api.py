@@ -296,3 +296,30 @@ def test_cyclonedx_sbom(client, settings, fixtures):
     assert props["dfa:platform"] == "PX4" and props["dfa:board"] == "PX4FMUv5" and props["dfa:board-id"] == "50"
     assert all(c.get("bom-ref") for c in bom["components"])
     assert bom["dependencies"][0]["ref"] == comp["bom-ref"]
+
+
+def test_file_names_that_are_not_utf8_do_not_break_a_scan(client, settings, tmp_path):
+    """Archive member names are bytes; a name with an invalid UTF-8 byte (0x80) reaches the manifest as a lone
+    surrogate. Before the fix the database rejected it and the scan failed after the analysis had finished."""
+    import io
+    import tarfile
+    key = (b"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun\n"
+           b"-----END RSA PRIVATE KEY-----\n")
+    src = tmp_path / "rootfs.tar.gz"
+    with tarfile.open(src, "w:gz", format=tarfile.GNU_FORMAT, encoding="utf-8", errors="surrogateescape") as tf:
+        for name, data in [("etc/passwd", b"root:x:0:0:root:/root:/bin/sh\n"), ("etc/os-release", b"ID=probe\n"),
+                           (b"home/user\x80dir/.ssh/id_rsa".decode("utf-8", "surrogateescape"), key)]:
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            tf.addfile(ti, io.BytesIO(data))
+    scan = upload(client, src)
+    process_all(settings)
+    d = client.get(f"/api/scans/{scan['id']}").json()
+    assert d["status"] == "completed", d.get("error")
+    items = client.get(f"/api/scans/{scan['id']}/findings").json()["items"]
+    keyf = [f for f in items if "id_rsa" in f["affected_component"]]
+    assert keyf and all("\\x80" in f["affected_component"] for f in keyf), [f["affected_component"] for f in items]
+    arts = [a for a in client.get(f"/api/scans/{scan['id']}/artifacts").json()["items"] if "id_rsa" in a["name"]]
+    assert arts and all("\\x80" in a["name"] for a in arts), arts
+    for route in ("report.json", "report.pdf", "report.sarif", "sbom.cdx.json"):
+        assert client.get(f"/api/scans/{scan['id']}/{route}").status_code == 200, route

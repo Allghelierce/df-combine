@@ -129,3 +129,15 @@ export function inventoryCount(matching: number, loaded: number, total: number):
   if (matching > INVENTORY_ROWS) text += " — filter to narrow";
   return text;
 }
+
+/** The link target for a finding reference, or null when it must be shown as plain text. References can come
+ * from the sandbox, which processes hostile firmware, so only absolute http(s) URLs become links. */
+export function externalUrl(ref: string): string | null {
+  if (!/^https?:\/\//i.test(ref)) return null;
+  try {
+    const u = new URL(ref);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.href : null;
+  } catch {
+    return null;
+  }
+}

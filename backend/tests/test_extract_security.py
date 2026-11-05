@@ -344,7 +344,9 @@ def test_generated_hostile_archives_keep_extraction_invariants(tmp_path):
     """Property check with seeded random tar/zip archives: traversal and absolute names, links to /etc, hard
     links, devices, FIFOs, setuid modes, control characters, duplicates. After every run nothing exists outside
     the work directory, nothing below it is a link or special file, nothing is setuid/setgid or world-writable,
-    and the extractor either completes or raises one of its declared errors (scripts-level version: 1,500)."""
+    and the extractor either completes or raises one of its declared errors (scripts-level version: 1,500).
+    Some names carry bytes that are not UTF-8 (tar: surrogateescape; zip: flagged UTF-8 anyway): every reported
+    name must still be valid UTF-8 and no archive may be left unextracted because of one."""
     import io
     import os
     import random
@@ -358,7 +360,7 @@ def test_generated_hostile_archives_keep_extraction_invariants(tmp_path):
     from dfa.core.limits import LimitExceeded, Limits
     rng = random.Random(20261105)
     pieces = ["..", ".", "", "etc", "bin", "a b", "x‮y", "été", "CON", "-rf", "~", "a" * 300, "\x01c",
-              "back\\slash", "c:", "dir", "dir/../..", "//", "./.."]
+              "back\\slash", "c:", "dir", "dir/../..", "//", "./..", "MARK", "MARK"]
 
     def name() -> str:
         n = "/".join(rng.choice(pieces) for _ in range(rng.randint(1, 5)))
@@ -374,7 +376,7 @@ def test_generated_hostile_archives_keep_extraction_invariants(tmp_path):
         if src.suffix == ".tar":
             with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tf:
                 for _ in range(rng.randint(1, 10)):
-                    ti = tarfile.TarInfo(name())
+                    ti = tarfile.TarInfo(name().replace("MARK", "M\udc80RK"))  # byte 0x80, surrogateescape
                     ti.type = rng.choice([tarfile.REGTYPE] * 4 + [tarfile.DIRTYPE, tarfile.SYMTYPE, tarfile.LNKTYPE,
                                                                    tarfile.CHRTYPE, tarfile.FIFOTYPE])
                     ti.mode = rng.choice([0o644, 0o4755, 0o2755, 0o777, 0o7777])
@@ -392,12 +394,28 @@ def test_generated_hostile_archives_keep_extraction_invariants(tmp_path):
                     zi = zipfile.ZipInfo(name())
                     zi.create_system, zi.external_attr = 3, rng.choice([0o100644, 0o104755, 0o120777, 0o010644]) << 16
                     zf.writestr(zi, rng.choice([b"/etc/passwd", b"../../../x", rng.randbytes(64)]))
+            raw = bytearray(buf.getvalue().replace(b"MARK", b"M\x80RK"))  # same length: offsets stay valid
+            if rng.random() < 0.7:  # flag every name UTF-8, as a tool that always sets the flag would
+                for sig, at in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
+                    j = raw.find(sig)
+                    while j >= 0:
+                        raw[j + at + 1] |= 0x08
+                        j = raw.find(sig, j + 4)
+            buf = io.BytesIO(bytes(raw))
         src.write_bytes(buf.getvalue())
         work = case / "work"
         try:
-            produced += len(Extractor(work, Limits()).run(src, src.name).artifacts) - 1
-        except (FormatError, LimitExceeded, ValueError):
-            pass
+            res = Extractor(work, Limits()).run(src, src.name)
+        except (FormatError, LimitExceeded, ValueError) as exc:
+            assert not isinstance(exc, UnicodeError), (i, exc)
+            res = None
+        if res:
+            produced += len(res.artifacts) - 1
+            for a in res.artifacts:
+                a.name.encode("utf-8"), a.path.encode("utf-8")  # storable in SQLite, servable as JSON
+                assert "UnicodeDecodeError" not in (a.extraction_note or ""), (i, a.extraction_note)
+            for ln in res.links:
+                ln.path.encode("utf-8"), (ln.target or "").encode("utf-8")
         assert not any((case / "canary").iterdir()) and set(os.listdir(case)) <= {"canary", "work", src.name}, i
         for dirpath, dirnames, filenames in os.walk(work):
             for n in dirnames + filenames:
@@ -437,3 +455,92 @@ def test_permission_image_for_unix_zip_root_filesystems(tmp_path):
     res = Extractor(tmp_path / "w2", Limits()).run(tmp_path / "dos.zip", "dos.zip")
     fs = next(f for f in res.filesystems if f["type"] == "zip")
     assert "mode_image" not in fs and "unix_modes" not in fs
+
+
+def test_names_that_are_not_utf8_get_one_visible_name_on_disk_and_in_the_manifest(tmp_path):
+    """Non-UTF-8 bytes in member names (tar via safe_member_path, external tools via the tree walk) are shown
+    as a literal \\xNN, and the file on disk carries that same name, so the adapters can open what is reported."""
+    import io
+    import subprocess
+    import tarfile
+    bad = b"user\x80dir".decode("utf-8", "surrogateescape")
+    src = tmp_path / "t.tar"
+    with tarfile.open(src, "w", format=tarfile.GNU_FORMAT, encoding="utf-8", errors="surrogateescape") as tf:
+        for name in (f"home/{bad}/a.txt", f"home/{bad}/a\\b.txt"):  # the backslash is a Windows separator
+            ti = tarfile.TarInfo(name)
+            ti.size = 2
+            tf.addfile(ti, io.BytesIO(b"hi"))
+        ln = tarfile.TarInfo(f"home/{bad}/link")
+        ln.type, ln.linkname = tarfile.SYMTYPE, f"/{bad}"
+        tf.addfile(ln)
+    ex, res = extract(src, tmp_path / "w")
+    names = {a.name for a in res.artifacts if a.origin == "extracted"}
+    assert names == {"/home/user\\x80dir/a.txt", "/home/user\\x80dir/a/b.txt"}
+    for a in res.artifacts:
+        assert ex.path_of(a.id).is_file() and "\\x80" in str(ex.path_of(a.id)) or a.origin != "extracted"
+    assert [(ln.path, ln.target) for ln in res.links] == [("home/user\\x80dir/link", "/user\\x80dir")]
+    if not shutil.which("mksquashfs"):
+        pytest.skip("mksquashfs unavailable")
+    tree = tmp_path / "tree"
+    os.makedirs(os.fsencode(tree) + b"/etc/bad\x80dir")
+    with open(os.fsencode(tree) + b"/etc/bad\x80dir/f\xffile", "wb") as fp:
+        fp.write(b"data")
+    with open(os.fsencode(tree) + b"/etc/user\\x80dir", "wb") as fp:  # already the escaped spelling
+        fp.write(b"x")
+    with open(os.fsencode(tree) + b"/etc/user\x80dir", "wb") as fp:
+        fp.write(b"y")
+    img = tmp_path / "fs.squashfs"
+    subprocess.run(["mksquashfs", str(tree), str(img), "-noappend", "-quiet"], check=True, capture_output=True)
+    ex, res = extract(img, tmp_path / "w2")
+    files = {a.name: ex.path_of(a.id).read_bytes() for a in res.artifacts if a.origin == "extracted"}
+    assert files == {"/etc/bad\\x80dir/f\\xffile": b"data", "/etc/user\\x80dir": b"x", "/etc/user\\x80dir~1": b"y"}
+    import json
+    json.dumps([a.name for a in res.artifacts], ensure_ascii=False).encode("utf-8")
+
+
+def _zip_with_bad_utf8_flagged_name(prefix: bytes = b"") -> bytes:
+    import struct
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("etc/userXdir/id_rsa", b"key")
+        zf.writestr("etc/\u00e9t\u00e9.txt", b"summer")  # valid UTF-8, flagged by zipfile itself
+        zf.writestr("etc/passwd", b"root:x:0:0::/root:/bin/sh\n")
+    data = bytearray(prefix + buf.getvalue().replace(b"userXdir", b"user\x80dir"))
+    for sig, flag_at in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
+        i = data.find(sig)
+        (flags,) = struct.unpack_from("<H", data, i + flag_at)
+        struct.pack_into("<H", data, i + flag_at, flags | 0x800)
+    return bytes(data)
+
+
+def test_zip_entry_flagged_utf8_with_a_name_that_is_not_does_not_hide_the_archive(tmp_path):
+    """zipfile rejects the whole archive when one UTF-8-flagged name is not UTF-8, which would leave every
+    member unanalysed; such names are read as bytes instead and shown with \\xNN escapes."""
+    import hashlib
+    src = tmp_path / "fw.zip"
+    src.write_bytes(_zip_with_bad_utf8_flagged_name())
+    with pytest.raises(UnicodeDecodeError):
+        zipfile.ZipFile(src)
+    before = hashlib.sha256(src.read_bytes()).hexdigest()
+    ex = Extractor(tmp_path / "w", Limits())
+    res = ex.run(src, "fw.zip")
+    files = {a.name: ex.path_of(a.id).read_bytes() for a in res.artifacts if a.origin == "extracted"}
+    assert files == {"/etc/user\\x80dir/id_rsa": b"key", "/etc/\u00e9t\u00e9.txt": b"summer",
+                     "/etc/passwd": b"root:x:0:0::/root:/bin/sh\n"}
+    assert any("flagged UTF-8 are not UTF-8" in w for w in res.warnings)
+    assert hashlib.sha256(src.read_bytes()).hexdigest() == before  # the upload itself is never modified
+
+
+def test_zip_name_fixes_follow_prepended_data(tmp_path):
+    from dfa.core.formats import zipnames
+    src = tmp_path / "fw.bin"
+    src.write_bytes(_zip_with_bad_utf8_flagged_name(prefix=b"VENDOR-HEADER" * 9))
+    patches, shown = zipnames.utf8_flag_fixes(src)
+    assert len(patches) == 2 and list(shown.values()) == ["etc/user\udc80dir/id_rsa"]
+    with zipnames.PatchedReader(src, patches) as fp, zipfile.ZipFile(fp) as zf:
+        assert [shown.get(zi.orig_filename, zi.filename) for zi in zf.infolist()] == [
+            "etc/user\udc80dir/id_rsa", "etc/\u00e9t\u00e9.txt", "etc/passwd"]
+        assert zf.read(zf.infolist()[0]) == b"key"
+    src.write_bytes(b"not a zip at all")
+    with pytest.raises(ValueError):
+        zipnames.utf8_flag_fixes(src)

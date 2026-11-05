@@ -442,14 +442,62 @@ def test_hostile_manifests_are_rejected_cleanly(settings, tmp_path):
                                      "extraction": {"artifacts": [{"id": "1"}], "filesystems": [], "warnings": [],
                                                     "limits_hit": [], "stats": {}, "link_count": 0, "rootfs": None}}),
     }
+    good_finding = {"title": "t", "description": "d", "severity": "low", "classification": "suspicious",
+                    "confidence": "low", "source_tool": "builtin:x", "rule_id": "r", "affected_component": "c",
+                    "remediation": "m", "evidence": [{"kind": "path", "value": "/etc/x", "location": None}],
+                    "cwe": None, "references": ["https://example.org/"], "tags": [], "package": None}
+    bad_findings = {
+        "severity": {"severity": "catastrophic"}, "unhashable-severity": {"severity": ["high"]},
+        "title-list": {"title": ["t"]}, "references-string": {"references": "javascript:alert(1)"},
+        "references-dict": {"references": [{"href": "x"}]},
+        "evidence-extra-key": {"evidence": [{"kind": "k", "value": "v", "boom": 1}]},
+        "evidence-value": {"evidence": [{"kind": "k", "value": 5}]}, "cwe-int": {"cwe": 22},
+    }
+    base = _json.loads(cases["bad-artifact"])
+    base["extraction"]["artifacts"] = []
+    (work / "manifest.json").write_text(_json.dumps({**base, "findings": [good_finding]}))
+    assert load_manifest(work, "manifest.json", settings)["findings"] == [good_finding]
+    for name, patch in bad_findings.items():
+        cases[f"finding-{name}"] = _json.dumps({**base, "findings": [good_finding, {**good_finding, **patch}]})
     for name, text in cases.items():
         (work / "manifest.json").write_text(text)
-        with pytest.raises((ValueError, RecursionError)):
+        try:
             load_manifest(work, "manifest.json", settings)
+        except (ValueError, RecursionError):
+            continue
+        pytest.fail(f"hostile manifest '{name}' was accepted")
     settings.max_manifest_mb = 1
     (work / "manifest.json").write_text(" " * (2 * 1024 * 1024))
     with pytest.raises(OSError):
         load_manifest(work, "manifest.json", settings)
+
+
+def test_manifest_strings_that_are_not_utf8_are_escaped(settings, tmp_path):
+    """Lone surrogates (non-UTF-8 bytes decoded with surrogateescape, or written by a compromised sandbox) cannot
+    be stored in SQLite or served as JSON; load_manifest shows them as \\xNN, keys included."""
+    import json as _json
+
+    from dfa.sandbox import load_manifest
+    work = tmp_path / "w"
+    work.mkdir()
+    finding = {"title": "key in /home/user\udc80dir", "description": "d", "severity": "low",
+               "classification": "suspicious", "confidence": "low", "source_tool": "builtin:x", "rule_id": "r",
+               "affected_component": "c\ud800", "remediation": "m", "evidence": [], "references": [], "tags": []}
+    man = {"identification": {"weird\udcff": "v"}, "components": [], "findings": [finding], "scanner_runs": [],
+           "inventory": {"categories": {}},
+           "extraction": {"artifacts": [{"id": 1, "path": "files/x\udc80", "name": "/x\udc80", "format": "f"}],
+                          "filesystems": [], "warnings": [], "limits_hit": [], "stats": {}, "link_count": 0,
+                          "rootfs": None, "links": [{"path": "/l\udc80", "target": "\udc80"}]}}
+    (work / "manifest.json").write_text(_json.dumps(man))  # ensure_ascii: surrogates as \\udc80 escapes
+    got = load_manifest(work, "manifest.json", settings)
+    assert got["findings"][0]["title"] == "key in /home/user\\x80dir"
+    assert got["findings"][0]["affected_component"] == "c\\ud800"
+    assert got["identification"] == {"weird\\xff": "v"}
+    assert got["extraction"]["artifacts"][0]["name"] == "/x\\x80"
+    assert got["extraction"]["links"] == [{"path": "/l\\x80", "target": "\\x80"}]
+    _json.dumps(got, ensure_ascii=False).encode("utf-8")  # what the API's JSON responses do
+    (work / "manifest.json").write_bytes(b'{"fatal_error": "bad \xed\xb2\x80 bytes"}')  # CESU-8 bytes
+    assert load_manifest(work, "manifest.json", settings)["fatal_error"] == "bad \\x80 bytes"
 
 
 def test_progress_flood_is_bounded(tmp_path):

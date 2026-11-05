@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { CLASSIFICATIONS, Classification, Finding, SEVERITIES, Severity } from "../lib/api";
-import { CLASSIFICATION_HELP, findingBasis } from "../lib/format";
+import { CLASSIFICATION_HELP, externalUrl, findingBasis } from "../lib/format";
 import { ClassBadge, Empty, SeverityBadge } from "./ui";
 
 export function FindingsTable({ findings }: { findings: Finding[] }) {
@@ -176,17 +176,18 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
                     )}
                     {f.references.length > 0 && (
                       <div className="refs">
-                        {f.references.map((r) =>
-                          r.startsWith("http") ? (
-                            <a key={r} href={r} target="_blank" rel="noreferrer noopener">
+                        {f.references.map((r) => {
+                          const href = externalUrl(r);
+                          return href ? (
+                            <a key={r} href={href} target="_blank" rel="noreferrer noopener">
                               {r}
                             </a>
                           ) : (
                             <span key={r} className="tag">
                               {r}
                             </span>
-                          ),
-                        )}
+                          );
+                        })}
                       </div>
                     )}
                   </div>

@@ -39,7 +39,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
-from .formats import more, px4json
+from .formats import more, px4json, zipnames
 from .formats.ihex import parse_ihex
 from .formats.simplefs import (
     FormatError,
@@ -53,6 +53,7 @@ from .formats.simplefs import (
 )
 from .identify import FormatInfo, detect_format, parse_uimage_header
 from .limits import ExtractionBudget, LimitExceeded, Limits
+from .text import escape_surrogates
 
 COPY_CHUNK = 1024 * 1024
 MAX_NAME = 255
@@ -110,7 +111,8 @@ def safe_member_path(name: str) -> PurePosixPath:
     """Normalise an archive member name to a safe relative path."""
     if "\x00" in name:
         raise UnsafePath("NUL byte in member name")
-    name = name.replace("\\", "/")
+    # Windows separators first; then bytes that are not UTF-8 become a literal "\xNN" (after, so it stays one name)
+    name = escape_surrogates(name.replace("\\", "/"))
     # Windows drive letters ("C:foo") are treated as absolute.
     if len(name) >= 2 and name[1] == ":" and name[0].isalpha():
         raise UnsafePath(f"absolute (drive) path: {name!r}")
@@ -150,6 +152,15 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: fp.read(COPY_CHUNK), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _unused_name(directory: Path, name: str) -> Path:
+    p = directory / name
+    n = 1
+    while os.path.lexists(p):
+        p = directory / f"{name}~{n}"
+        n += 1
+    return p
 
 
 def _sanitize_component(name: str) -> str:
@@ -421,7 +432,8 @@ class Extractor:
 
     def _record_link(self, parent: Artifact, name: str, kind: str, target: str | None) -> None:
         if len(self.result.links) < 50_000:
-            self.result.links.append(LinkRecord(parent.id, name, kind, target))
+            self.result.links.append(LinkRecord(parent.id, escape_surrogates(name), kind,
+                                                None if target is None else escape_surrogates(target)))
 
     def _record_fs(self, parent: Artifact, fs_type: str, out_dir: Path, **extra) -> None:
         self.result.filesystems.append({"artifact_id": parent.id, "type": fs_type,
@@ -431,39 +443,48 @@ class Extractor:
     def h_zip(self, art: Artifact) -> list[Artifact]:
         src = self.path_of(art.id)
         out = self._out_dir(art)
-        with zipfile.ZipFile(src) as zf:
+        with contextlib.ExitStack() as stack:
+            shown: dict[str, str] = {}
+            try:
+                zf = stack.enter_context(zipfile.ZipFile(src))
+            except UnicodeDecodeError:  # an entry flagged UTF-8 whose name is not: read such names as bytes
+                patches, shown = zipnames.utf8_flag_fixes(src)
+                zf = stack.enter_context(zipfile.ZipFile(stack.enter_context(zipnames.PatchedReader(src, patches))))
+                self.result.warnings.append(f"{art.name}: {len(shown)} member name(s) flagged UTF-8 are not UTF-8 "
+                                            "(shown with \\xNN escapes)")
             infos = zf.infolist()
             if len(infos) > self.limits.max_files:
                 raise LimitExceeded(f"zip declares {len(infos)} entries (limit {self.limits.max_files})")
             # Unix modes are only meaningful for archives made on Unix (create_system 3); others carry none
             unix = bool(infos) and sum(1 for zi in infos if zi.create_system == 3) * 2 > len(infos)
             for zi in infos:
+                name = shown.get(zi.orig_filename, zi.filename)
                 mode = (zi.external_attr >> 16) & 0xFFFF if unix else 0
                 if zi.is_dir():
                     if unix:
                         with contextlib.suppress(UnsafePath):
-                            d = str(safe_member_path(zi.filename)).strip("/")
+                            d = str(safe_member_path(name)).strip("/")
                             if d and d != ".":
                                 self._dir_meta.setdefault(art.id, {})[d] = ((mode & 0o7777) or 0o755, 0, 0)
                     continue
                 if stat.S_ISLNK(mode):
                     target = zf.read(zi)[:4096].decode("utf-8", "replace") if zi.file_size <= 4096 else None
-                    self._record_link(art, zi.filename, "symlink", target)
+                    self._record_link(art, name, "symlink", target)
                     continue
                 if zi.flag_bits & 0x1:
-                    self.result.warnings.append(f"{art.name}: encrypted member '{zi.filename}' skipped")
+                    self.result.warnings.append(f"{art.name}: encrypted member {name!r} skipped")
                     continue
                 try:
-                    rel = safe_member_path(zi.filename)
+                    rel = safe_member_path(name)
                     dest = _confined(out, rel)
                 except UnsafePath as exc:
-                    self.result.warnings.append(f"{art.name}: rejected member {zi.filename!r}: {exc}")
+                    self.result.warnings.append(f"{art.name}: rejected member {name!r}: {exc}")
                     continue
                 if dest.exists():
-                    self.result.warnings.append(f"{art.name}: duplicate member {zi.filename!r} skipped")
+                    self.result.warnings.append(f"{art.name}: duplicate member {name!r} skipped")
                     continue
                 with zf.open(zi) as member:
-                    if not self._member_write(art, zi.filename, member, dest, compressed_size=max(zi.compress_size, 1)):
+                    if not self._member_write(art, name, member, dest, compressed_size=max(zi.compress_size, 1)):
                         continue
                 self._note_meta(dest, mode=(mode & 0o7777) or None)
         self._record_fs(art, "zip", out, **({"unix_modes": True} if unix else {}))
@@ -976,6 +997,12 @@ class Extractor:
         for dirpath, dirnames, filenames in os.walk(out, followlinks=False):
             for name in list(dirnames) + filenames:
                 p = Path(dirpath) / name
+                if (clean := escape_surrogates(name)) != name:  # not UTF-8: rename so disk and manifest agree
+                    q = _unused_name(Path(dirpath), clean)
+                    os.rename(p, q)  # renames a link itself, never its target
+                    if name in dirnames:
+                        dirnames[dirnames.index(name)] = q.name
+                    p, name = q, q.name
                 rel = "/" + str(p.relative_to(out))
                 st = p.lstat()
                 if stat.S_ISLNK(st.st_mode):

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import resource
 import shutil
 import subprocess
@@ -25,6 +26,8 @@ from pathlib import Path
 
 from . import safefs
 from .config import BACKEND_DIR, Settings
+from .core.findings import Classification, Confidence, Severity
+from .core.text import clean_strings
 
 
 class SandboxError(RuntimeError):
@@ -160,14 +163,51 @@ def _check_shape(obj: dict, schema: dict, where: str = "") -> None:
             if not (isinstance(r, dict) and isinstance(r.get("name"), str) and isinstance(r.get("status"), str)
                     and isinstance(r.get("findings"), int)):
                 raise ValueError("manifest scanner run entry is malformed")
+        for i, f in enumerate(obj["findings"]):
+            if not _finding_ok(f):
+                raise ValueError(f"manifest finding #{i} is malformed")
+
+
+_FINDING_TEXT = ("title", "description", "source_tool", "rule_id", "affected_component", "remediation")
+_FINDING_ENUMS = {"severity": {s.value for s in Severity}, "classification": {c.value for c in Classification},
+                  "confidence": {c.value for c in Confidence}}
+
+
+def _str_list(v: object) -> bool:
+    return isinstance(v, list) and all(isinstance(x, str) for x in v)
+
+
+def _finding_ok(f: object) -> bool:
+    """Exactly the types the worker, the database and the UI rely on (no lists posing as strings, no dicts as
+    references, no unknown severities)."""
+    if not (isinstance(f, dict) and all(isinstance(f.get(k), str) for k in _FINDING_TEXT)):
+        return False
+    if any(not isinstance(f.get(k), str) or f.get(k) not in allowed for k, allowed in _FINDING_ENUMS.items()):
+        return False
+    if not (_str_list(f.get("references", [])) and _str_list(f.get("tags", []))):
+        return False
+    if any(f.get(k) is not None and not isinstance(f.get(k), str) for k in ("cwe", "package")):
+        return False
+    ev = f.get("evidence", [])
+    return isinstance(ev, list) and all(
+        isinstance(e, dict) and set(e) <= {"kind", "value", "location"} and isinstance(e.get("kind"), str)
+        and isinstance(e.get("value"), str) and (e.get("location") is None or isinstance(e.get("location"), str))
+        for e in ev)
+
+
+# A lone surrogate reaches a parsed string only as a \uD800-\uDFFF escape or as its (CESU-8) bytes.
+_MAYBE_SURROGATE = re.compile(rb"\\u[dD][89a-fA-F]|\xed[\xa0-\xbf]")
 
 
 def load_manifest(base: Path, name: str, settings: Settings) -> dict:
     """Parse a sandbox-produced manifest: size-limited, no links followed, shape checked.
     Raises FileNotFoundError, OSError, ValueError or RecursionError (deeply nested JSON)."""
-    data = json.loads(safefs.read_bytes(base, name, settings.max_manifest_mb * 1024 * 1024))
+    raw = safefs.read_bytes(base, name, settings.max_manifest_mb * 1024 * 1024)
+    data = json.loads(raw)
     if not isinstance(data, dict):
         raise ValueError("manifest is not a JSON object")
+    if _MAYBE_SURROGATE.search(raw):  # lone surrogates cannot be stored or served: show them as \xNN
+        clean_strings(data)
     if "fatal_error" not in data:
         _check_shape(data, MANIFEST_SCHEMA)
     return data
