@@ -953,3 +953,36 @@ def test_trailing_data_after_tar_and_the_other_compressors(tmp_path):
 
 def ex_bytes(work: Path, art) -> bytes:
     return (work / art.path).read_bytes()
+
+
+def test_data_appended_to_an_executable_is_analysed(tmp_path):
+    """An ordinary ELF file was analysed as it was, so a payload appended after its own data (what self-extracting
+    and packed programs, or a dropper, do) was never looked at. It is now analysed as an artifact of its own; a
+    signed kernel module's appended signature is recognised and only recorded."""
+    import gzip
+    elf = Path("/usr/bin/true")
+    if not elf.is_file() or elf.read_bytes()[:4] != b"\x7fELF":
+        pytest.skip("no ELF executable to build the sample from")
+    from dfa.core.extract import MODULE_SIG_MARKER, _elf_data_end
+    base = elf.read_bytes()
+    with elf.open("rb") as fp:
+        assert _elf_data_end(fp, len(base)) == len(base)  # a normal executable has no overlay
+    b = io.BytesIO()
+    with tarfile.open(fileobj=b, mode="w") as tf:
+        ti = tarfile.TarInfo("etc/passwd")
+        ti.size = 26
+        tf.addfile(ti, io.BytesIO(b"root::0:0::/root:/bin/sh\n\n"))
+    cases = {"dropper": (base + gzip.compress(b.getvalue(), mtime=0), True),
+             "module.ko": (base + b"\x30\x82" + bytes(range(256)) * 2 + b"\0" * 12 + MODULE_SIG_MARKER, False),
+             "plain": (base, False)}
+    for name, (data, overlay) in cases.items():
+        src = tmp_path / name
+        src.write_bytes(data)
+        res = Extractor(tmp_path / f"w_{name}", Limits()).run(src, name)
+        carved = [a for a in res.artifacts if a.name.startswith("trailing_") and a.origin == "carved"]
+        assert bool(carved) == overlay, (name, res.warnings)
+        if overlay:
+            assert carved[0].details["carved_offset"] == hex(len(base)) and carved[0].format == "gzip"
+            assert "/etc/passwd" in {a.name for a in res.artifacts if a.origin == "extracted"}
+    mod = Extractor(tmp_path / "w_mod2", Limits()).run(tmp_path / "module.ko", "module.ko").artifacts[0]
+    assert mod.details["module_signature_bytes"] == len(cases["module.ko"][0]) - len(base)

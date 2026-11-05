@@ -372,7 +372,9 @@ class Extractor:
     def _process(self, art: Artifact) -> None:
         handler = HANDLERS.get(art.format)
         if art.format == "elf" and not _is_mcu_elf(self.path_of(art.id)):
-            return  # ordinary ELF files are analysed as they are
+            for child in self._elf_overlay(art):  # ordinary ELF files are analysed as they are; data appended
+                self._process(child)              # after their own data (an overlay) is looked at on its own
+            return
         carve = art.format in ("raw", "cortexm_raw") and art.size >= 4096
         if handler is None and not carve:
             return
@@ -412,6 +414,21 @@ class Extractor:
             if self.budget.files_created > self.limits.max_files:
                 break
             self._process(child)
+
+    def _elf_overlay(self, art: Artifact) -> list[Artifact]:
+        """Data appended after an executable's own data: self-extracting and packed programs (PyInstaller, pkg)
+        carry their payload there, and so can a dropper. A signed kernel module's appended signature is known
+        and only recorded."""
+        path = self.path_of(art.id)
+        with path.open("rb") as fp:
+            end = _elf_data_end(fp, art.size)
+            if end is None or end >= art.size:
+                return []
+            fp.seek(art.size - len(MODULE_SIG_MARKER))
+            if fp.read() == MODULE_SIG_MARKER:
+                art.details["module_signature_bytes"] = art.size - end
+                return []
+        return self._trailing_data(art, path, end, "the ELF file's own data")
 
     def _salvage(self, art: Artifact) -> list[Artifact]:
         """After a failure, register whatever was safely written so it is still analysed."""
@@ -1717,6 +1734,53 @@ def demangle(names: list[str], timeout: int = 60) -> dict[str, str]:
     if p.returncode != 0 or len(out) < len(todo):
         return {}
     return {m: d[:300] for m, d in zip(todo, out[:len(todo)], strict=True) if d and d != m}
+
+
+MODULE_SIG_MARKER = b"~Module signature appended~\n"
+SHT_NOBITS = 8
+
+
+def _elf_data_end(fp: BinaryIO, size: int) -> int | None:
+    """Offset just past an ELF file's own data: header, program and section header tables, segments and
+    sections (without .bss-like ones). None if the header is not usable. Reads only the tables."""
+    fp.seek(0)
+    hdr = fp.read(64)
+    if len(hdr) < 52 or hdr[:4] != b"\x7fELF" or hdr[4] not in (1, 2) or hdr[5] not in (1, 2):
+        return None
+    e = "<" if hdr[5] == 1 else ">"
+    if hdr[4] == 1:
+        phoff, shoff = struct.unpack_from(e + "II", hdr, 28)
+        ehsize, phentsize, phnum, shentsize, shnum = struct.unpack_from(e + "HHHHH", hdr, 40)
+        ph = (e + "I", 4, e + "I", 16)  # (offset fmt, at, filesz fmt, at)
+        sh = (e + "I", 4, e + "I", 16, e + "I", 20)  # (type, at, offset, at, size, at)
+    else:
+        if len(hdr) < 64:
+            return None
+        phoff, shoff = struct.unpack_from(e + "QQ", hdr, 32)
+        ehsize, phentsize, phnum, shentsize, shnum = struct.unpack_from(e + "HHHHH", hdr, 52)
+        ph = (e + "Q", 8, e + "Q", 32)
+        sh = (e + "I", 4, e + "Q", 24, e + "Q", 32)
+    ends = [ehsize]
+    if shoff and shnum == 0 and shentsize >= 40 and shoff + shentsize <= size:  # more sections than fit e_shnum
+        fp.seek(shoff)
+        shnum = min(struct.unpack_from(sh[4], fp.read(shentsize), sh[5])[0], 1_000_000)
+    for off, count, entsize, kind in ((phoff, phnum, phentsize, "ph"), (shoff, shnum, shentsize, "sh")):
+        if not off or not count or entsize < 32 or off + count * entsize > size:
+            continue
+        ends.append(off + count * entsize)
+        fp.seek(off)
+        table = fp.read(count * entsize)
+        for i in range(0, len(table) - entsize + 1, entsize):
+            entry = table[i:i + entsize]
+            if kind == "ph":
+                start, length = struct.unpack_from(ph[0], entry, ph[1])[0], struct.unpack_from(ph[2], entry, ph[3])[0]
+            else:
+                if struct.unpack_from(sh[0], entry, sh[1])[0] == SHT_NOBITS:
+                    continue
+                start, length = struct.unpack_from(sh[2], entry, sh[3])[0], struct.unpack_from(sh[4], entry, sh[5])[0]
+            if start + length <= size:
+                ends.append(start + length)
+    return max(ends)
 
 
 def _is_mcu_elf(path: Path) -> bool:
