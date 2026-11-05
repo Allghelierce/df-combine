@@ -179,6 +179,37 @@ class DockerJobExecutor:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._sem = threading.BoundedSemaphore(max(1, settings.sandbox_max_jobs))
+        self._daemon: tuple[float, dict] | None = None
+
+    def daemon_status(self, max_age: float = 60.0) -> dict:
+        """What the Docker daemon can enforce. A daemon that cannot apply memory, PID or CPU limits drops the
+        flags with only a warning (e.g. rootless Docker on cgroup v1 or without cgroup v2 delegation), and an
+        unknown OCI runtime (DFA_SANDBOX_RUNTIME, e.g. runsc) would make every job fail; both are reported
+        and jobs refused instead. Unknown (``docker info`` failed) does not block: ``docker run`` then fails."""
+        now = time.monotonic()
+        if self._daemon and now - self._daemon[0] < max_age:
+            return self._daemon[1]
+        try:
+            out = subprocess.run(["docker", "info", "--format", "{{json .}}"], capture_output=True, timeout=15)
+            info = json.loads(out.stdout or b"{}") if out.returncode == 0 else {}
+        except Exception:  # noqa: BLE001 - unknown daemon state; docker run itself will report the error
+            info = {}
+        if not isinstance(info, dict) or not info:
+            status = {"known": False, "problems": []}
+        else:
+            rootless = any("rootless" in str(o) for o in info.get("SecurityOptions") or [])
+            missing = [k for k in ("MemoryLimit", "PidsLimit", "CpuCfsQuota") if info.get(k) is False]
+            problems = []
+            if missing:
+                problems.append(f"the Docker daemon cannot enforce {', '.join(missing)}"
+                                + (" (rootless Docker needs cgroup v2 with delegation)" if rootless else ""))
+            rt = self.settings.sandbox_runtime
+            if rt and rt not in (info.get("Runtimes") or {}):
+                problems.append(f"OCI runtime {rt!r} (DFA_SANDBOX_RUNTIME) is not registered with the Docker daemon")
+            status = {"known": True, "problems": problems, "rootless": rootless,
+                      "cgroup_version": info.get("CgroupVersion"), "runtime": rt or info.get("DefaultRuntime")}
+        self._daemon = (now, status)
+        return status
 
     # paths on the docker host
     def _host(self, p: Path) -> str:
@@ -247,21 +278,30 @@ class DockerJobExecutor:
         """chown a tree through directory fds: never follows a symlink, not even one swapped in mid-walk.
 
         With ``strip``, every entry that is neither a directory nor a regular file is removed (unlink never
-        follows links). Analysis output never contains links or special files - the extractor records links
-        in the manifest instead of creating them - so any found were planted by a compromised container to
-        make the worker follow them. Returns the number of entries removed."""
+        follows links), and group/other write and setuid/setgid bits are cleared. Analysis output never
+        contains links or special files - the extractor records links in the manifest instead of creating
+        them - so any found were planted by a compromised container to make the worker follow them; and a
+        world-writable directory left by one job must not let the next job's (different) UID write
+        outside its own directory. Returns the number of entries removed."""
         removed = 0
+        unsafe_bits = 0o6022
         os.fchown(top_fd, uid, gid)
+        if strip and os.fstat(top_fd).st_mode & unsafe_bits:
+            os.fchmod(top_fd, stat.S_IMODE(os.fstat(top_fd).st_mode) & ~unsafe_bits)
         for dirpath, dirs, files, dfd in os.fwalk(".", dir_fd=top_fd, follow_symlinks=False):
             if skip and dirpath == "." and skip in dirs:
                 dirs.remove(skip)
-            for name in dirs + files:
+            for name in list(dirs) + files:
                 if strip:
                     st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
                     if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
                         os.unlink(name, dir_fd=dfd)
                         removed += 1
+                        if name in dirs:
+                            dirs.remove(name)
                         continue
+                    if st.st_mode & unsafe_bits:  # not a link (checked above; the job has exited)
+                        os.chmod(name, stat.S_IMODE(st.st_mode) & ~unsafe_bits, dir_fd=dfd)
                 os.chown(name, uid, gid, dir_fd=dfd, follow_symlinks=False)
         return removed
 
@@ -433,6 +473,9 @@ class DockerJobExecutor:
         return cmd + [image] + argv, name, timeout
 
     def run(self, profile: str, scan_id: str, params: dict) -> JobResult:
+        problems = self.daemon_status()["problems"]
+        if problems:
+            raise JobRejected("refusing to run untrusted analysis: " + "; ".join(problems))
         cmd, name, timeout = self.command(profile, scan_id, params)
         work, _ = self._scan_paths(scan_id)
         disk_limit = self.settings.max_work_dir_mb * 1024 * 1024
@@ -497,7 +540,7 @@ class DockerJobExecutor:
             for binary in ("fwanalyzer", "ubireader_extract_files", "jefferson", "unsquashfs", "debugfs"):
                 tools[binary] = _image_has(self.settings.sandbox_image, binary)
         return {"docker": _docker_ok(), "images": images, "runtime": self.settings.sandbox_runtime or "runc",
-                "profiles": sorted(PROFILES), "sandbox_tools": tools}
+                "profiles": sorted(PROFILES), "sandbox_tools": tools, "daemon": self.daemon_status()}
 
 
 def _dir_size(path: Path) -> int:

@@ -77,6 +77,7 @@ services:
       DFA_BOOTSTRAP_ADMIN_PASSWORD: ${DFA_BOOTSTRAP_ADMIN_PASSWORD:-}
       DFA_SESSION_COOKIE_SECURE: ${DFA_SESSION_COOKIE_SECURE:-false}  # true behind HTTPS
       DFA_FACT_URL: ${DFA_FACT_URL:-}
+    extra_hosts: ["host.docker.internal:host-gateway"]  # e.g. DFA_FACT_URL=http://host.docker.internal:5000
     volumes:
       - ./var:/data
       # separate mount: a mount point cannot be renamed, so the worker can never replace the work root
@@ -98,7 +99,9 @@ services:
       DFA_BROKER_SOCKET: /run/dfa/broker.sock
       DFA_BROKER_TOKEN: ${DFA_BROKER_TOKEN:-}
       DFA_WORKER_THREADS: ${DFA_WORKER_THREADS:-2}
-      DFA_FACT_URL: ${DFA_FACT_URL:-}
+      DFA_FACT_URL: ${DFA_FACT_URL:-}  # FACT must listen on an address containers can reach
+      DFA_FACT_TIMEOUT_S: ${DFA_FACT_TIMEOUT_S:-3600}
+    extra_hosts: ["host.docker.internal:host-gateway"]
     volumes:
       - ./var:/data
       - ./var/work:/data/work

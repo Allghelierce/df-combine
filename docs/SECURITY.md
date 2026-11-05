@@ -61,6 +61,12 @@ cwe_checker/Ghidra image), the firmware mounted read-only, and only its own writ
 broker enforces a wall-clock timeout and a per-scan disk cap (`DFA_MAX_WORK_DIR_MB`, container
 killed when exceeded) and limits concurrent containers (`DFA_SANDBOX_MAX_JOBS`).
 
+A Docker daemon that cannot apply memory, PID or CPU limits only prints a warning and runs the
+container without them (for example rootless Docker on cgroup v1, or on cgroup v2 without
+delegation). The broker therefore reads `docker info` (`MemoryLimit`, `PidsLimit`, `CpuCfsQuota`,
+registered runtimes) and **refuses jobs** when a limit cannot be enforced or when the configured
+`DFA_SANDBOX_RUNTIME` is not registered; `/v1/capabilities` reports the daemon's state.
+
 Ownership hand-over: before a job the broker gives the job's writable directory to the container
 UID; after the container has exited it gives it back to the owner of the work root (the worker), so
 an unprivileged worker can read and delete results. The worker owns these directories and could swap
@@ -69,7 +75,17 @@ never resolves paths there: it opens each component with `O_NOFOLLOW | O_DIRECTO
 work root's file descriptor, walks with `os.fwalk(follow_symlinks=False)` and changes ownership only
 through directory file descriptors (`fchown`, `lchown` with `dir_fd`). A swapped component makes the
 job fail instead of redirecting the broker. Scan directories and uploads that are symlinks are
-refused before any container starts.
+refused before any container starts. When it hands a directory back, the broker also **removes every
+entry that is neither a directory nor a regular file** (symlinks, FIFOs, sockets) from the whole
+writable tree, `tools/` included: analysis output never contains links (the extractor records them in
+the manifest instead), so any found were planted. It also clears group/other-write and setuid/setgid
+bits, so a world-writable directory left by one job cannot be used by the next job's (different) UID
+to write outside its own directory. A container the broker had to kill is force-removed before its
+directory is handed back.
+
+The upload is not mounted from `uploads/<id>.bin` (a path the API writes and could swap between the
+broker's check and Docker's mount) but from a hard link the broker pins in `work/.inputs/` - inside
+the broker-owned work root - after checking with `O_NOFOLLOW` that the source is a regular file.
 
 **What a compromised API/worker can do now:** run the four analysis profiles on scans in the data
 directory, read and alter scan data. It cannot start arbitrary containers, mount host paths, enable
@@ -78,16 +94,37 @@ networking, or change limits or images.
 **What compromised analysis code (e.g. an exploited unpacker) can do:** read the firmware and write
 into its own scan's work directory inside a network-less, capability-less, resource-limited
 container. Its output (manifest, tool JSON) is treated as untrusted by the worker: paths are
-re-validated to stay inside the work directory before any tool uses them.
+re-validated to stay inside the work directory before any tool uses them, and the worker and API
+access the scan directory only through `dfa/safefs.py`:
+
+* paths are walked component by component through directory fds with `O_NOFOLLOW`, so no planted
+  symlink is followed, not even an intermediate one;
+* only regular files are read, with size limits (a FIFO cannot block the worker, a link to
+  `/dev/zero` cannot exhaust its memory; the manifest is capped by `DFA_MAX_MANIFEST_MB`);
+* files the worker writes (`manifest.json`, `findings.json`, tool configs and outputs) are created
+  under a fresh `O_EXCL` name and renamed over the target, which replaces a planted link instead of
+  writing through it.
+
+This closed a real hole: before the change, a sandbox that left `findings.json -> /data/dfa.db` made
+the worker overwrite its SQLite database with the findings JSON (reproduced in
+`tests/test_api.py::test_links_planted_by_a_compromised_sandbox_are_not_followed`, which fails
+without the protection).
 
 ### Docker Compose
 
 `docker-compose.yml` implements this split: only the `broker` service mounts the Docker socket; it
 has no network (`network_mode: none`), a read-only root filesystem and only the `CHOWN`,
 `DAC_OVERRIDE` and `FOWNER` capabilities (for the ownership hand-over). `api` and `worker` run as
-UID 10002 with `cap_drop: ALL`, read-only root filesystems and only the broker socket volume. This
-topology was verified end to end in development: an unprivileged worker drove real scans through a
-containerised broker (sandbox, FwAnalyzer, cwe_checker, Ghidra and FACT all completed).
+UID 10002 with `cap_drop: ALL`, read-only root filesystems and only the broker socket volume. They
+mount `./var/work` separately from `./var`: a mount point cannot be renamed, so even the worker cannot
+move the broker-owned work root aside. A CA certificate for a TLS-intercepting proxy is passed to the
+image builds as a BuildKit secret (`DFA_EXTRA_CA_CERT`), never copied into an image layer.
+
+Verified in development with the images built from the published Dockerfiles: an unprivileged worker
+drove real scans (PX4 `.px4` and unstripped ELF, Debian and Alpine root filesystems, ArduPilot builds)
+through the containerised broker with the sandbox, FwAnalyzer, cwe_checker and Ghidra; deleting a scan
+removed its directory, upload and pinned input. FACT was verified directly against a FACT instance on
+the host; reaching that loopback-only instance from the compose network was not set up here.
 
 ### Stronger isolation: rootless Docker, gVisor, VMs
 
@@ -96,8 +133,10 @@ the broker could ask *Docker* for anything). Options to shrink that, in increasi
 
 * **Rootless Docker / Podman for the broker's daemon.** Containers and the daemon then run in a
   user namespace of an unprivileged account; a container escape lands in that account, not root.
-  Requires cgroup v2 with systemd delegation for `--memory/--cpus/--pids-limit` to work. Point the
-  broker at the rootless socket (`DOCKER_HOST=unix:///run/user/<uid>/docker.sock`).
+  Requires cgroup v2 with systemd delegation for `--memory/--cpus/--pids-limit` to work - otherwise
+  the broker refuses jobs (see above). Point the broker at the rootless socket
+  (`DOCKER_HOST=unix:///run/user/<uid>/docker.sock`). **Not verified here:** the development host
+  uses cgroup v1, on which rootless Docker cannot enforce these limits at all.
 * **gVisor (`runsc`)** as the OCI runtime for analysis containers (`DFA_SANDBOX_RUNTIME=runsc`): the
   untrusted parsers then talk to gVisor's user-space kernel instead of the host kernel. Supported by
   configuration; **not verified here** (installing runsc in the development environment was not
@@ -162,19 +201,20 @@ and their tool status then says "NOT container-isolated".
 An adversarial review of extractor, sandbox runner, API and adapters was done with proof-of-concept
 inputs; verified issues are fixed and covered by `tests/test_extract_security.py`,
 `tests/test_sandbox.py` (profile contract, hardened command, ownership hand-over without following
-links), `tests/test_auth.py` and `tests/test_api.py`.
+links, planted links removed, pinned upload), `tests/test_safefs.py` (no links followed, FIFOs,
+size limits, replacing planted links), `tests/test_auth.py` and `tests/test_api.py`.
 
 ## Residual risks / operator notes
 
 * The broker is root-equivalent with a rootful Docker daemon; run it on a dedicated analysis host/VM
   or with a rootless daemon / gVisor.
-* Bind-mount sources are re-resolved by Docker when it creates a container. The scan directory cannot
-  be swapped: the broker owns the work root (`root:root 0755`) and creates, resets and removes scan
-  directories itself (`/v1/workdirs`), so the worker can write inside its scan directory but cannot
-  replace it. The upload file (`uploads/<id>.bin`, written by the API) is checked with `lstat`; a
-  compromised API that wins the race could make a sandbox container read a different host file
-  (read-only, as a non-root user without capabilities). This protection needs the broker to run as
-  root (as in Compose); a broker running as an ordinary docker-group user cannot own the work root.
+* Bind-mount sources are re-resolved by Docker when it creates a container. Neither can be swapped:
+  the broker owns the work root (`root:root 0755`), creates, resets and removes scan directories
+  itself (`/v1/workdirs`), and mounts the upload from a hard link it pinned in `work/.inputs/`. This
+  needs the broker to run as root (as in Compose); a broker running as an ordinary docker-group user
+  cannot own the work root, and then the upload is mounted from `uploads/<id>.bin` after an `lstat`
+  check (a compromised API that wins that race could make a sandbox read a different host file,
+  read-only, as a non-root user without capabilities).
 * SQLite and local storage: single node. Put the API behind a TLS-terminating reverse proxy and set
   `DFA_SESSION_COOKIE_SECURE=true`.
 * FACT is a separate service with its own security model; only submit firmware you are allowed to

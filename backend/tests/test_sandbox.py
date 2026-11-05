@@ -128,6 +128,9 @@ def test_job_output_is_handed_back_to_the_worker(settings, monkeypatch):
             os.mkfifo(work / "files" / "pipe")  # would block a reader
             (work / "tools").rename(work / "tools.orig")  # the sandbox owns the scan dir: it can swap tools/
             (work / "tools").symlink_to(settings.data_dir)
+            (work / "files" / "drop").mkdir()
+            os.chmod(work / "files" / "drop", 0o777)  # would let the next job's UID plant links here
+            os.chmod(work / "files" / "out.bin", 0o4777)
 
         def poll(self):
             return 0
@@ -136,6 +139,7 @@ def test_job_output_is_handed_back_to_the_worker(settings, monkeypatch):
     FakeProc.stdout = io.BytesIO()
     FakeProc.stderr = io.BytesIO()
     monkeypatch.setattr("dfa.containers.subprocess.Popen", lambda cmd, **kw: _with_streams(FakeProc(cmd, **kw)))
+    monkeypatch.setattr(DockerJobExecutor, "daemon_status", lambda self, max_age=60.0: {"problems": []})
     before = os.stat("/etc/passwd")
     DockerJobExecutor(settings).run("analyze", sid, {"name": "x", "limits": {}})
     assert seen["during_analyze_work"] == 10001 and seen["during_tools"] == 12345
@@ -144,6 +148,8 @@ def test_job_output_is_handed_back_to_the_worker(settings, monkeypatch):
     # links and special files planted by the job are removed before the worker gets the directory back
     for p in ("evil", "findings.json", "files/pipe", "tools"):
         assert not os.path.lexists(work / p), p
+    assert oct(os.stat(work / "files" / "drop").st_mode & 0o7777) == "0o755"
+    assert oct(os.stat(work / "files" / "out.bin").st_mode & 0o7777) == "0o755"
     after = os.stat("/etc/passwd")
     assert (after.st_uid, after.st_gid) == (before.st_uid, before.st_gid)
 
@@ -346,3 +352,33 @@ def test_broker_mounts_a_pinned_copy_of_the_upload(settings, tmp_path):
         ex.command("analyze", sid, {"name": "x", "limits": {}})
     ex.workdir(sid, "remove")
     assert not pinned.exists()
+
+
+def test_jobs_refused_when_the_daemon_cannot_enforce_limits(settings, monkeypatch):
+    """Rootless Docker without cgroup v2 delegation drops --memory/--pids-limit/--cpus with a warning only;
+    an unregistered DFA_SANDBOX_RUNTIME (e.g. runsc) would fail every job. Both are refused up front."""
+    import json as _json
+    import subprocess as _sp
+    infos = {"rootless-v1": {"MemoryLimit": False, "PidsLimit": False, "CpuCfsQuota": False, "CgroupVersion": "1",
+                             "SecurityOptions": ["name=seccomp,profile=builtin", "name=rootless"],
+                             "Runtimes": {"runc": {}}, "DefaultRuntime": "runc"},
+             "ok": {"MemoryLimit": True, "PidsLimit": True, "CpuCfsQuota": True, "CgroupVersion": "2",
+                    "SecurityOptions": [], "Runtimes": {"runc": {}}, "DefaultRuntime": "runc"}}
+    current = {"info": infos["rootless-v1"]}
+    real_run = _sp.run
+
+    def fake_run(cmd, *a, **kw):
+        if cmd[:2] == ["docker", "info"]:
+            return _sp.CompletedProcess(cmd, 0, _json.dumps(current["info"]).encode(), b"")
+        return real_run(cmd, *a, **kw)
+    monkeypatch.setattr("dfa.containers.subprocess.run", fake_run)
+    ex = DockerJobExecutor(settings)
+    with pytest.raises(JobRejected, match="cannot enforce MemoryLimit, PidsLimit, CpuCfsQuota.*rootless"):
+        ex.run("analyze", str(uuid.uuid4()), {"name": "x", "limits": {}})
+    current["info"] = infos["ok"]
+    settings.sandbox_runtime = "runsc"
+    ex = DockerJobExecutor(settings)
+    with pytest.raises(JobRejected, match="'runsc'.*not registered"):
+        ex.run("analyze", str(uuid.uuid4()), {"name": "x", "limits": {}})
+    settings.sandbox_runtime = None
+    assert DockerJobExecutor(settings).daemon_status()["problems"] == []

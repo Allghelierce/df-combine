@@ -100,7 +100,14 @@ DFA_BOOTSTRAP_ADMIN_PASSWORD='choose-a-long-password' docker compose up --build
 
 Only the **broker** service can reach the Docker daemon. The API and worker run as an unprivileged
 user without a Docker client or socket and request one of four fixed job profiles over a Unix socket
-(see [docs/SECURITY.md](docs/SECURITY.md)). FACT is deployed separately: set `DFA_FACT_URL`.
+(see [docs/SECURITY.md](docs/SECURITY.md)). FACT is deployed separately: set `DFA_FACT_URL` (a FACT on
+the Docker host is reachable as `http://host.docker.internal:5000` if it listens on the bridge
+address). Behind a TLS-intercepting proxy, copy its CA certificate into the project (for example
+`./var/proxy-ca.crt`) and build with it as a build secret:
+
+```bash
+DFA_EXTRA_CA_CERT=./var/proxy-ca.crt docker compose build
+```
 
 ## Configuration
 
@@ -180,7 +187,7 @@ make lint
   bombs, nested archives, ext duplicate-entry attack, CROMFS loops). Mocks are used for unit tests
   of tool adapters only.
 * **Real samples** — fetch the pinned public samples first (PX4 v1.17.0 builds, ArduPilot
-  bootloaders, esptool's ESP images; SHA-256 verified):
+  bootloaders, ArduPilot SITL vehicle builds, esptool's ESP images; SHA-256 verified):
 
   ```bash
   python scripts/fetch_real_firmware.py
@@ -213,23 +220,27 @@ for the isolation model and [docs/STATUS.md](docs/STATUS.md) for the full capabi
 * **Formats without real samples:** LZ4, Zstandard, lzop, CramFS, EROFS, Android sparse, UBI/UBIFS,
   JFFS2 and ext/FAT/SquashFS extraction is verified with images made by the reference tools.
 * **Verified with real inputs:** PX4 v1.17.0 `.px4`/ELF identification and extraction (incl. CROMFS),
-  ArduPilot bootloader identification, cwe_checker on ARM/AArch64 ELFs and bare-metal PX4 and
-  ArduPilot images, Ghidra function recovery on ELFs and Cortex-M images, FACT end to end over REST,
-  FwAnalyzer on Debian/Alpine root filesystems and PX4 CROMFS, OSV matching on real Debian/Alpine
-  package databases, ESP image/partition parsing, the broker-only compose topology with an
+  ArduPilot bootloader and vehicle (SITL) identification, cwe_checker on ARM/AArch64 ELFs, bare-metal
+  PX4/ArduPilot images and unstripped PX4 ELFs (via the derived flash image, symbolised), Ghidra
+  function recovery on ELFs and Cortex-M images, FACT end to end over REST (incl. extracted PX4
+  `/etc` trees and a full Debian rootfs in 222 s), FwAnalyzer with permission checks on Debian/Alpine
+  root filesystems and on PX4 CROMFS, OSV matching on real Debian/Alpine package databases, ESP
+  image/partition parsing, and the compose stack built from the published Dockerfiles with an
   unprivileged worker.
-* **ArduPilot:** validated on the official **bootloader** builds committed in the ArduPilot repository
-  (AP_Bootloader for fmuv3, Matek H743, Pixhawk 6X, CubeOrange; `.bin` and `.hex`). Real
-  *flight-stack* builds (`.apj`) could not be obtained: `firmware.ardupilot.org` was unreachable from
-  the development environment and building ArduPilot from source there was not permitted, so
-  vehicle-firmware identification (`.apj`, app descriptor, vehicle/version strings) is covered by
-  synthetic samples only.
-* **cwe_checker** panics on the unstripped PX4 debug ELF (upstream issue; reported verbatim) and
-  bare-metal mode is experimental upstream; a 2 MB PX4 image takes ~20 minutes.
-* **FACT** cannot unpack `.px4` containers or raw MCU images; for such inputs it completes without
-  plug-in results, and the tool run says so.
-* **FwAnalyzer** permission checks are disabled in directory mode (extracted trees normalise modes;
-  setuid/world-writable bits are checked by the built-in scanner from archive metadata instead).
+* **ArduPilot:** official **bootloader** builds (AP_Bootloader for fmuv3, Matek H743, Pixhawk 6X,
+  CubeOrange; `.bin` and `.hex`) and four public **SITL vehicle builds** (ArduCopter 3.2.1 and 3.3,
+  ArduPlane 3.3.0, ArduRover 2.50; x86-64 Linux programs, analysed statically) are identified with
+  vehicle and version. Board firmware in the `.apj` container is covered by synthetic samples only:
+  `firmware.ardupilot.org` is blocked by the development environment's network policy.
+* **cwe_checker** 0.9.0 panics on Cortex-M ELFs (upstream issue); the analyzer derives the flash image
+  from the ELF (byte-identical to the official `.px4` image for PX4 FMUv2) and maps the bare-metal
+  results back to the ELF's function symbols. Bare-metal mode is experimental upstream; a 1–2 MB PX4
+  image takes 8–20 minutes.
+* **FACT** cannot unpack `.px4` containers, raw MCU images or NuttX CROMFS; the decoded images and the
+  extracted CROMFS files are submitted as well. FACT's plug-ins found nothing in PX4 content, and the
+  tool run says so.
+* **FwAnalyzer** checks permissions through a cpio image the sandbox writes with the archive's original
+  modes (tar and ext root filesystems); other directory-mode runs have no permission data.
 * **DJI / Parrot:** container headers are parsed from public community documentation; encrypted DJI
   modules are reported, never decrypted. No real vendor samples were used.
 * **gVisor / rootless Docker:** supported by configuration (`DFA_SANDBOX_RUNTIME`, a rootless daemon

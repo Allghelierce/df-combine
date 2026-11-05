@@ -10,16 +10,17 @@ a timeout and a per-scan disk cap; the firmware is mounted read-only.
 |---|---|---|---|---|
 | Project | [cruise-automation/fwanalyzer](https://github.com/cruise-automation/fwanalyzer) | [fkie-cad/cwe_checker](https://github.com/fkie-cad/cwe_checker) | [NationalSecurityAgency/ghidra](https://github.com/NationalSecurityAgency/ghidra) | [fkie-cad/FACT_core](https://github.com/fkie-cad/FACT_core) |
 | What it does | Rule checks on a filesystem tree | Rust + Ghidra P-Code analysis for CWE patterns | Disassembly, function recovery, call graph | Unpacking + plug-in analysis platform |
-| Input used here | Extracted Linux rootfs (`dirfs`) or PX4 NuttX `/etc` (CROMFS) | One binary per run: ELF, or raw Cortex-M image with a bare-metal config | ELF, or raw Cortex-M image (base address + vector table) | Original upload + decoded images |
+| Input used here | Permission image (cpio with original modes) of an extracted Linux rootfs, else `dirfs`; PX4 NuttX `/etc` (CROMFS) | One binary per run: ELF, or raw Cortex-M image with a bare-metal config (incl. the flash image derived from a Cortex-M ELF) | ELF, or raw Cortex-M image (base address + vector table) | Original upload, decoded images, tar of files extracted from CROMFS |
 | How it runs | Inside `dfa-sandbox` | `fkiecad/cwe_checker:latest` (0.9.0, bundles Ghidra 11.2.1) | Same image, `analyzeHeadless` + our Java scripts | Separate service, REST API |
 | Classification of results | `detected` / `suspicious` by rule | always `unverified` | `detected` only for `gets()` call sites, else `suspicious` / info | per plug-in; version-based = `unverified` |
 
 ## Real-input validation (development environment)
 
 Inputs: official PX4 v1.17.0 builds (`px4-travis.s3.amazonaws.com`, pinned SHA-256), official ArduPilot
-bootloader builds (committed in the ArduPilot repository, tag Copter-4.5.7), Debian 11 armhf
-and Alpine 3.15 arm64 root filesystems exported from the official Docker images, esptool's published
-ESP test images. Numbers are from actual runs, not mocks.
+bootloader builds (committed in the ArduPilot repository, tag Copter-4.5.7), ArduPilot SITL vehicle
+builds published for `dronekit-sitl`, Debian 11 armhf and Alpine 3.15 arm64 root filesystems exported
+from the official Docker images, esptool's published ESP test images. Numbers are from actual runs,
+not mocks.
 
 | Engine | Input | Result |
 |---|---|---|
@@ -29,15 +30,18 @@ ESP test images. Numbers are from actual runs, not mocks.
 | cwe_checker | Debian 11 armhf: `perl`, `libc-2.31.so`, `bash` | completed, 3/3 in 392 s, 28 grouped findings |
 | cwe_checker | Alpine 3.15 arm64: `scanelf`, `apk`, `getent` | completed, 3/3, 14 grouped findings |
 | cwe_checker | Debian `sbin/killall5` (imports `strcpy`) | completed; CWE-676 reported (`tests/test_real_tools.py`) |
-| cwe_checker | PX4 unstripped debug ELF (47 MB) | **fails**: cwe_checker panics (upstream bug); the panic message is reported verbatim |
+| cwe_checker | PX4 FMUv2 unstripped ELF (23 MB) | cwe_checker 0.9.0 panics on the ELF itself (`fn_start_blocks.rs:44`, both with and without DWARF). The sandbox derives the flash image from the ELF's load segments - byte-identical (same SHA-256) to the image in the official `.px4` - and cwe_checker analyses it bare-metal: 3/3 binaries in the compose stack (main image 489 s, 101 warnings mapped to 57 named functions, 3 unresolved; IO firmware 25; bootloader 0) |
 | Ghidra | PX4 FMUv5 image / IO / bootloader | completed: 8,258 / 363 / 110 functions (373–497 s) |
+| Ghidra | PX4 FMUv2 unstripped ELF / IO / bootloader | completed: 6,366 / 363 / 112 functions (128 s in total) |
 | Ghidra | Debian armhf `perl` / `libc` / `bash` | completed: 2,610 / 2,660 / 2,508 functions (542 s) |
 | Ghidra | PX4 CAN bootloader | completed: 90 functions |
 | Ghidra | ArduPilot CubeOrange bootloader | completed: 331 functions (18 s) |
-| FwAnalyzer | Debian 11 / Alpine 3.15 rootfs (`dirfs`) | completed (no offenders with the default rule set) |
+| FwAnalyzer | Debian 11 rootfs (cpio permission image) | completed; 14 offenders of the Suid check: 8 setuid-root binaries (`su`, `mount`, `passwd`, ...), 4 setgid binaries (`unix_chkpwd`, `chage`, `expiry`, `wall`) and the setgid directories `/var/local`, `/var/mail` - FwAnalyzer labels all of them "File is SUID"; the evidence names the actual bit |
+| FwAnalyzer | Alpine 3.15 rootfs (cpio permission image) | completed (no offenders) |
 | FwAnalyzer | PX4 FMUv5 / FMUv2 CROMFS `/etc` (NuttX profile) | completed; FMUv5: 1 finding |
 | FACT | PX4 `.px4` and decoded image; PX4 CAN bootloader; ArduPilot CubeOrange bootloader | completed end to end over REST; FACT's unpacker cannot unpack `.px4`/raw MCU images and no plug-in produced results — reported as such |
-| FACT | Debian 11 rootfs | with FACT's per-file cwe_checker plug-in requested (former default): did not finish within the 3,600 s timeout (reported `timeout`) |
+| FACT | PX4 FMUv5 `.px4`: upload, decoded image, tar of the files extracted from the `/etc` CROMFS | completed in 42 s; FACT analysed 1, 1 and 72 files; none of the requested plug-ins found anything in PX4 content (reported as such) |
+| FACT | Debian 11 rootfs | with FACT's per-file cwe_checker plug-in requested (former default): did not finish within the 3,600 s timeout. With the current plug-in set: **completed in 222 s** (3,311 files); 8 findings after the mapping fixes below |
 | FACT | Alpine 3.15 rootfs | with the current plug-in set: completed in 21 s; results from 8 plug-ins (15 findings after the corrected mapping) |
 
 Opt-in real integration tests (`DFA_REAL_TOOLS=1 pytest tests/test_real_tools.py`) cover FwAnalyzer
@@ -56,12 +60,18 @@ parsing and error handling.
   `/etc` trees a **NuttX profile** checks init scripts for circuit-breaker overrides
   (`CBRK_IO_SAFETY 22027`, `CBRK_SUPPLY_CHK 894281`, `CBRK_USB_CHK 197848`, `CBRK_AIRSPD_CHK 162128`),
   MAVLink broadcast and safety-related settings.
+* **Permission image:** extraction never applies setuid bits or owners, so a `dirfs` run cannot check
+  permissions. For tar and ext root filesystems the sandbox therefore writes a cpio (newc) archive whose
+  headers carry the original modes, owners, empty directories and symlinks from the archive metadata
+  (`<root>.modes.cpio`); FwAnalyzer reads it in `cpiofs` image mode. FwAnalyzer's cpio backend needs a
+  root `.` entry and cannot parse names containing whitespace (such entries are left out and counted).
 * **Verified behaviour:** SquashFS image mode preserves setuid/world-writable bits; `Match = true`
   reports *matching* lines; ext2/3/4 image mode panics with stock e2tools (upstream needs a patched
-  fork), so the adapter falls back to `dirfs`; FwAnalyzer omits empty `offenders`/`informational`
-  keys from its JSON report.
-* **Limitation:** in `dirfs` mode permission checks are off (extraction normalises modes); the
-  built-in scanner checks setuid/world-writable bits from archive metadata instead.
+  fork), so ext images use the permission image instead; FwAnalyzer omits empty
+  `offenders`/`informational` keys from its JSON report; its `Suid` check reports setuid **and**
+  setgid entries as "File is SUID" - the adapter names the real bit from the archive metadata.
+* **Limitation:** other directory-mode runs (zip, ROMFS, NuttX) have no permission data; the built-in
+  scanner checks setuid/world-writable bits from archive metadata.
 
 ## cwe_checker
 
@@ -76,6 +86,12 @@ parsing and error handling.
   ARM Cortex-M images via `--bare-metal-config` (processor `ARM:LE:32:Cortex`, flash base estimated
   from the vector table and literal pools, RAM base/size from the initial SP). cwe_checker 0.9.0
   prints decimal addresses; hex addresses are taken from the TIDs.
+* **Cortex-M ELF files** (statically linked `ET_EXEC` for `EM_ARM` with Cortex-M build attributes, e.g.
+  the unstripped PX4 ELF) make cwe_checker 0.9.0 panic. The sandbox lays out their `PT_LOAD` segments by
+  physical address into a flash image (0xFF-filled gaps, ≤ 64 MiB) and writes the ELF's function
+  symbols next to it; cwe_checker analyses the image bare-metal with the ELF's load address, and every
+  reported address is shown with its function (`0x8079b38 (_ZN12MissionBlock30get_absolute_altitude_for_itemERK14mission_item_sf)`).
+  Ghidra analyses the ELF itself, so symbols and DWARF are used there.
 * **Selection:** up to `DFA_CWE_CHECKER_MAX_BINARIES` binaries, prioritising network-facing and
   drone-related names; kernel modules are skipped.
 * **Results** are grouped per (binary, CWE) and always `unverified` (upstream documents false
@@ -109,9 +125,15 @@ parsing and error handling.
   keeps whatever plug-in results FACT had produced by then, labelled as partial.
 * **Behaviour notes:** FACT's uWSGI closes idle keep-alive connections, so the client uses a fresh
   connection per request and repeats an upload once after a dropped connection (FACT derives the
-  UID from the content, so this is idempotent). `.px4` containers and raw MCU images are not
-  unpackable by FACT; the adapter also submits the decoded images and says when no plug-in produced
-  results.
+  UID from the content, so this is idempotent). `.px4` containers, raw MCU images and NuttX CROMFS
+  are not unpackable by FACT; the adapter also submits the decoded images and a tar of the files it
+  extracted from CROMFS, and says when no plug-in produced results.
+* **Stored results:** FACT keeps the results of earlier analyses of identical files (UIDs are content
+  hashes) and returns them in the summary, also for plug-ins not requested now. Only the requested
+  plug-ins are reported; the tool run lists the ignored ones. (Seen on Debian: cwe_checker results
+  from an earlier run that had requested it.)
+* **File count:** `number_of_included_files` counts direct children only (1 for a `.tar.gz`); the
+  adapter reports `total_files_in_firmware`.
 * **Plug-in selection** (`DFA_FACT_PLUGINS`): crypto material, users/passwords, software
   components, CVE lookup, known vulnerabilities, exploit mitigations, ELF analysis. FACT's own
   cwe_checker plug-in is **not** requested by default: in a real run it analysed every ELF of a
@@ -124,7 +146,10 @@ parsing and error handling.
     and locked (`*`, `!`) accounts. The adapter fetches the per-file results and reports only cracked
     passwords (high), stored password hashes (medium) and empty password fields; on Alpine that is
     none (the first mapping had reported 25 "credentials").
-  * `crypto_material`: private keys are findings; certificates and public keys are info.
+  * `crypto_material`: private keys are findings; certificates and public keys are info. The adapter
+    looks up where each object is: on Debian both "private keys" FACT reported are GnuTLS's built-in
+    self-test keys in `libgnutls.so.30.29.1`, so key material found only inside cryptographic
+    libraries is reported as info, not as a leaked key (the built-in secrets scanner does the same).
   * `exploit_mitigations`: only weak states (NX/canary/PIE/RELRO disabled, RPATH/RUNPATH set) are
     reported; "PIE/DSO present", stripped symbols, CLANGCFI/SAFESTACK are not weaknesses.
 * Normalisation maps `crypto_material`, `users_and_passwords`, `cve_lookup`, `known_vulnerabilities`,

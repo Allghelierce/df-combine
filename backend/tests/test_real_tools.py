@@ -170,6 +170,22 @@ def test_fact_on_real_px4_bootloader(real_settings):
     assert stored and "analysis" in json.loads(stored[0].read_text())
 
 
+def test_fact_analyses_files_extracted_from_px4_cromfs(real_settings):
+    """FACT has no CROMFS unpacker: the PX4 /etc files are submitted as a tar, and FACT really unpacks them."""
+    if not FACT_URL:
+        pytest.skip("DFA_FACT_URL not set")
+    try:
+        urllib.request.urlopen(f"{FACT_URL.rstrip('/')}/rest/status", timeout=10).read()  # noqa: S310
+    except OSError as exc:
+        pytest.skip(f"FACT not reachable: {exc}")
+    ctx = _scan(real_settings, _sample("px4_fmu-v2_default.px4").read_bytes(), "px4_fmu-v2_default.px4")
+    r = FactAdapter(real_settings).execute(ctx)
+    assert r.status == "completed", r.message
+    tree = next(s for s in r.details["submissions"] if s["target"].startswith("files extracted from cromfs"))
+    assert tree["status"] == "completed" and tree["files_analysed"] > 20, tree
+    assert "application/x-tar" in tree["file_types"]
+
+
 def test_inputs_are_what_they_claim():
     """Guard against silently testing the wrong file: pinned hashes are checked by the fetch script, and the
     ELF used above must really import strcpy."""
