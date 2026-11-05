@@ -1036,5 +1036,42 @@
    "distro": null,
    "owned_files": 0
   }
+ },
+ "px4_v1.18.0-rc1_fmu-v6x_default.px4": {
+  "components": [
+   "nuttx 12.12.0",
+   "px4 1.18.0-rc1"
+  ],
+  "extraction": {
+   "artifacts": 59,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 2,
+    "cromfs": 1,
+    "empty": 2,
+    "px4": 1,
+    "text": 49,
+    "xz": 4
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": 53,
+   "board_name": "PX4FMUv6X",
+   "endianness": "little",
+   "format": "px4",
+   "os_hint": "bare-metal",
+   "platform": "PX4",
+   "platform_version": "1.18.0-rc1",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
  }
 }

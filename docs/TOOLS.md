@@ -16,7 +16,8 @@ a timeout and a per-scan disk cap; the firmware is mounted read-only.
 
 ## Real-input validation (development environment)
 
-Inputs: official PX4 v1.17.0 builds (`px4-travis.s3.amazonaws.com`, pinned SHA-256), official ArduPilot
+Inputs: official PX4 builds, v1.15.0 to v1.17.0 and the v1.18.0-rc1 pre-release (`px4-travis.s3.amazonaws.com`,
+pinned SHA-256), official ArduPilot
 bootloader builds (committed in the ArduPilot repository, tag Copter-4.5.7), ArduPilot SITL vehicle
 builds published for `dronekit-sitl`, official Betaflight and INAV release builds, Debian 11 armhf and
 Alpine 3.15 arm64 root filesystems exported
@@ -186,7 +187,9 @@ parsing and error handling.
   each match names its range and source). The ranges matter because OSV's tag lists only contain tags
   on the main branch: releases tagged on release branches - NuttX `nuttx-11.0.0`, used by PX4 - were
   never matched. On the official PX4 builds this added 5 NuttX 11.0.0 CVEs and raised PX4 matches from
-  1/0/1 to 19/15/7 for v1.15.0/v1.16.2/v1.17.0. Always `unverified`: vendor backports, and whether the
+  1/0/1 to 19/15/7 for v1.15.0/v1.16.2/v1.17.0. PX4 v1.18.0-rc1 moves to NuttX 12.12.0, past every
+  published NuttX fix (the newest, CVE-2025-48769, in 12.11.0): no NuttX or PX4 matches in the
+  2026-11-04 dataset. Always `unverified`: vendor backports, and whether the
   affected code (a driver, a host tool, an example) is built into the firmware, are invisible.
   Components already covered by distro package data are not matched twice.
 * **Ownership:** findings in files owned by an installed package name that package (dpkg/opkg file

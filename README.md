@@ -186,7 +186,7 @@ make lint
   (`backend/tests/factory.py`), including malicious archives (zip-slip, tar traversal/links/devices,
   bombs, nested archives, ext duplicate-entry attack, CROMFS loops). Mocks are used for unit tests
   of tool adapters only.
-* **Real samples** — fetch the pinned public samples first (PX4 v1.17.0 builds, ArduPilot
+* **Real samples** — fetch the pinned public samples first (PX4 v1.15.0 to v1.18.0-rc1 builds, ArduPilot
   bootloaders, ArduPilot SITL vehicle builds, Betaflight and INAV release builds, esptool's ESP
   images; SHA-256 verified):
 

@@ -50,6 +50,10 @@ SAMPLES = {
     "px4_v1.16.2_fmu-v5_default.px4": (
         "0eda4323502126a2ee0a017a3e5b1e024327db5fc19b82cd0bb5562331a1bdfe", 1909718,
         "PX4 v1.16.2 for FMUv5", "https://px4-travis.s3.amazonaws.com/Firmware/v1.16.2/px4_fmu-v5_default.px4"),
+    "px4_v1.18.0-rc1_fmu-v6x_default.px4": (
+        "88c438c85d3b9432696b70f37a05fa82607097d8d3da9b01dc6d2182babf853c", 1830972,
+        "PX4 v1.18.0-rc1 for FMUv6X (NuttX 12.12.0; bootloader and xz metadata in its CROMFS)",
+        "https://px4-travis.s3.amazonaws.com/Firmware/v1.18.0-rc1/px4_fmu-v6x_default.px4"),
     "px4_fmu-v2_default.elf": ("372115d6f53b76a024ef03de640ed5132a61c4b5bfe668cc5c447e4a322d917e", 22976388,
                                "PX4 v1.17.0 FMUv2 unstripped ELF (symbols + DWARF)"),
     "px4_fmu-v5_default.elf": ("4ff1bbb8b9ae1be361b2d5e0993fce4981bacf17373e34f20954bb4c0e219432", 47202280,
@@ -152,6 +156,9 @@ def fetch(dest: Path, names: list[str] | None = None) -> dict[str, Path]:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 2 or (len(sys.argv) == 2 and sys.argv[1].startswith("-")):
+        print(__doc__)  # no options: '--help' is not a destination directory
+        raise SystemExit(0 if sys.argv[1:] in (["-h"], ["--help"]) else 2)
     target = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent / "fixtures" / "real"
     for n, p in fetch(target).items():
         print(f"ok {n} -> {p}")
