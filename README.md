@@ -243,9 +243,10 @@ for the isolation model and [docs/STATUS.md](docs/STATUS.md) for the full capabi
 
 * **Formats without real samples:** LZ4, Zstandard, lzop, CramFS, EROFS, Android sparse, UBI/UBIFS,
   JFFS2 and ext/FAT/SquashFS extraction is verified with images made by the reference tools.
-* **Verified with real inputs:** PX4 v1.17.0 `.px4`/ELF identification and extraction (incl. CROMFS),
-  ArduPilot bootloader and vehicle (SITL) identification, Betaflight and INAV release builds (version,
-  board/target, build info), cwe_checker on ARM/AArch64 ELFs, bare-metal
+* **Verified with real inputs:** PX4 `.px4`/ELF identification and extraction (incl. CROMFS) from
+  v1.15.0 to the v1.18.0-rc1 pre-release, ArduPilot bootloader and vehicle (SITL) identification,
+  Betaflight 4.3-4.5 and INAV 6-9 release builds (version, board/target, build info), cwe_checker on
+  ARM/AArch64 ELFs, bare-metal
   PX4/ArduPilot images and unstripped PX4 ELFs (via the derived flash image, symbolised), Ghidra
   function recovery on ELFs and Cortex-M images, FACT end to end over REST (incl. extracted PX4
   `/etc` trees and a full Debian rootfs in 222 s), FwAnalyzer with permission checks on Debian/Alpine
