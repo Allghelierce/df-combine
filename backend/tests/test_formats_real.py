@@ -493,3 +493,20 @@ def test_upstream_matches_note_host_tools_and_examples():
     assert HOST_OR_EXAMPLE.search("Apache NuttX RTOS: fs/vfs/fs_rename: use after free") is None
     assert HOST_OR_EXAMPLE.search("PX4 Autopilot through 1.17.0 Stack Exhaustion via tests file2 Command") is None
     assert _max_sev([VulnMatch("CVE-2025-47868", "critical", 9.8, "tools/bdf-converter: x", [])]).value == "critical"
+
+
+@pytest.mark.skipif(not (REAL / "crazyflie" / "firmware-cf2-2024.2.zip").exists(),
+                    reason="Crazyflie release bundles not fetched (scripts/fetch_real_firmware.py)")
+def test_real_crazyflie_release_bundles_identified(run_analysis):
+    """Official Crazyflie 2.x releases were named after the AI deck's ESP32 image ('Espressif'); the STM32 flight
+    controller image passed as raw data (its initial stack pointer, 0x2001ffff, is odd) and would have been loaded at
+    0x0800a000 instead of 0x08004000, after the 16 KiB bootloader."""
+    for release, nrf in (("2024.2", "2024.2"), ("2023.11", "2023.11")):
+        m = run_analysis(REAL / "crazyflie" / f"firmware-cf2-{release}.zip")
+        i = m["identification"]
+        assert (i["platform"], i["platform_confidence"], i["platform_version"], i["board_name"]) == \
+            ("Crazyflie", "high", release, "cf2"), i["platform_candidates"]
+        assert i["build"]["revision"] == "e527895e8c6e" and (i["build"]["stm32"], i["build"]["nrf51"]) == ("2023.11", nrf)
+        stm32 = next(a for a in m["extraction"]["artifacts"] if a["name"] == "/cf2-2023.11.bin")
+        assert stm32["format"] == "cortexm_raw" and stm32["details"]["flash_base"] == "0x8004000"
+        assert ("crazyflie", release) in [(c["name"], c["version"]) for c in m["components"]]

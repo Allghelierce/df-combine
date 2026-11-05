@@ -462,6 +462,80 @@
    "owned_files": 0
   }
  },
+ "crazyflie/firmware-cf2-2023.11.zip": {
+  "components": [
+   "aideck_esp 2023.06",
+   "crazyflie 2023.11",
+   "esp-idf 4.3.1-dirty"
+  ],
+  "extraction": {
+   "artifacts": 12,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 2,
+    "esp_image": 1,
+    "raw": 7,
+    "text": 1,
+    "zip": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": "cf2",
+   "endianness": "little",
+   "format": "zip",
+   "os_hint": "bare-metal",
+   "platform": "Crazyflie",
+   "platform_version": "2023.11",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "crazyflie/firmware-cf2-2024.2.zip": {
+  "components": [
+   "aideck_esp 2023.06",
+   "crazyflie 2024.2",
+   "esp-idf 4.3.1-dirty"
+  ],
+  "extraction": {
+   "artifacts": 13,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 3,
+    "esp_image": 1,
+    "raw": 7,
+    "text": 1,
+    "zip": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": "cf2",
+   "endianness": "little",
+   "format": "zip",
+   "os_hint": "bare-metal",
+   "platform": "Crazyflie",
+   "platform_version": "2024.2",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
  "cubepilot_cubeorange_default.px4": {
   "components": [
    "nuttx 11.0.0",

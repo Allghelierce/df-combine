@@ -6,7 +6,8 @@ the public firmware bucket that QGroundControl downloads from), ArduPilot's preb
 committed in the ArduPilot repository (GPL-3.0, tag Copter-4.5.7), ArduPilot vehicle builds for SITL
 (software-in-the-loop) that DroneKit publishes in its public asset bucket for `dronekit-sitl` (GPL-3.0;
 x86-64 Linux ELF programs - analysed statically, never run), official Betaflight and INAV release builds
-from the projects' GitHub releases (GPL-3.0), and the Espressif image fixtures that ship with esptool's own
+from the projects' GitHub releases (GPL-3.0), Bitcraze's official Crazyflie 2.x release bundles from its
+crazyflie-release GitHub releases (GPL-3.0), and the Espressif image fixtures that ship with esptool's own
 test suite (GPL-2.0, tag v4.8.1). Files are verified against pinned SHA-256 hashes; nothing is committed to
 the repository.
 
@@ -27,6 +28,7 @@ APBL = "https://raw.githubusercontent.com/ArduPilot/ardupilot/Copter-4.5.7/Tools
 APSITL = "https://dronekit-assets.s3.amazonaws.com/sitl/"
 BETAFLIGHT = "https://github.com/betaflight/betaflight/releases/download/"
 INAV = "https://github.com/iNavFlight/inav/releases/download/"
+CRAZYFLIE = "https://github.com/bitcraze/crazyflie-release/releases/download/"
 SAMPLES = {
     # name: (sha256, size, description[, url]) - url is a base (ending in '/') or the file's full URL
     "px4_fmu-v5_default.px4": ("b50b275507da4cb0e218c943c2aff5359e3f0914c18f6b563494b925c0a0e403", 1881838,
@@ -117,6 +119,15 @@ SAMPLES = {
         "e0cab3e31f05eb6e53d4f75fd3369bc90b02297baecb4182532b34bc28972017", 1757494,
         "INAV 9.1.0 for Matek F405 (official release; version and target before the CLI format string)",
         INAV + "9.1.0/"),
+    # Bitcraze Crazyflie 2.x official release bundles (open source, GPL): STM32 flight controller, nRF51 radio
+    # firmware (2024.2 also the S130 SoftDevice + bootloader), Lighthouse deck FPGA bitstream, AI deck ESP32 image and
+    # the bundle's manifest.json
+    "crazyflie/firmware-cf2-2024.2.zip": (
+        "6dc9c97eada03150a2888e9aee3ea4b586b575bdd7d66b40935c6b1fb0bade7a", 1258363,
+        "Crazyflie 2.x release 2024.2 (STM32 firmware 2023.11, initial SP 0x2001ffff)", CRAZYFLIE + "2024.2/"),
+    "crazyflie/firmware-cf2-2023.11.zip": (
+        "771f1ca386d2129af50178e4633f99239937c380c2501a1613055327dfd1f00e", 1153168,
+        "Crazyflie 2.x release 2023.11", CRAZYFLIE + "2023.11/"),
 }
 
 

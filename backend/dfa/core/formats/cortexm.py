@@ -9,6 +9,7 @@ Both values are checked against well known STM32 memory ranges.
 from __future__ import annotations
 
 import struct
+from collections import Counter
 from dataclasses import dataclass
 
 # (start, end) inclusive-exclusive ranges.
@@ -46,8 +47,8 @@ def analyze_vector_table(data: bytes, base_address: int | None = None) -> Vector
     if len(data) < 64:
         return None
     sp, reset = struct.unpack_from("<II", data, 0)
-    # Cortex-M ignores SP[1:0] on reset; real PX4 builds store e.g. 0x2002b962, so only require an even value.
-    if not _sp_in(sp) or sp % 2 != 0:
+    # Cortex-M ignores SP[1:0] on reset: real PX4 builds store e.g. 0x2002b962, official Crazyflie builds 0x2001ffff
+    if not _sp_in(sp):
         return None
     if reset & 1 == 0 or not _in(FLASH_RANGES, reset & ~1):
         return None
@@ -79,13 +80,22 @@ def estimate_flash_base(data: bytes, max_words: int = 400_000) -> tuple[int, dic
     vectors = [struct.unpack_from("<I", data, i * 4)[0] for i in range(1, min(len(data) // 4, 128))]
     handlers = [v & ~1 for v in vectors if v & 1 and _in(FLASH_RANGES, v & ~1)]
     lo = min(handlers) if handlers else vt.reset_handler & ~1
+    hi = max(handlers) if handlers else vt.reset_handler & ~1
     cands: set[int] = set()
     for addr in (vt.reset_handler & ~1, lo):
         for align in (0x200, 0x400, 0x1000, 0x4000, 0x8000, 0x10000, 0x20000):
             base = addr & ~(align - 1)
             if all(base <= h < base + len(data) for h in handlers):
                 cands.add(base)
-    if not cands:
+    # bootloader-sized offsets from the start of the flash region: the vector table's lowest handler can lie far
+    # into the image (official Crazyflie builds start at 0x08004000, after a 16 KiB bootloader; their lowest
+    # handler is at 0x0800a160)
+    region = next(((rlo, rhi) for rlo, rhi in FLASH_RANGES if rlo <= lo < rhi), None)
+    offsets: set[int] = set()
+    if region:
+        offsets = {base for base in range(region[0], min(lo, region[0] + 128 * 0x4000) + 1, 0x4000)
+                   if base + len(data) > hi} - cands
+    if not cands and not offsets:
         return None
     # string start offsets
     starts: set[int] = set()
@@ -98,14 +108,18 @@ def estimate_flash_base(data: bytes, max_words: int = 400_000) -> tuple[int, dic
                 starts.add(i - run)
             run = 0
     words = struct.unpack_from(f"<{min(len(data) // 4, max_words)}I", data, 0)
-    scores = {}
-    for base in cands:
-        end = base + len(data)
-        scores[base] = sum(1 for w in words if base <= w < end and (w - base) in starts)
+    span_lo, span_hi = min(cands | offsets), max(cands | offsets) + len(data)
+    pointers = Counter(w for w in words if span_lo <= w < span_hi)  # words that could point into the image
+    scores = {base: sum(pointers.get(base + s, 0) for s in starts) for base in cands | offsets}
     conventional = (vt.reset_handler & ~1) & ~0x3FFF  # PX4/ArduPilot apps start on 16 KiB boundaries
 
     def tz(x: int) -> int:
         return (x & -x).bit_length() if x else 64
 
-    best = max(sorted(cands), key=lambda b: (scores[b], b == conventional, tz(b)))
-    return best, {"candidates": {hex(b): scores[b] for b in sorted(cands)}, "method": "vector table + string pointers"}
+    best = max(sorted(cands), key=lambda b: (scores[b], b == conventional, tz(b))) if cands else None
+    if offsets:  # an offset wins only on clear evidence: twice the pointers, and a few of them
+        top = max(sorted(offsets), key=lambda b: (scores[b], tz(b)))
+        if best is None or (scores[top] >= 8 and scores[top] >= 2 * scores[best]):
+            best = top
+    shown = sorted(scores, key=lambda b: -scores[b])[:8]
+    return best, {"candidates": {hex(b): scores[b] for b in sorted(shown)}, "method": "vector table + string pointers"}

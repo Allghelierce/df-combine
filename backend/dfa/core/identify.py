@@ -399,6 +399,8 @@ class PlatformSignature:
     build_info: list[re.Pattern[bytes]] = field(default_factory=list)
     # the version is stored as a standalone NUL-terminated "x.y.z" constant (too short for string scans)
     version_constant: bool = False
+    version_constant_re: re.Pattern[bytes] | None = None  # another form of that constant (default: x.y.z)
+    boards: list[tuple[bytes, str]] = field(default_factory=list)  # (signature, board it names)
 
 
 VERSION_CONSTANT = re.compile(rb"(?<=\x00)(\d{1,2}\.\d{1,2}\.\d{1,2})\x00")
@@ -494,6 +496,23 @@ PLATFORMS: list[PlatformSignature] = [
         version_patterns=[],
     ),
     PlatformSignature(
+        name="Crazyflie",
+        family="flight-controller",
+        # Bitcraze's open-source nano quadcopter: the STM32 flight controller (crazyflie-firmware), the nRF51 radio and
+        # power controller (crazyflie2-nrf-firmware) and its bootloader. "0;CF20" starts the platform's device type
+        # string, in all three.
+        strong=[b"Bitcraze Crazyflie", b"Crazyflie 2.X", b"Crazyflie Loader", b"CRAZYFLIE_SRV:", b"0;CF20",
+                b"SYS: Build %s:%s (%s) %s"],
+        weak=[b"Crazyflie", b"Bitcraze", b"CRTP", b"Syslink", b"DECK_INFO"],
+        version_patterns=[],
+        # version.c in crazyflie-firmware: branch, release tag (2023.11, 2024.2), git revision
+        build_info=[re.compile(rb"\x00[\w./-]{1,40}\x00(?P<version>20\d\d\.\d{1,2}(?:\.\d+)?)\x00"
+                               rb"(?P<revision>[0-9a-f]{12,40})\x00")],
+        version_constant=True,  # crazyflie2-nrf-firmware keeps only the release tag
+        version_constant_re=re.compile(rb"(?<=\x00)(20\d\d\.\d{1,2}(?:\.\d+)?)\x00"),
+        boards=[(b"Crazyflie 2.X", "cf2"), (b"0;CF20", "cf2")],  # the cf2 platform: Crazyflie 2.0, 2.1, 2.1 Brushless
+    ),
+    PlatformSignature(
         name="Espressif",
         family="embedded-peripheral",  # e.g. Remote ID modules, RC-link receivers, telemetry bridges
         strong=[],  # image structures are added as hints by the analysis stage
@@ -536,14 +555,15 @@ class PlatformAccumulator:
         self.hints: dict[str, list[str]] = {p.name: [] for p in PLATFORMS}
         self.build: dict[str, dict] = {}
         self.constants: dict[str, Counter] = {}
+        self.info: dict[str, dict] = {}  # version/board/build from structured metadata (e.g. a release manifest)
 
     def feed_bytes(self, block: bytes) -> None:
         for p in PLATFORMS:
-            for sig in p.strong + p.weak:
+            for sig in p.strong + p.weak + [b for b, _board in p.boards]:
                 if sig not in self.hits[p.name] and sig in block:
                     self.hits[p.name][sig] = 1
             if p.version_constant and any(s in block for s in p.strong):
-                for m in VERSION_CONSTANT.finditer(block):
+                for m in (p.version_constant_re or VERSION_CONSTANT).finditer(block):
                     self.constants.setdefault(p.name, Counter())[m.group(1).decode("ascii")] += 1
             if p.build_info and p.name not in self.build and any(s in block for s in p.strong):
                 for pat in p.build_info:
@@ -567,6 +587,17 @@ class PlatformAccumulator:
         """Strong out-of-band evidence (e.g. container magic) for a platform."""
         self.hints.setdefault(platform, []).append(evidence)
 
+    def set_info(self, platform: str, version: str | None = None, board: str | None = None,
+                 build: dict | None = None) -> None:
+        """Version, board and build details from structured metadata (a release manifest); they take precedence over
+        what signatures suggest."""
+        info = self.info.setdefault(platform, {})
+        for key, value in (("version", version), ("board", board)):
+            if value and key not in info:
+                info[key] = value
+        if build:
+            info.setdefault("build", {}).update(build)
+
     def results(self) -> list[PlatformGuess]:
         out: list[PlatformGuess] = []
         for p in PLATFORMS:
@@ -586,16 +617,23 @@ class PlatformAccumulator:
             else:
                 conf = "low"
             ev = hints + [f"signature '{_show(s)}'" for s in strong] + [f"string '{_show(s)}'" for s in weak]
-            version = (build or {}).get("version")
+            info = self.info.get(p.name, {})
+            if info.get("build"):
+                build = {**(build or {}), **info["build"]}
+            version = info.get("version") or (build or {}).get("version")
             if version is None and self.versions[p.name] and (strong or hints):
                 version = self.versions[p.name].most_common(1)[0][0]
             if version is None and strong and self.constants.get(p.name):
                 version = self.constants[p.name].most_common(1)[0][0]
             vehicle = self.vehicles[p.name].most_common(1)[0][0] if self.vehicles[p.name] else None
             vehicle = VEHICLE_ALIASES.get(vehicle, vehicle)
+            board = None
+            if strong or hints:
+                board = info.get("board") or (build or {}).get("board") or next(
+                    (name for sig, name in p.boards if sig in self.hits[p.name]), None)
             out.append(PlatformGuess(name=p.name, family=p.family, confidence=conf, score=score,
                                      evidence=ev[:12], version=version, vehicle=vehicle,
-                                     board=(build or {}).get("board"), build=build or None))
+                                     board=board, build=build or None))
         out.sort(key=lambda g: -g.score)
         return out
 

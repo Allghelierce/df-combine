@@ -27,6 +27,7 @@ SAMPLES = [
     "betaflight/betaflight_4.5.1_STM32F405.hex",
     "inav/inav_7.1.2_MATEKF405.hex", "inav/inav_7.1.2_MATEKH743.hex", "inav/inav_6.1.1_MATEKF405.hex",
     "inav/inav_9.1.0_MATEKF405.hex",
+    "crazyflie/firmware-cf2-2024.2.zip", "crazyflie/firmware-cf2-2023.11.zip",
 ]
 
 

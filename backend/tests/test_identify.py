@@ -186,3 +186,41 @@ def test_build_information_blocks():
     acc = PlatformAccumulator()
     acc.feed_bytes(b"\x00\x00\x001.2.3\x00\x00" + inav.replace(b"INAV ", b"XXXX "))
     assert not any(r.name in ("INAV", "Betaflight") and r.version for r in acc.results())
+
+
+def test_crazyflie_images_and_release_manifests(tmp_path, run_analysis):
+    """Bitcraze Crazyflie: the flight controller's version.c block (branch, release tag, git revision), the nRF51
+    firmware's bare release tag and a release bundle's manifest.json; the image's odd initial stack pointer
+    (0x2001ffff, as official builds have it) is a valid Cortex-M vector table."""
+    import io
+    import json
+    import struct
+    import zipfile
+
+    from dfa.core.formats.cortexm import analyze_vector_table
+    vectors = struct.pack("<II", 0x2001FFFF, 0x08019C11) + struct.pack("<14I", *([0x08012435] * 14))
+    assert analyze_vector_table(vectors + bytes(64)) is not None
+    stm32 = (vectors + bytes(4096) + b"\x00Bitcraze AB\x00Crazyflie 2.X\x00SYS: Build %s:%s (%s) %s\n\x00"
+             + b"\x00HEAD\x002024.2\x00e527895e8c6e\x00" + bytes(4096))
+    (tmp_path / "cf2.bin").write_bytes(stm32)
+    i = run_analysis(tmp_path / "cf2.bin")["identification"]
+    assert (i["platform"], i["platform_version"], i["board_name"], i["build"]["revision"]) == \
+        ("Crazyflie", "2024.2", "cf2", "e527895e8c6e")
+    files = {"cf2-2024.2.bin": {"platform": "cf2", "target": "stm32", "type": "fw", "release": "2024.2",
+                                "repository": "crazyflie-firmware"},
+             "sd.bin": {"platform": "cf2", "target": "nrf51", "type": "bootloader+softdevice", "release": "2024.1",
+                        "repository": "crazyflie2-nrf-bootloader"}}
+    for name, manifest, expected in (
+            ("bundle.zip", {"fw_platform": "cf2", "release": "2024.2", "files": files}, ("Crazyflie", "2024.2")),
+            ("other.zip", {"fw_platform": "cf2", "release": "2024.2",  # not Bitcraze's: no crazyflie repository
+                           "files": {"a.bin": {"target": "stm32", "release": "1.0", "repository": "acme-fw"}}},
+             ("Unknown", None)),
+            ("hostile.zip", {"fw_platform": "cf2‮<b>", "release": "2024.2", "files": files}, ("Unknown", None))):
+        b = io.BytesIO()
+        with zipfile.ZipFile(b, "w") as zf:
+            zf.writestr("manifest.json", json.dumps(manifest))
+        (tmp_path / name).write_bytes(b.getvalue())
+        m = run_analysis(tmp_path / name)
+        assert (m["identification"]["platform"], m["identification"]["platform_version"]) == expected, name
+        if name == "bundle.zip":
+            assert m["identification"]["build"] == {"stm32": "2024.2", "nrf51 bootloader+softdevice": "2024.1"}

@@ -183,6 +183,11 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
             app = a.details.get("esp_app")
             acc.hint("Espressif", f"{a.details.get('esp_chip')} application image with a valid checksum"
                      + (f" (ESP-IDF project '{app.get('project_name')}')" if app else ""))
+        elif a.format == "text" and a.name.rsplit("/", 1)[-1] == "manifest.json" and a.size <= 64 * 1024:
+            if cf := _crazyflie_manifest(ex.path_of(a.id)):
+                acc.hint("Crazyflie", f"Crazyflie release manifest {ctx.where(a)} (release {cf['release']}, "
+                         f"platform {cf['platform']})")
+                acc.set_info("Crazyflie", version=cf["release"], board=cf["platform"], build=cf["targets"])
     platforms = acc.results()
 
     progress("components")
@@ -371,6 +376,33 @@ def _primary_arch(arts: list[Artifact], ctx: ScanContext) -> tuple[str | None, i
         g = guesses[0].details["arch_guess"]
         return f"{g['architecture']} (opcode heuristic)", g["bits"], g["endianness"], None
     return None, None, None, None
+
+
+_MANIFEST_VALUE = re.compile(r"[\w.:+-]{1,40}")
+
+
+def _crazyflie_manifest(path: Path) -> dict | None:
+    """Release and targets from the manifest.json of a Bitcraze Crazyflie release bundle (fw_platform, release, and
+    per file: platform, target, type, release, repository); None if it is not one. Firmware-supplied: only short
+    word-like values are kept."""
+    try:
+        data = json.loads(path.read_bytes()[:64 * 1024])
+    except (ValueError, OSError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("files"), dict):
+        return None
+    ok = lambda v: isinstance(v, str) and _MANIFEST_VALUE.fullmatch(v) is not None  # noqa: E731
+    platform, release = data.get("fw_platform"), data.get("release")
+    entries = [e for e in list(data["files"].values())[:32] if isinstance(e, dict)]
+    if not (ok(platform) and ok(release)) or not any(
+            isinstance(e.get("repository"), str) and e["repository"].startswith("crazyflie") for e in entries):
+        return None
+    targets = {}
+    for e in entries:
+        if ok(e.get("target")) and ok(e.get("release")):
+            key = f"{e['target']} {e['type']}" if ok(e.get("type")) and e["type"] != "fw" else e["target"]
+            targets[key] = e["release"]
+    return {"platform": platform, "release": release, "targets": targets}
 
 
 def _identification_findings(ctx: ScanContext, arts: list[Artifact], platforms) -> list[Finding]:
