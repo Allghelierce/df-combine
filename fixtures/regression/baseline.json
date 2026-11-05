@@ -804,6 +804,38 @@
    "owned_files": 0
   }
  },
+ "inav/inav_9.1.0_MATEKF405.hex": {
+  "components": [
+   "inav 9.1.0"
+  ],
+  "extraction": {
+   "artifacts": 2,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1,
+    "ihex": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": "MATEKF405",
+   "endianness": "little",
+   "format": "ihex",
+   "os_hint": "bare-metal",
+   "platform": "INAV",
+   "platform_version": "9.1.0",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
  "px4_fmu-v2_default.elf": {
   "components": [
    "nuttx 11.0.0",

@@ -25,6 +25,7 @@ SAMPLES = [
     "ardupilot/sitl-linux-plane-3.3.0.tar.gz", "ardupilot/sitl-linux-rover-2.50.tar.gz",
     "betaflight/betaflight_4.3.2_STM32F405.hex", "betaflight/betaflight_4.3.2_STM32H743.hex",
     "inav/inav_7.1.2_MATEKF405.hex", "inav/inav_7.1.2_MATEKH743.hex", "inav/inav_6.1.1_MATEKF405.hex",
+    "inav/inav_9.1.0_MATEKF405.hex",
 ]
 
 

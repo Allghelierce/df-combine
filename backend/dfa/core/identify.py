@@ -410,10 +410,15 @@ PLATFORMS: list[PlatformSignature] = [
         weak=[b"inav"],
         version_patterns=[re.compile(r"INAV/?\s*\w*\s*(\d+\.\d+\.\d+)")],
         version_constant=True,
-        # official 6.x/7.x builds: git revision, build time, build date, version, target
+        # official builds keep the CLI 'version' format and its arguments together, in one of two orders:
+        # git revision, build time, build date, version, target (6.x, 7.x, 9.x F7/H7) or version, target, format,
+        # revision, time, date (9.x F405 builds)
         build_info=[re.compile(rb"(?P<revision>[0-9a-f]{7,8})\x00+(?P<time>\d\d:\d\d:\d\d)\x00+"
                                rb"(?P<date>[A-Z][a-z]{2} [ \d]\d \d{4})\x00+(?P<version>\d{1,2}\.\d{1,2}\.\d{1,2})"
-                               rb"\x00+(?P<board>[A-Z0-9][A-Z0-9_]{2,31})\x00")],
+                               rb"\x00+(?P<board>[A-Z0-9][A-Z0-9_]{2,31})\x00"),
+                    re.compile(rb"(?P<version>\d{1,2}\.\d{1,2}\.\d{1,2})\x00+(?P<board>[A-Z0-9][A-Z0-9_]{2,31})\x00+"
+                               rb"%s/%s %s %s / %s \(%s\)(?: %s)?\x00+(?P<revision>[0-9a-f]{7,8})\x00+"
+                               rb"(?P<time>\d\d:\d\d:\d\d)\x00+(?P<date>[A-Z][a-z]{2} [ \d]\d \d{4})\x00")],
     ),
     PlatformSignature(
         name="DJI",

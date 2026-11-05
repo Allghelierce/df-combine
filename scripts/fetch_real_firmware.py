@@ -109,6 +109,10 @@ SAMPLES = {
     "inav/inav_6.1.1_MATEKF405.hex": (
         "e32ccea58504e183de505c92c24dd1ebff8b6f2c9c49173a6e719e22ae78ef1c", 1530180,
         "INAV 6.1.1 for Matek F405 (official release)", INAV + "6.1.1/"),
+    "inav/inav_9.1.0_MATEKF405.hex": (
+        "e0cab3e31f05eb6e53d4f75fd3369bc90b02297baecb4182532b34bc28972017", 1757494,
+        "INAV 9.1.0 for Matek F405 (official release; version and target before the CLI format string)",
+        INAV + "9.1.0/"),
 }
 
 

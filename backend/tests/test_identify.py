@@ -159,6 +159,13 @@ def test_build_information_blocks():
     g = next(r for r in acc.results() if r.name == "INAV")
     assert (g.confidence, g.version, g.board) == ("high", "7.1.2", "MATEKF405")
     assert g.build["revision"] == "4e1e59eb" and g.build["date"] == "May 31 2024"
+    # INAV 9.x F405 builds place version and target before the CLI format string (board and build were lost)
+    inav9 = (b"INAV %s (%s) %s\x00\x00NONE\x00\x00\x00\x009.1.0\x00\x00\x00MATEKF405\x00\x00\x00%s/%s %s %s / %s (%s) %s"
+             b"\x00\x00\x00\x0015317503\x00\x00\x00\x0002:12:07\x00\x00\x00\x00Jul  8 2026\x0013.2.1 20231009\x00GCC-%s\x00")
+    acc = PlatformAccumulator()
+    acc.feed_bytes(inav9)
+    g = next(r for r in acc.results() if r.name == "INAV")
+    assert (g.version, g.board, g.build["revision"], g.build["time"]) == ("9.1.0", "MATEKF405", "15317503", "02:12:07")
     bf = (b"Betaflight\x00\x00Betaflight STM32F405\x00\x00 ----\x00\x00\x004.3.2\x00\x00\x00%s %s: %s\x00"
           b"Firmware revision\x00\x00\x00STM32F405\x00\x00\x0060c9521\x0007:26:30\x00\x00\x00\x00Nov 28 2022\x00%s %s\x00")
     acc = PlatformAccumulator()
