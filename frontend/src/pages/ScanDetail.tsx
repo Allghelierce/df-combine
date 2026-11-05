@@ -265,7 +265,7 @@ function Overview({ scan }: { scan: Scan }) {
               {ident.board_name && (
                 <>
                   <dt>Board / target</dt>
-                  <dd className="mono">{ident.board_name}</dd>
+                  <dd className="mono">{shown(ident.board_name)}</dd>
                 </>
               )}
               {buildLine(ident.build) && (
@@ -286,7 +286,7 @@ function Overview({ scan }: { scan: Scan }) {
                   {ident.platform_candidates.map((c) => (
                     <li key={c.name}>
                       <b>{c.name}</b> <span className="muted">score {c.score}, {c.confidence}</span>
-                      <div className="mono small muted">{c.evidence.join(" · ")}</div>
+                      <div className="mono small muted">{shown(c.evidence.join(" · "))}</div>
                     </li>
                   ))}
                 </ul>
@@ -381,7 +381,7 @@ function Overview({ scan }: { scan: Scan }) {
                 <summary className="small">{ex.warnings.length} extraction warning(s)</summary>
                 <ul className="mono small warn-list">
                   {ex.warnings.map((w, i) => (
-                    <li key={i}>{w}</li>
+                    <li key={i}>{shown(w)}</li>
                   ))}
                 </ul>
               </details>
@@ -508,8 +508,8 @@ function Inventory({ data, running }: { data: Awaited<ReturnType<typeof api.arti
           <ul className="mono small warn-list">
             {data.links.slice(0, 200).map((l, i) => (
               <li key={i}>
-                [{l.kind}] {l.path}
-                {l.target ? ` → ${l.target}` : ""}
+                [{l.kind}] {shown(l.path)}
+                {l.target ? ` → ${shown(l.target)}` : ""}
               </li>
             ))}
           </ul>
@@ -605,10 +605,10 @@ function Components({ scan }: { scan: Scan }) {
                 {pk.slice(0, 2000).map((p) => (
                   <tr key={`${p.manager}-${p.name}-${p.version}`}>
                     <td className="strong">
-                      {p.name} <span className="tag">{p.manager}</span>
+                      {shown(p.name)} <span className="tag">{p.manager}</span>
                     </td>
-                    <td className="mono small">{p.version}</td>
-                    <td className="mono small muted">{p.source && p.source !== p.name ? `${p.source} ${p.source_version ?? ""}` : "–"}</td>
+                    <td className="mono small">{shown(p.version)}</td>
+                    <td className="mono small muted">{p.source && p.source !== p.name ? shown(`${p.source} ${p.source_version ?? ""}`) : "–"}</td>
                     <td className="small" title={p.owned_files == null ? "file ownership was not recorded for this scan" : undefined}>
                       {p.owned_files ?? "–"}
                     </td>
@@ -638,12 +638,12 @@ function Components({ scan }: { scan: Scan }) {
               {comps.map((c) => (
                 <tr key={`${c.name}-${c.version}`}>
                   <td className="strong">
-                    {c.name}
+                    {shown(c.name)}
                     {c.variant ? <span className="tag">{c.variant}</span> : null}
                   </td>
-                  <td className="mono">{c.version}</td>
+                  <td className="mono">{shown(c.version)}</td>
                   <td className="small muted">{c.method}</td>
-                  <td className="mono small">{c.sources.join(" · ")}</td>
+                  <td className="mono small">{shown(c.sources.join(" · "))}</td>
                   <td>
                     {c.vulnerabilities?.length ? (
                       <VulnList vulns={c.vulnerabilities} />

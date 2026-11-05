@@ -127,7 +127,7 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
                 </div>
                 {isOpen && (
                   <div className="finding-body">
-                    <p>{f.description}</p>
+                    <p>{shown(f.description)}</p>
                     <dl className="kv">
                       <dt>Basis</dt>
                       <dd>
@@ -156,7 +156,7 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
                         )}
                       </dd>
                       <dt>Remediation</dt>
-                      <dd>{f.remediation}</dd>
+                      <dd>{shown(f.remediation)}</dd>
                     </dl>
                     {f.evidence.length > 0 && (
                       <div className="evidence">

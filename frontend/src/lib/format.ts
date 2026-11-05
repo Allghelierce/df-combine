@@ -113,7 +113,7 @@ export function imageSummary(i: ImageInfo | null | undefined): string | null {
   if (i.prepended_bytes) parts.push(`${n(i.prepended_bytes)} bytes before the archive (e.g. a vendor header)`);
   if (i.trailing_padding_bytes) parts.push(`${n(i.trailing_padding_bytes)} bytes of padding after the data`);
   if (i.trailing_bytes) parts.push(`${n(i.trailing_bytes)} bytes after the data (size field or checksum)`);
-  if (!i.flash_base) return parts.length ? parts.join(" · ") : null;
+  if (!i.flash_base) return parts.length ? shown(parts.join(" · ")) : null;
   parts.push(`load address ${i.flash_base}`);
   if (i.symbol_count) {
     parts.push(
@@ -123,7 +123,7 @@ export function imageSummary(i: ImageInfo | null | undefined): string | null {
     );
   }
   if (i.identical_to !== undefined && i.identical_to !== null) parts.push(`identical to artifact #${i.identical_to}`);
-  return parts.join(" · ");
+  return shown(parts.join(" · "));
 }
 
 export const INVENTORY_ROWS = 1500;
@@ -150,13 +150,19 @@ export function externalUrl(ref: string): string | null {
   }
 }
 
-// control, bidirectional-override and zero-width characters (tab and newline included)
-const HIDDEN = /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g;
+// controls (tab and newline included), bidirectional overrides/isolates, and characters that render as nothing
+// or as blank space: soft hyphen, combining grapheme joiner, Hangul fillers, Khmer/Mongolian invisible vowels and
+// separators, zero-width and line/paragraph separators, invisible operators, variation selectors, tag characters
+const HIDDEN =
+  /[\u0000-\u001f\u007f-\u009f\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]/gu;
 
 /** Firmware-derived text (names, paths, evidence) as it is: characters that would act instead of showing
  * (U+202E reversing "evil\u202etxt.exe" into "evilexe.txt", zero-width ones, a newline in a name) are
  * displayed as escapes such as \u202e. */
 export function shown(text: string | null | undefined): string {
   if (!text) return text ?? "";
-  return text.replace(HIDDEN, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  return text.replace(HIDDEN, (c) => {
+    const cp = c.codePointAt(0) ?? 0;
+    return cp > 0xffff ? `\\u{${cp.toString(16)}}` : `\\u${cp.toString(16).padStart(4, "0")}`;
+  });
 }

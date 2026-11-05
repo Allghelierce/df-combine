@@ -342,7 +342,8 @@ def test_pdf_report_survives_texts_longer_than_a_page(client, settings, fixtures
         scan.components = [{"name": wide, "version": wide, "method": "probe", "sources": [wide],
                             "vulnerabilities_note": wide}]
         row = db.query(FindingRow).filter_by(scan_id=s["id"]).first()
-        row.description, row.remediation, row.affected_component = "D" * 60000, wide, "c" * 9000
+        # escapes are up to 6x longer than the characters they show: escaping comes before the cut
+        row.description, row.remediation, row.affected_component = "D" * 60000, wide, "\x01" * 2250 + "c" * 9000
         row.evidence = [{"kind": "string", "value": "V" * 20000, "location": "L" * 5000}] * 30
     rp = client.get(f"/api/scans/{s['id']}/report.pdf")
     assert rp.status_code == 200 and rp.content.startswith(b"%PDF")

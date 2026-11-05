@@ -84,5 +84,9 @@ describe("firmware-derived text", () => {
     expect(shown("zero\u200bwidth\ufeff")).toBe("zero\\u200bwidth\\ufeff");
     expect(shown("/etc/été/中文/user\\x80dir")).toBe("/etc/été/中文/user\\x80dir");  // letters and \xNN text stay
     expect(shown(null)).toBe("");
+    expect(shown("busy\u00adbox")).toBe("busy\\u00adbox"); // soft hyphen: renders as "busybox"
+    expect(shown("a\u2028b\u3164c\ufe0fd")).toBe("a\\u2028b\\u3164c\\ufe0fd");
+    expect(shown("tag\u{e0041}x")).toBe("tag\\u{e0041}x"); // tag characters lie beyond U+FFFF
+    expect(shown("emoji 😀 stays")).toBe("emoji 😀 stays");
   });
 });
