@@ -19,9 +19,12 @@ Security properties (all enforced here, independent of the outer sandbox):
 from __future__ import annotations
 
 import bz2
+import contextlib
 import hashlib
+import json
 import lzma
 import os
+import re
 import resource
 import shutil
 import stat
@@ -167,6 +170,7 @@ class Extractor:
         self._next_id = 0
         self._paths: dict[int, Path] = {}
         self._pending_meta: dict[str, dict] = {}
+        self._dir_meta: dict[int, dict[str, tuple[int, int, int]]] = {}  # container -> dir -> (mode, uid, gid)
         self._tree_roots: dict[int, tuple[Path, bool]] = {}  # artifact id -> (root, written by external tool)
         self._registered: set[int] = set()
         # Unpackers that may follow links they create themselves are only allowed inside the container sandbox.
@@ -181,6 +185,7 @@ class Extractor:
         info = detect_format(input_path)
         root = self._register(input_path, "<input>", original_name, info, None, 0, "input")
         self._process(root)
+        self._write_mode_images()
         self.result.stats = {
             "artifacts": len(self.result.artifacts),
             "bytes_written": self.budget.bytes_written,
@@ -189,6 +194,82 @@ class Extractor:
             "external_tools": {k: bool(v) for k, v in self._external_tools.items()},
         }
         return self.result
+
+    # ---- permission images for FwAnalyzer ---------------------------------
+    def _write_mode_images(self) -> None:
+        """An extracted tree has normalised modes (setuid bits are never applied), so FwAnalyzer cannot check
+        permissions on it. For root filesystems whose original metadata is known (tar, ext) write a cpio (newc)
+        archive that carries modes and owners as header fields; FwAnalyzer reads it in cpio image mode."""
+        for fs in self.result.filesystems:
+            if fs["type"] not in ("tar", "ext"):
+                continue
+            root = self.work_dir / fs["root"]
+            if not (root / "etc").is_dir() or not ((root / "bin").exists() or (root / "usr").is_dir()):
+                continue
+            try:
+                fs["mode_image"], fs["mode_image_skipped"] = self._write_cpio(fs["artifact_id"], root)
+            except (OSError, LimitExceeded) as exc:
+                self.result.warnings.append(f"{fs['name']}: no permission image for FwAnalyzer ({exc})")
+            special = {"/" + d: m for d, (m, _u, _g) in sorted(self._dir_meta.get(fs["artifact_id"], {}).items())
+                       if m & 0o7002}  # setuid/setgid/sticky or world-writable directories (original modes)
+            if special:
+                fs["special_dirs"] = dict(list(special.items())[:500])
+
+    def _write_cpio(self, parent_id: int, root: Path) -> tuple[str, int]:
+        ok_name = re.compile(r"^[^\s\x00-\x1f\x7f]+$")  # FwAnalyzer parses 'cpio -tv' listings by whitespace
+        skipped = 0
+        entries: list[tuple[str, int, int, int, bytes | Path]] = []  # (name, mode, uid, gid, data)
+        dmeta = self._dir_meta.get(parent_id, {})
+        dirs = set(dmeta)  # recorded directories include empty ones (e.g. /tmp), which extraction never creates
+        for dirpath, dirnames, _files in os.walk(root):
+            dirs.update(str((Path(dirpath) / d).relative_to(root)) for d in dirnames)
+        entries.append((".", 0o040755, 0, 0, b""))  # FwAnalyzer's cpio backend needs the root entry
+        for rel in dirs:
+            mode, uid, gid = dmeta.get(rel, (0o755, 0, 0))
+            entries.append((rel, 0o040000 | mode, uid, gid, b""))
+        for a in self.result.artifacts:
+            if a.parent_id != parent_id or a.origin != "extracted":
+                continue
+            rel = a.name.lstrip("/")
+            p = self._paths[a.id]
+            entries.append((rel, 0o100000 | (a.mode if a.mode is not None else 0o644), a.uid or 0, a.gid or 0, p))
+        for ln in self.result.links:
+            if ln.artifact_parent == parent_id and ln.kind == "symlink" and ln.target:
+                with contextlib.suppress(UnsafePath):
+                    rel = str(safe_member_path(ln.path)).strip("/")
+                    entries.append((rel, 0o120777, 0, 0, ln.target.encode("utf-8", "replace")[:4096]))
+        dest = root.parent / f"{root.name}.modes.cpio"
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+        written = 0
+        with os.fdopen(fd, "wb") as out:
+            def put(name: str, mode: int, uid: int, gid: int, size: int, ino: int) -> None:
+                nonlocal written
+                raw = name.encode("utf-8", "replace") + b"\0"
+                hdr = b"070701" + b"".join(b"%08X" % v for v in (ino, mode, uid, gid, 1, 0, size, 0, 0, 0, 0,
+                                                                 len(raw), 0))
+                blob = hdr + raw
+                blob += b"\0" * (-len(blob) % 4)
+                out.write(blob)
+                written += len(blob)
+            for ino, (name, mode, uid, gid, data) in enumerate(sorted(entries, key=lambda e: e[0]), 1):
+                if not ok_name.match(name):
+                    skipped += 1
+                    continue
+                if isinstance(data, Path):
+                    size = data.stat().st_size
+                    put(name, mode, uid, gid, size, ino)
+                    with data.open("rb") as src:
+                        while chunk := src.read(COPY_CHUNK):
+                            out.write(chunk)
+                            self.budget.charge_bytes(len(chunk))
+                    pad = -size % 4
+                else:
+                    put(name, mode, uid, gid, len(data), ino)
+                    out.write(data)
+                    pad = -len(data) % 4
+                out.write(b"\0" * pad)
+            put("TRAILER!!!", 0, 0, 0, 0, 0)
+        return self._rel(dest), skipped
 
     def path_of(self, artifact_id: int) -> Path:
         return self._paths[artifact_id]
@@ -262,6 +343,8 @@ class Extractor:
     # ---- recursion --------------------------------------------------------
     def _process(self, art: Artifact) -> None:
         handler = HANDLERS.get(art.format)
+        if art.format == "elf" and not _is_mcu_elf(self.path_of(art.id)):
+            return  # ordinary ELF files are analysed as they are
         carve = art.format in ("raw", "cortexm_raw") and art.size >= 4096
         if handler is None and not carve:
             return
@@ -389,6 +472,10 @@ class Extractor:
                 if count > self.limits.max_files:
                     raise LimitExceeded(f"tar has more than {self.limits.max_files} entries")
                 if ti.isdir():
+                    with contextlib.suppress(UnsafePath):
+                        d = str(safe_member_path(ti.name)).strip("/")
+                        if d and d != ".":
+                            self._dir_meta.setdefault(art.id, {})[d] = (ti.mode & 0o7777, ti.uid, ti.gid)
                     continue
                 if ti.issym() or ti.islnk():
                     self._record_link(art, ti.name, "symlink" if ti.issym() else "hardlink", ti.linkname[:4096])
@@ -579,6 +666,45 @@ class Extractor:
         root = dest if dest.exists() else out
         self._record_fs(art, "erofs", root, image_artifact=art.id)
         return self._register_tree(art, root)
+
+    def h_mcu_elf(self, art: Artifact) -> list[Artifact]:
+        """Flash image of a bare-metal Cortex-M ELF (PX4/ArduPilot/NuttX builds), laid out by load address like
+        'objcopy -O binary', plus its function symbols: bare-metal tools analyse the image with the exact load
+        address, and their findings can be mapped back to function names."""
+        from elftools.elf.elffile import ELFFile
+        src = self.path_of(art.id)
+        with src.open("rb") as fp:
+            elf = ELFFile(fp)
+            loads = [(s["p_paddr"], s["p_filesz"], s["p_offset"]) for s in elf.iter_segments()
+                     if s["p_type"] == "PT_LOAD" and s["p_filesz"] > 0]
+            if not loads:
+                raise FormatError("no loadable segments")
+            base = min(p for p, _, _ in loads)
+            end = max(p + n for p, n, _ in loads)
+            if end - base > 64 * 1024**2 or any(off + n > art.size for _, n, off in loads):
+                raise LimitExceeded("ELF load segments span more than 64 MiB or exceed the file")
+            image = bytearray(b"\xff" * (end - base))
+            for paddr, filesz, off in loads:
+                fp.seek(off)
+                image[paddr - base:paddr - base + filesz] = fp.read(filesz)
+            symbols = []
+            tab = elf.get_section_by_name(".symtab")
+            if tab is not None and hasattr(tab, "iter_symbols"):
+                for sym in tab.iter_symbols():
+                    if sym["st_info"]["type"] == "STT_FUNC" and sym["st_value"] and sym.name:
+                        symbols.append([sym["st_value"] & ~1, int(sym["st_size"]), sym.name[:200]])
+                        if len(symbols) >= 200_000:
+                            break
+        out = self._out_dir(art)
+        self._write_bytes(bytes(image), out / "flash.bin")
+        child = self._child(art, out / "flash.bin", "flash.bin", "decoded")
+        child.details.update({"load_address": hex(base), "derived_from_elf": True})
+        if symbols:
+            symbols.sort()
+            self._write_bytes(json.dumps(symbols, separators=(",", ":")).encode(), out / "symbols.json")
+            child.details["symbol_map"] = self._rel(out / "symbols.json")
+            child.details["symbol_count"] = len(symbols)
+        return [child]
 
     def h_esp_image(self, art: Artifact) -> list[Artifact]:
         from .formats.esp import parse_esp_image
@@ -1295,6 +1421,23 @@ def _scan_magics(fp: BinaryIO, size: int, max_hits: int):
         pos += chunk
 
 
+def _is_mcu_elf(path: Path) -> bool:
+    """Statically linked ARM executable built for a Cortex-M profile (EABI attribute 'M' / cortex-m*)."""
+    try:
+        from elftools.elf.elffile import ELFFile
+        with path.open("rb") as fp:
+            elf = ELFFile(fp)
+            if elf["e_machine"] != "EM_ARM" or elf["e_type"] != "ET_EXEC":
+                return False
+            if any(s["p_type"] in ("PT_INTERP", "PT_DYNAMIC") for s in elf.iter_segments()):
+                return False
+            attrs = elf.get_section_by_name(".ARM.attributes")
+            data = attrs.data()[:4096] if attrs is not None else b""
+            return b"\x07M" in data or b"cortex-m" in data.lower()
+    except Exception:  # noqa: BLE001 - malformed ELF: not ours to convert
+        return False
+
+
 def _all_erased(fp: BinaryIO, size: int) -> bool:
     left = size
     while left > 0:
@@ -1422,6 +1565,7 @@ HANDLERS: dict[str, Callable[[Extractor, Artifact], list[Artifact]]] = {
     "parrot_plf": Extractor.h_parrot_plf,
     "dji_imah": Extractor.h_dji_imah,
     "esp_image": Extractor.h_esp_image,
+    "elf": Extractor.h_mcu_elf,
     "esp_flash": Extractor.h_esp_flash,
     "ihex": Extractor.h_ihex,
     "px4": Extractor.h_fw_json,

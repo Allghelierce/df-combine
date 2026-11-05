@@ -3,9 +3,11 @@
 
 Only official open-source builds are listed: PX4 Autopilot (BSD-3-Clause, published by the PX4 project in
 the public firmware bucket that QGroundControl downloads from), ArduPilot's prebuilt bootloaders that are
-committed in the ArduPilot repository (GPL-3.0, tag Copter-4.5.7), and the Espressif image fixtures that
-ship with esptool's own test suite (GPL-2.0, tag v4.8.1). Files are verified against pinned SHA-256 hashes;
-nothing is committed to the repository.
+committed in the ArduPilot repository (GPL-3.0, tag Copter-4.5.7), ArduPilot vehicle builds for SITL
+(software-in-the-loop) that DroneKit publishes in its public asset bucket for `dronekit-sitl` (GPL-3.0;
+x86-64 Linux ELF programs - analysed statically, never run), and the Espressif image fixtures that ship with
+esptool's own test suite (GPL-2.0, tag v4.8.1). Files are verified against pinned SHA-256 hashes; nothing is
+committed to the repository.
 
 Usage: python scripts/fetch_real_firmware.py [dest]   (default: fixtures/real)
 """
@@ -19,6 +21,7 @@ from pathlib import Path
 BASE = "https://px4-travis.s3.amazonaws.com/Firmware/stable/"
 ESPTOOL = "https://raw.githubusercontent.com/espressif/esptool/v4.8.1/test/images/"
 APBL = "https://raw.githubusercontent.com/ArduPilot/ardupilot/Copter-4.5.7/Tools/bootloaders/"
+APSITL = "https://dronekit-assets.s3.amazonaws.com/sitl/"
 SAMPLES = {
     # name: (sha256, size, description[, url])
     "px4_fmu-v5_default.px4": ("b50b275507da4cb0e218c943c2aff5359e3f0914c18f6b563494b925c0a0e403", 1881838,
@@ -54,6 +57,20 @@ SAMPLES = {
                                     "ArduPilot AP_Bootloader for CubeOrange", APBL),
     "ardupilot/CubeOrange_bl.hex": ("13006870ecb150cd7667a27261d9db48c35fe8f5e74d4fb145b7ae46771ccd45", 106728,
                                     "ArduPilot AP_Bootloader for CubeOrange (Intel HEX)", APBL),
+    # ArduPilot vehicle firmware built for SITL (dronekit-sitl's public bucket): ./apm (x86-64 ELF),
+    # default.parm and default_eeprom.bin. Older releases; they exercise vehicle/version identification.
+    "ardupilot/sitl-linux-copter-3.2.1.tar.gz": (
+        "8ffa1390fb779a3a70f69ee5fd454e344576717451e83a1105be806ef4b3fdef", 870400,
+        "ArduCopter 3.2.1 SITL build ('ArduCopter V3.2.1')", APSITL + "copter/"),
+    "ardupilot/sitl-linux-copter-3.3.tar.gz": (
+        "c975ae44174c3fb897255b7c9dc6606a3e2cde9f8506e4cc99da023bd17a7c91", 849920,
+        "ArduCopter 3.3 SITL build ('APM:Copter V3.3')", APSITL + "copter/"),
+    "ardupilot/sitl-linux-plane-3.3.0.tar.gz": (
+        "067f599aa9afe7a23406dc8d09e7298727b44a8fe9e185a8c2baf0eba68fe9aa", 757760,
+        "ArduPlane 3.3.0 SITL build", APSITL + "plane/"),
+    "ardupilot/sitl-linux-rover-2.50.tar.gz": (
+        "3b00c6dc0c3cbaccb812dbd99220544b3bcf6c19cfafb284c88fd674c147c869", 655360,
+        "ArduRover 2.50 SITL build ('ArduRover v2.50')", APSITL + "rover/"),
 }
 
 

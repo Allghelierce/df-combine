@@ -20,6 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .. import safefs
 from ..config import Settings
 from ..core.findings import Finding
 
@@ -70,9 +71,25 @@ class AdapterContext:
         return "/work/" + str(rel)
 
     def tool_dir(self, tool: str) -> Path:
-        d = self.work_dir / "tools" / tool
-        d.mkdir(parents=True, exist_ok=True)
-        return d
+        return safefs.ensure_dir(self.work_dir, f"tools/{tool}")
+
+    # Containers that processed untrusted firmware may have written anything below the work directory,
+    # so the worker reads and writes there only through these (no links followed, regular files only).
+    def write_file(self, path: Path, data: str | bytes) -> Path:
+        rel = path.relative_to(self.work_dir)  # lexical: worker-chosen paths below the work directory
+        return safefs.write_bytes(self.work_dir, rel, data.encode("utf-8", "replace") if isinstance(data, str)
+                                  else data)
+
+    def read_file(self, path: Path, limit: int) -> bytes:
+        return safefs.read_bytes(self.work_dir, path.relative_to(self.work_dir), limit)
+
+    def read_artifact(self, art: dict, limit: int) -> bytes:
+        """Contents of a manifest artifact (``path`` comes from the untrusted manifest)."""
+        if art["path"] == "<input>":
+            if self.input_path.stat().st_size > limit:
+                raise safefs.UnsafeEntry(27, f"input is larger than {limit} bytes")
+            return self.input_path.read_bytes()
+        return safefs.read_bytes(self.work_dir, art["path"], limit)
 
 
 @dataclass

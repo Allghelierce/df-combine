@@ -136,7 +136,8 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
                 a.details["reset_handler"] = hex(vt.reset_handler)
             if "load_address" in a.details:
                 a.details["flash_base"] = a.details["load_address"]
-                a.details["flash_base_source"] = "container metadata"
+                a.details["flash_base_source"] = ("ELF load address" if a.details.get("derived_from_elf")
+                                                  else "container metadata")
             else:
                 est = estimate_flash_base(data)
                 if est:

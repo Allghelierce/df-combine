@@ -1,3 +1,4 @@
+import base64
 import json
 import shutil
 
@@ -300,3 +301,138 @@ def test_fact_resubmission_ignores_previous_runs_entries(settings, tmp_path, mon
     res = ad.execute(ctx_for(settings, {"identification": {}}, tmp_path, input_path=inp))
     assert res.status == "completed", res.message
     assert fake.status_calls >= 3  # waited while FACT listed the new run as current
+
+
+def test_cwe_checker_symbolises_flash_images_derived_from_elf(settings, tmp_path):
+    """Bare-metal warnings on a flash image derived from an ELF are mapped back to its function symbols."""
+    syms = cwe_checker.SymbolMap([[0x8004000, 0x40, "__start"], [0x8010000, 0x100, "mavlink_main"],
+                                  [0x8010200, 0, "no_size"], ["bad", 1, "x"], [1, 2, 3]])
+    assert syms.lookup(0x8004000) == "__start"
+    assert syms.lookup(0x8010010) == "mavlink_main+0x10"
+    assert syms.lookup(0x8010150) is None          # past the end of mavlink_main
+    assert syms.lookup(0x8010208) == "no_size+0x8"  # unknown size: nearest preceding symbol
+    assert syms.lookup(0x8000000) is None
+    # shape of cwe_checker 0.9.0 bare-metal output (decimal 'addresses', hex 'tids')
+    ws = [{"name": "CWE787", "version": "0.3", "addresses": [str(0x8010010)], "tids": ["instr_0x08010010_1"],
+           "symbols": [], "other": [["For the object ID fun_0x08010000 @ sp:i32 access to the offset 0 (size 4) "
+                                     "may overflow the upper object bound of 1."]],
+           "description": f"(Out-of-bounds Write) Memory write at {0x8010010} may be out of bounds."}]
+    f = cwe_checker.normalize(ws, "fw.elf > flash.bin", bare_metal=True, symbols=syms)[0]
+    assert f.evidence[0].location == "0x8010010 (mavlink_main+0x10)"
+    assert "function symbols of the ELF" in f.description and f.classification.value == "unverified"
+    # the symbol table written by the sandbox is read through the work-directory check
+    (tmp_path / "files").mkdir()
+    (tmp_path / "files" / "symbols.json").write_text(json.dumps([[0x8010000, 0x100, "mavlink_main"]]))
+    ctx = ctx_for(settings, {}, tmp_path)
+    art = {"details": {"symbol_map": "files/symbols.json"}}
+    assert cwe_checker._load_symbols(ctx, art).lookup(0x8010004) == "mavlink_main+0x4"
+    assert cwe_checker._load_symbols(ctx, {"details": {"symbol_map": "../../etc/passwd"}}) is None
+    assert cwe_checker._load_symbols(ctx, {"details": {}}) is None
+
+
+def test_cwe_checker_plan_uses_flash_image_instead_of_cortex_m_elf(settings, tmp_path):
+    ad = cwe_checker.CweCheckerAdapter(settings)
+    man = {"extraction": {"artifacts": [
+        {"id": 0, "name": "fw.elf", "format": "elf", "category": "executable", "size": 2000,
+         "elf": {"machine": "EM_ARM", "arch": cwe_checker.CORTEX_M, "is_kernel_module": False}},
+        {"id": 1, "name": "flash.bin", "format": "cortexm_raw", "size": 1000, "parent": 0,
+         "details": {"flash_base": "0x8004000", "initial_sp": "0x20005c18", "derived_from_elf": True,
+                     "symbol_map": "files/symbols.json"}},
+        {"id": 2, "name": "/usr/bin/x", "format": "elf", "category": "executable", "size": 1000,
+         "elf": {"machine": "EM_ARM", "arch": "ARM (32-bit)", "interpreter": "/lib/ld-linux-armhf.so.3",
+                 "is_kernel_module": False}},
+    ]}}
+    targets, _ = ad.plan(ctx_for(settings, man, tmp_path))
+    assert sorted(t["artifact"]["id"] for t in targets) == [1, 2]
+    assert next(t for t in targets if t["artifact"]["id"] == 1)["bare_metal"]["flash_base_address"] == "0x8004000"
+
+
+def test_fact_submits_files_of_filesystems_it_cannot_unpack(settings, tmp_path, monkeypatch):
+    """FACT has no NuttX CROMFS unpacker: the files extracted from one are submitted as a tar."""
+    import io
+    import tarfile
+    settings.fact_url = "http://fact.test"
+    settings.fact_poll_s = 0
+    settings.fact_timeout_s = 20
+    uploads = []
+
+    class Recording(FakeFact):
+        def handler(self, request):
+            if request.method == "PUT" and request.url.path == "/rest/firmware":
+                uploads.append(json.loads(request.content))
+            return super().handler(request)
+    fake = Recording()
+    ad = fact.FactAdapter(settings)
+    monkeypatch.setattr(ad, "_client", lambda: httpx.Client(base_url="http://fact.test",
+                                                            transport=httpx.MockTransport(fake.handler)))
+    root = tmp_path / "files" / "00002_etc.cromfs.d"
+    (root / "init.d").mkdir(parents=True)
+    (root / "init.d" / "rcS").write_text("param set CBRK_IO_SAFETY 22027\n")
+    (root / "extras").mkdir()
+    (root / "extras" / "io.bin").write_bytes(b"\x00\x10\x00\x20")
+    inp = tmp_path / "fw.px4"
+    inp.write_bytes(b"{}")
+    man = {"identification": {"platform": "PX4"}, "extraction": {
+        "filesystems": [{"artifact_id": 2, "type": "cromfs", "root": "files/00002_etc.cromfs.d", "name": "etc.cromfs"}],
+        "artifacts": [
+            {"id": 0, "path": "<input>", "name": "fw.px4", "format": "json", "size": 2},
+            {"id": 2, "path": "files/00001/etc.cromfs", "name": "etc.cromfs", "format": "cromfs", "size": 10, "parent_id": 0},
+            {"id": 3, "path": "files/00002_etc.cromfs.d/init.d/rcS", "name": "/init.d/rcS", "origin": "extracted",
+             "parent_id": 2, "size": 31, "mode": 0o644},
+            {"id": 4, "path": "files/00002_etc.cromfs.d/extras/io.bin", "name": "/extras/io.bin", "origin": "extracted",
+             "parent_id": 2, "size": 4, "mode": 0o755},
+        ]}}
+    res = ad.execute(ctx_for(settings, man, tmp_path, input_path=inp))
+    assert res.status == "completed", res.message
+    assert [u["file_name"] for u in uploads] == ["in.bin", "etc.cromfs.tar"]
+    with tarfile.open(fileobj=io.BytesIO(base64.b64decode(uploads[1]["binary"]))) as tar:
+        assert sorted(tar.getnames()) == ["extras/io.bin", "init.d/rcS"]
+        assert tar.extractfile("init.d/rcS").read().startswith(b"param set")
+        assert tar.getmember("extras/io.bin").mode == 0o755
+    assert "files extracted from cromfs etc.cromfs" in res.message
+    # a member replaced by a link (compromised sandbox) is not read: that submission fails, nothing leaks
+    (root / "init.d" / "rcS").unlink()
+    (root / "init.d" / "rcS").symlink_to(settings.data_dir)
+    uploads.clear()
+    res = ad.execute(ctx_for(settings, man, tmp_path, input_path=inp))
+    assert len(uploads) == 1 and "not submitted" in res.message
+
+
+def test_fwanalyzer_suid_offenders_name_the_actual_bit():
+    """FwAnalyzer labels setuid and setgid alike ('File is SUID, not allowed'); evidence states the real bit
+    from the archive metadata (as seen on Debian 11: /usr/bin/wall is setgid tty, /var/mail a setgid dir)."""
+    report = {"offenders": {"/bin/su": ["File is SUID, not allowed"], "/usr/bin/wall": ["File is SUID, not allowed"],
+                            "/var/mail": ["File is SUID, not allowed"], "/x": ["File is SUID, not allowed"]}}
+    modes = {"/bin/su": (0o4755, False), "/usr/bin/wall": (0o2755, False), "/var/mail": (0o2775, True)}
+    f = fwanalyzer.normalize(report, "rootfs", perms=True, modes=modes)[0]
+    assert f.title == "[FwAnalyzer] setuid/setgid file not in allow-list (4)"
+    ev = {e.location: e.value for e in f.evidence}
+    assert ev["/bin/su"].endswith("[setuid file, mode 4755]")
+    assert ev["/usr/bin/wall"].endswith("[setgid file, mode 2755]")
+    assert ev["/var/mail"].endswith("[setgid directory, mode 2775]")
+    assert ev["/x"] == "File is SUID, not allowed"  # mode unknown: FwAnalyzer's text only
+
+
+def test_fact_mapping_of_real_debian_results():
+    """Shapes and labels from FACT's real analysis of the Debian 11 armhf rootfs (2026-11-05)."""
+    lib = "243518884420af9f2dace683339c6fa32c6d1d18754ce188affb36bf5f37e20c_1498044"
+    fw = {"meta_data": {"number_of_included_files": 1, "total_files_in_firmware": 3311}, "analysis": {
+        "unpacker": {"summary": {"unpacked": ["x"]}},
+        "crypto_material": {"summary": {"SSLPrivateKey": [lib], "SshRsaPrivateKeyBlock": [lib]}},
+        # stored from an earlier analysis that requested FACT's cwe_checker plug-in (UIDs are content hashes)
+        "cwe_checker": {"summary": {"CWE476": ["a", "b"], "CWE676": ["c"]}},
+        "cve_lookup": {"summary": {"OpenSSL 1.1.1k (CRITICAL)": ["t"]}},
+    }}
+    requested = {"crypto_material", "cve_lookup", "exploit_mitigations"}
+    fs = fact.normalize(fw, "debian.tar.gz", [], requested=requested,
+                        paths={lib: "/usr/lib/arm-linux-gnueabihf/libgnutls.so.30.29.1"})
+    by_rule = {}
+    for f in fs:
+        by_rule.setdefault(f.rule_id, []).append(f)
+    assert "fact-cwe_checker" not in by_rule  # not requested in this run
+    keys = by_rule["fact-crypto-library-key"]
+    assert len(keys) == 2 and all((f.severity.value, f.classification.value) == ("info", "info") for f in keys)
+    assert "libgnutls.so.30.29.1" in keys[0].evidence[0].location
+    # a private key outside crypto libraries stays a high-severity finding
+    other = fact.normalize(fw, "x", [], requested=requested, paths={lib: "/etc/ssl/private/device.key"})
+    assert any(f.rule_id == "fact-crypto_material" and f.severity.value == "high" for f in other)

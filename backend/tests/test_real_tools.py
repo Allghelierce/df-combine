@@ -91,10 +91,23 @@ def test_fwanalyzer_on_real_alpine_rootfs(real_settings):
     reports = list((ctx.work_dir / "tools" / "fwanalyzer").glob("report_*.json"))
     assert reports, "FwAnalyzer wrote no report"
     report = json.loads(reports[0].read_text())
-    # FwAnalyzer's report always names the analysed image; offenders/informational/data are omitted when empty
-    assert report.get("fs_type") == "dirfs" and report.get("image_name")
+    # FwAnalyzer's report always names the analysed image; offenders/informational/data are omitted when empty.
+    # The image is the cpio written by the sandbox with the archive's original modes (permission checks on).
+    assert report.get("fs_type") == "cpiofs" and report.get("image_name")
     assert set(report) <= {"fs_type", "image_name", "image_digest", "offenders", "informational", "data"}
     assert all(f.source_tool == "fwanalyzer" for f in r.findings)
+
+
+def test_fwanalyzer_permission_checks_on_real_debian_rootfs(real_settings):
+    """Debian 11 really ships setuid-root binaries (su, mount, passwd, ...); FwAnalyzer must see them."""
+    ctx = _scan(real_settings, _sample("debian11-armhf-rootfs-20210816.tar.gz").read_bytes(), "debian-rootfs.tar.gz")
+    r = FwAnalyzerAdapter(real_settings).execute(ctx)
+    assert r.status == "completed", r.message
+    assert r.details["runs"][0]["mode"] == "cpiofs"
+    suid = [f for f in r.findings if f.rule_id == "fwa-suid"]
+    assert suid and suid[0].classification.value == "detected"
+    paths = " ".join(e.location or "" for e in suid[0].evidence)
+    assert "/bin/su" in paths and "/bin/mount" in paths
 
 
 def test_fwanalyzer_on_real_px4_cromfs(real_settings):

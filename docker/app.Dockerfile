@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Images for the API, the worker and the sandbox broker.
 #
 #   target "app"    (default) - API + worker. No Docker client and no Docker socket: analysis
@@ -6,11 +7,16 @@
 #                               job profiles (analyze, fwanalyzer, cwe_checker, ghidra) with
 #                               validated parameters and starts hardened, network-less containers.
 # See docs/SECURITY.md.
+#
+# Behind a TLS-intercepting proxy, pass its CA certificate as a build secret (optional):
+#   docker build --secret id=extra_ca,src=proxy-ca.crt -f docker/app.Dockerfile .
 
 FROM node:22-bookworm-slim AS ui
 WORKDIR /ui
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci --no-audit --no-fund
+RUN --mount=type=secret,id=extra_ca \
+    if [ -s /run/secrets/extra_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/extra_ca; fi \
+ && npm ci --no-audit --no-fund
 COPY frontend/ ./
 RUN npm run build
 
@@ -19,9 +25,16 @@ RUN groupadd --gid 10002 dfa \
  && useradd --uid 10002 --gid 10002 --create-home --shell /usr/sbin/nologin dfa
 WORKDIR /app/backend
 COPY backend/requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN --mount=type=secret,id=extra_ca \
+    if [ -s /run/secrets/extra_ca ]; then \
+      cat "$(python -c 'import certifi; print(certifi.where())' 2>/dev/null || echo /etc/ssl/certs/ca-certificates.crt)" \
+          /run/secrets/extra_ca > /tmp/ca.pem 2>/dev/null || cp /run/secrets/extra_ca /tmp/ca.pem; \
+      export PIP_CERT=/tmp/ca.pem; \
+    fi \
+ && pip install --no-cache-dir -r requirements.txt \
+ && rm -f /tmp/ca.pem
 COPY backend/ ./
-ENV PYTHONUNBUFFERED=1 DFA_DATA_DIR=/data
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 DFA_DATA_DIR=/data
 
 # ---- sandbox broker ----------------------------------------------------------
 FROM base AS broker

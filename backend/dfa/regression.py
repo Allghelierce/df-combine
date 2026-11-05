@@ -19,6 +19,8 @@ SAMPLES = [
     "esp/esp_idf_blink_esp32s2.bin", "esp/partitions_singleapp.bin",
     "ardupilot/fmuv3_bl.bin", "ardupilot/MatekH743_bl.bin", "ardupilot/Pixhawk6X_bl.bin",
     "ardupilot/CubeOrange_bl.bin", "ardupilot/CubeOrange_bl.hex",
+    "ardupilot/sitl-linux-copter-3.2.1.tar.gz", "ardupilot/sitl-linux-copter-3.3.tar.gz",
+    "ardupilot/sitl-linux-plane-3.3.0.tar.gz", "ardupilot/sitl-linux-rover-2.50.tar.gz",
 ]
 
 

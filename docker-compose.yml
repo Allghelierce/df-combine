@@ -1,8 +1,9 @@
 # Drone Firmware Analyzer - single-node deployment.
 #
-#   make sandbox-image            # build the isolated analysis image first
 #   mkdir -p var && sudo chown 10002:10002 var
 #   DFA_BOOTSTRAP_ADMIN_PASSWORD=... docker compose up --build
+#   (behind a TLS-intercepting proxy: copy its CA to ./var/proxy-ca.crt and build with
+#    DFA_EXTRA_CA_CERT=./var/proxy-ca.crt docker compose build)
 #
 # Only the "broker" service can reach the Docker daemon. The API and the worker - the processes
 # that parse requests and handle untrusted firmware results - get no Docker socket; they ask the
@@ -16,6 +17,7 @@ services:
     build:
       context: .
       dockerfile: docker/sandbox.Dockerfile
+      secrets: [extra_ca]
     command: ["true"]
     restart: "no"
     network_mode: none
@@ -25,6 +27,7 @@ services:
       context: .
       dockerfile: docker/app.Dockerfile
       target: broker
+      secrets: [extra_ca]
     image: dfa-broker:latest
     network_mode: none
     read_only: true
@@ -57,6 +60,7 @@ services:
       context: .
       dockerfile: docker/app.Dockerfile
       target: app
+      secrets: [extra_ca]
     image: dfa-app:latest
     ports:
       - "127.0.0.1:8000:8000"
@@ -75,6 +79,9 @@ services:
       DFA_FACT_URL: ${DFA_FACT_URL:-}
     volumes:
       - ./var:/data
+      # separate mount: a mount point cannot be renamed, so the worker can never replace the work root
+      # (the bind-mount sources of sandbox jobs live below it)
+      - ./var/work:/data/work
       - broker-socket:/run/dfa:ro
     depends_on:
       - broker
@@ -94,9 +101,16 @@ services:
       DFA_FACT_URL: ${DFA_FACT_URL:-}
     volumes:
       - ./var:/data
+      - ./var/work:/data/work
       - broker-socket:/run/dfa:ro
     depends_on:
       - api
 
 volumes:
   broker-socket:
+
+secrets:
+  # Optional CA certificate of a TLS-intercepting proxy, used only while building images.
+  extra_ca:
+    # (must be inside the project directory, e.g. ./var/proxy-ca.crt; the default is an empty file)
+    file: ${DFA_EXTRA_CA_CERT:-./docker/no-extra-ca.pem}

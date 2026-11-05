@@ -14,14 +14,16 @@ Facts established from the upstream project:
 * FACT unpacks the firmware itself and runs its own plugins (crypto_material,
   users_and_passwords, cve_lookup, software_components, cwe_checker, ...).
 
-This adapter has been validated against recorded/synthetic API responses in
-the test-suite, not against a live FACT deployment.
+Validated against a live FACT_core instance (see docs/TOOLS.md); the
+test-suite replays responses in FACT's real result format.
 """
 from __future__ import annotations
 
 import base64
+import io
 import json
 import re
+import tarfile
 import time
 from pathlib import Path
 
@@ -31,9 +33,13 @@ from ..core.findings import Classification as C
 from ..core.findings import Confidence as K
 from ..core.findings import Evidence, Finding
 from ..core.findings import Severity as S
+from ..core.scanners.secrets import CRYPTO_LIBRARY
 from .base import AdapterContext, AdapterResult, ToolAdapter
 
 FACT_OPAQUE_CONTAINERS = {"px4", "apj", "fw_json", "ihex", "dfu"}
+# Filesystems FACT's extractor has no unpacker for: the files Drone Firmware Analyzer extracted from them
+# are submitted as a tar archive, so FACT's plug-ins see their contents.
+FACT_UNSUPPORTED_FS = {"cromfs"}
 
 CLOCK_SKEW_S = 60  # tolerated difference between our clock and the FACT host's
 
@@ -83,8 +89,10 @@ class FactAdapter(ToolAdapter):
         size = ctx.input_path.stat().st_size
         if size > limit:
             return [], f"firmware is larger than DFA_FACT_MAX_UPLOAD_MB ({self.settings.fact_max_upload_mb} MiB)"
-        targets = [{"path": ctx.input_path, "label": "original upload", "part": "complete"}]
-        arts = ctx.manifest.get("extraction", {}).get("artifacts", [])
+        targets = [{"artifact": {"path": "<input>"}, "file_name": ctx.original_name, "label": "original upload",
+                    "part": "complete"}]
+        ex = ctx.manifest.get("extraction", {})
+        arts = ex.get("artifacts", [])
         root = arts[0] if arts else {}
         if root.get("format") in FACT_OPAQUE_CONTAINERS:
             # FACT's extractor cannot open these drone containers (verified for .px4: FACT saw 1 JSON file),
@@ -92,9 +100,26 @@ class FactAdapter(ToolAdapter):
             for a in arts:
                 if a.get("parent_id") == root.get("id") and a.get("format") in ("cortexm_raw", "elf", "raw") \
                         and 0 < a.get("size", 0) <= limit:
-                    targets.append({"path": ctx.artifact_path(a), "label": f"decoded image {a['name']}",
+                    targets.append({"artifact": a, "file_name": Path(a["path"]).name,
+                                    "label": f"decoded image {a['name']}",
                                     "part": "application image (decoded by Drone Firmware Analyzer)"})
+        for fs in ex.get("filesystems", []):
+            if fs.get("type") not in FACT_UNSUPPORTED_FS:
+                continue
+            members = [a for a in arts if a.get("parent_id") == fs.get("artifact_id") and a.get("origin") == "extracted"
+                       and str(a.get("path", "")).startswith(str(fs.get("root", "")) + "/")]
+            if members and sum(a.get("size", 0) for a in members) <= limit:
+                targets.append({"tree": members, "file_name": f"{fs.get('name', 'filesystem')}.tar",
+                                "label": f"files extracted from {fs['type']} {fs.get('name', '')}".strip(),
+                                "part": f"{fs['type']} filesystem contents (extracted by Drone Firmware Analyzer; "
+                                        "FACT has no unpacker for this format)"})
         return targets, f"{len(targets)} submission(s)"
+
+    def _payload(self, ctx: AdapterContext, t: dict) -> bytes:
+        limit = self.settings.fact_max_upload_mb * 1024 * 1024
+        if "tree" not in t:
+            return ctx.read_artifact(t["artifact"], limit)
+        return tree_tar(ctx, t["tree"], limit)
 
     def run(self, ctx: AdapterContext, targets: list) -> AdapterResult:
         out_dir = ctx.tool_dir(self.name)
@@ -105,9 +130,15 @@ class FactAdapter(ToolAdapter):
         failed = 0
         with self._client() as c:
             for i, t in enumerate(targets):
+                try:
+                    data = self._payload(ctx, t)
+                except (OSError, ValueError) as exc:  # e.g. a link or special file planted in the work directory
+                    failed += 1
+                    submissions.append({"target": t["label"], "status": "failed", "error": f"not submitted: {exc}"})
+                    continue
                 payload = {
-                    "binary": base64.b64encode(Path(t["path"]).read_bytes()).decode(),
-                    "file_name": (ctx.original_name if i == 0 else Path(t["path"]).name)[:200],
+                    "binary": base64.b64encode(data).decode(),
+                    "file_name": t["file_name"][:200],
                     "device_name": f"dfa-{ctx.scan_id[:8]}", "device_part": t["part"], "device_class": "UAV/drone",
                     "vendor": ident.get("platform") or "unknown", "version": str(ident.get("platform_version") or "unknown"),
                     "release_date": "1970-01-01", "tags": "drone-firmware-analyzer",
@@ -125,16 +156,23 @@ class FactAdapter(ToolAdapter):
                 state, fw = self._wait(c, uid, submitted)
                 entry: dict = {"target": t["label"], "uid": uid, "status": state}
                 if fw:
-                    (out_dir / f"firmware_{i}.json").write_text(json.dumps(fw, indent=1)[:50_000_000])
+                    ctx.write_file(out_dir / f"firmware_{i}.json", json.dumps(fw, indent=1)[:50_000_000])
                     meta = fw.get("meta_data", {}) or {}
                     creds = self._credential_details(c, fw)
-                    fs = normalize(fw, ctx.original_name if i == 0 else f"{ctx.original_name} > {Path(t['path']).name}",
-                                   creds)
+                    requested = set(self.settings.fact_plugins)
+                    fs = normalize(fw, ctx.original_name if i == 0 else f"{ctx.original_name} > {t['file_name']}",
+                                   creds, requested=requested, paths=self._object_paths(c, fw, "crypto_material"))
                     findings += fs
                     components += fact_components(fw, t["label"])
                     analysis = fw.get("analysis", {}) or {}
                     entry.update({
-                        "files_analysed": 1 + int(meta.get("number_of_included_files") or 0),
+                        # number_of_included_files counts direct children only (1 for a .tar.gz)
+                        "files_analysed": int(meta.get("total_files_in_firmware") or 0)
+                        or 1 + int(meta.get("number_of_included_files") or 0),
+                        # FACT keeps results of earlier analyses of identical files (UIDs are content hashes);
+                        # plug-ins not requested in this run are not reported
+                        "not_requested": sorted(p for p, r in analysis.items() if p in PLUGIN_MAP and p not in requested
+                                                and isinstance(r, dict) and r.get("summary")),
                         "file_types": sorted((analysis.get("file_type", {}) or {}).get("summary", {}) or {})[:15],
                         "unpacker": sorted((analysis.get("unpacker", {}) or {}).get("summary", {}) or {}),
                         "findings": len(fs), "partial": state != "completed",
@@ -161,6 +199,9 @@ class FactAdapter(ToolAdapter):
                 text = f"{head}; partial results so far: {text}"
             if not s["plugins_with_results"]:
                 text += "; no FACT plug-in produced results for this input"
+            if s.get("not_requested"):
+                text += (f"; stored results of plug-ins not requested in this run were ignored "
+                         f"({', '.join(s['not_requested'])})")
             return text
 
         msg = "; ".join(f"{s['target']}: {describe(s)}" for s in submissions)
@@ -168,6 +209,23 @@ class FactAdapter(ToolAdapter):
                                                      else "failed"),
                              msg, findings, str(out_dir), {"submissions": submissions, "fact_url": self.settings.fact_url,
                                                            "components": components})
+
+    @staticmethod
+    def _object_paths(c: httpx.Client, fw: dict, plugin: str, limit: int = 25) -> dict[str, str]:
+        """uid -> path inside the firmware for the files a plug-in summary points to (best effort)."""
+        summary = (((fw or {}).get("analysis") or {}).get(plugin) or {}).get("summary") or {}
+        uids = sorted({u for v in summary.values() for u in v}) if isinstance(summary, dict) else []
+        out: dict[str, str] = {}
+        for uid in uids[:limit]:
+            try:
+                r = c.get(f"/rest/file_object/{uid}")
+                hid = ((r.json().get("file_object") or {}).get("meta_data") or {}).get("hid") if r.status_code == 200 \
+                    else None
+            except (httpx.HTTPError, ValueError):
+                break
+            if isinstance(hid, str):
+                out[uid] = hid[:512]
+        return out
 
     @staticmethod
     def _credential_details(c: httpx.Client, fw: dict, limit: int = 25) -> list[dict] | None:
@@ -273,6 +331,30 @@ MITIGATION_WEAK = {
 _REAL_HASH = re.compile(r"^(\$[0-9a-z]+\$.+|[./0-9A-Za-z]{13})$")
 
 
+def tree_tar(ctx: AdapterContext, members: list[dict], limit: int) -> bytes:
+    """A tar of the files extracted from one filesystem, laid out by their path inside it.
+
+    Names and modes come from the (untrusted) manifest: names are reduced to safe relative paths and
+    file contents are read through the work-directory checks (regular files only, size limited)."""
+    buf = io.BytesIO()
+    total = 0
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tar:
+        for a in members:
+            parts = [p for p in str(a.get("name", "")).split("/") if p not in ("", ".")]
+            if not parts or ".." in parts or len("/".join(parts)) > 1024:
+                continue
+            data = ctx.read_artifact(a, max(0, limit - total))
+            total += len(data)
+            ti = tarfile.TarInfo("/".join(parts))
+            ti.size, ti.mtime, ti.uid, ti.gid = len(data), 0, 0, 0
+            mode = a.get("mode")
+            ti.mode = (mode & 0o777) if isinstance(mode, int) else 0o644
+            tar.addfile(ti, io.BytesIO(data))
+    if buf.tell() > limit:
+        raise ValueError(f"archive of extracted files exceeds DFA_FACT_MAX_UPLOAD_MB ({limit // (1024 * 1024)} MiB)")
+    return buf.getvalue()
+
+
 def credential_findings(entries: list[dict] | None, name: str, listed: int) -> list[Finding]:
     """FACT users_and_passwords entries (full per-file results). The plug-in's summary lists every account
     line ('root:unix'), including shadowed ('x') and locked ('*', '!') ones, so only entries with an actual
@@ -316,11 +398,17 @@ def credential_findings(entries: list[dict] | None, name: str, listed: int) -> l
     return out
 
 
-def normalize(fw: dict, name: str, credentials: list[dict] | None = None) -> list[Finding]:
+def normalize(fw: dict, name: str, credentials: list[dict] | None = None, requested: set[str] | None = None,
+              paths: dict[str, str] | None = None) -> list[Finding]:
+    """``requested``: plug-ins requested in this run (others may carry stored results of an earlier analysis of
+    identical files and are skipped); ``paths``: uid -> path inside the firmware, where known."""
     out: list[Finding] = []
+    paths = paths or {}
     analysis = (fw or {}).get("analysis", {}) or {}
     for plugin, result in analysis.items():
         if plugin not in PLUGIN_MAP or not isinstance(result, dict):
+            continue
+        if requested is not None and plugin not in requested:
             continue
         summary = result.get("summary")
         if not summary:
@@ -332,7 +420,8 @@ def normalize(fw: dict, name: str, credentials: list[dict] | None = None) -> lis
         sev, cls, prefix, cwe = PLUGIN_MAP[plugin]
         for label, uids in items[:200]:
             label_s = str(label)
-            s, c, why = sev, cls, ""
+            s, c, why, rule, title_prefix = sev, cls, "", f"fact-{plugin}", prefix
+            locs = [paths.get(u) for u in list(uids)[:25]]
             if plugin == "exploit_mitigations":
                 if label_s not in MITIGATION_WEAK:
                     continue
@@ -340,20 +429,29 @@ def normalize(fw: dict, name: str, credentials: list[dict] | None = None) -> lis
             elif plugin == "crypto_material" and "private" not in label_s.lower():
                 s, c = S.info, C.info  # certificates and public keys are not secrets
                 why = "public key material or a certificate (not a secret)"
+            elif plugin == "crypto_material" and locs and all(p and CRYPTO_LIBRARY.search(p) for p in locs):
+                # verified on Debian 11: FACT reports GnuTLS's built-in self-test keys in libgnutls.so as
+                # SSLPrivateKey/SshRsaPrivateKeyBlock; such keys are public test vectors, not device secrets
+                s, c, rule = S.info, C.info, "fact-crypto-library-key"
+                title_prefix = "Key material inside a cryptographic library"
+                why = ("found only inside cryptographic libraries, which ship public known-answer/self-test keys; "
+                       "not a device secret")
             elif plugin == "cve_lookup":
                 low = label_s.lower()
                 s = S.high if "critical" in low or "high" in low else S.medium
             out.append(Finding(
-                title=f"[FACT] {prefix}: {label_s[:160]}",
+                title=f"[FACT] {title_prefix}: {label_s[:160]}",
                 description=(f"FACT plugin '{plugin}' reported '{label_s}'" + (f": {why}." if why else ". ")
                              + ("Version/signature based result - requires manual verification."
                                 if c == C.unverified else "Reported by FACT's analysis of the firmware contents.")),
-                severity=s, classification=c, confidence=K.medium, source_tool="fact", rule_id=f"fact-{plugin}",
+                severity=s, classification=c, confidence=K.medium, source_tool="fact", rule_id=rule,
                 affected_component=name if not uids else f"{name} ({len(uids)} FACT object(s))",
-                remediation="Review the corresponding FACT analysis page for affected files.",
-                evidence=[Evidence("tool_output", label_s[:240], f"FACT uid {u}") for u in list(uids)[:10]]
-                or [Evidence("tool_output", label_s[:240])],
-                cwe=cwe, tags=["fact", plugin]))
+                remediation=("No action required." if rule == "fact-crypto-library-key"
+                             else "Review the corresponding FACT analysis page for affected files."),
+                evidence=[Evidence("tool_output", label_s[:240],
+                                   f"{paths[u]} (FACT uid {u})" if u in paths else f"FACT uid {u}")
+                          for u in list(uids)[:10]] or [Evidence("tool_output", label_s[:240])],
+                cwe=None if rule == "fact-crypto-library-key" else cwe, tags=["fact", plugin]))
     return out
 
 

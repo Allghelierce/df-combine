@@ -1,6 +1,7 @@
 import gzip
 import io
 import os
+import shutil
 import tarfile
 import zipfile
 from pathlib import Path
@@ -300,3 +301,40 @@ def test_ubi_jffs2_extraction_in_container_mode(fixtures, tmp_path, monkeypatch,
     names = {a.name for a in res.artifacts}
     assert "/etc/shadow" in names, (res.warnings, names)
     assert all_files_inside(tmp_path / "w")
+
+
+@pytest.mark.skipif(not shutil.which("cpio"), reason="GNU cpio not installed")
+def test_permission_image_carries_original_modes(tmp_path):
+    """FwAnalyzer reads permissions from a cpio written by the extractor: setuid bits, owners, empty and
+    world-writable directories and symlinks come from the archive metadata, never from files on disk."""
+    import io
+    import subprocess
+    import tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        def add(name, data=b"", mode=0o644, kind=tarfile.REGTYPE, link="", uid=0):
+            ti = tarfile.TarInfo(name)
+            ti.type, ti.mode, ti.uid, ti.linkname, ti.size = kind, mode, uid, link, len(data)
+            tf.addfile(ti, io.BytesIO(data) if data else None)
+        for d in ("etc", "bin", "tmp"):
+            add(d, mode=0o1777 if d == "tmp" else 0o755, kind=tarfile.DIRTYPE)
+        add("etc/passwd", b"root:x:0:0::/root:/bin/sh\n")
+        add("bin/su", b"\x7fELF" + bytes(60), mode=0o4755)
+        add("bin/sh", kind=tarfile.SYMTYPE, link="busybox")
+        add("bin/my tool", b"x")  # whitespace: FwAnalyzer cannot parse it, so it is left out (and counted)
+    p = tmp_path / "rootfs.tar"
+    p.write_bytes(buf.getvalue())
+    from dfa.core.extract import Extractor
+    from dfa.core.limits import Limits
+    res = Extractor(tmp_path / "w", Limits()).run(p, "rootfs.tar")
+    fs = next(f for f in res.filesystems if f["type"] == "tar")
+    assert fs["mode_image_skipped"] == 1
+    listing = subprocess.run(["sh", "-c", f"cpio -tvn --quiet < '{tmp_path / 'w' / fs['mode_image']}'"],
+                             capture_output=True, text=True).stdout
+    rows = {line.split()[-1] if "->" not in line else line.split()[-3]: line for line in listing.splitlines()}
+    assert rows["bin/su"].startswith("-rwsr-xr-x")
+    assert rows["tmp"].startswith("drwxrwxrwt")  # empty directory, only known from the tar header
+    assert rows["bin/sh"].startswith("l") and "-> busybox" in rows["bin/sh"]
+    assert "." in rows
+    assert fs["special_dirs"] == {"/tmp": 0o1777}  # for reporting which bit FwAnalyzer's offender has
+    assert not (tmp_path / "w").rglob("su") or all(not (f.stat().st_mode & 0o4000) for f in (tmp_path / "w").rglob("su"))

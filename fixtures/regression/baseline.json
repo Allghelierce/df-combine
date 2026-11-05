@@ -183,6 +183,149 @@
    "owned_files": 0
   }
  },
+ "ardupilot/sitl-linux-copter-3.2.1.tar.gz": {
+  "components": [
+   "ardupilot 3.2.1"
+  ],
+  "extraction": {
+   "artifacts": 4,
+   "failed": [],
+   "formats": {
+    "elf": 1,
+    "raw": 1,
+    "tar": 1,
+    "text": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:binary:elf-no-pie": 1
+  },
+  "identification": {
+   "architecture": "x86-64",
+   "bits": 64,
+   "board_id": null,
+   "endianness": "little",
+   "format": "tar",
+   "os_hint": "linux",
+   "platform": "ArduPilot",
+   "platform_version": "3.2.1",
+   "vehicle_type": "ArduCopter"
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "ardupilot/sitl-linux-copter-3.3.tar.gz": {
+  "components": [
+   "ardupilot 3.3"
+  ],
+  "extraction": {
+   "artifacts": 4,
+   "failed": [],
+   "formats": {
+    "elf": 1,
+    "raw": 1,
+    "tar": 1,
+    "text": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:binary:cleartext-url": 1,
+   "builtin:binary:elf-no-pie": 1
+  },
+  "identification": {
+   "architecture": "x86-64",
+   "bits": 64,
+   "board_id": null,
+   "endianness": "little",
+   "format": "tar",
+   "os_hint": "linux",
+   "platform": "ArduPilot",
+   "platform_version": "3.3",
+   "vehicle_type": "ArduCopter"
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "ardupilot/sitl-linux-plane-3.3.0.tar.gz": {
+  "components": [
+   "ardupilot 3.3.0"
+  ],
+  "extraction": {
+   "artifacts": 4,
+   "failed": [],
+   "formats": {
+    "elf": 1,
+    "raw": 1,
+    "tar": 1,
+    "text": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:binary:cleartext-url": 1,
+   "builtin:binary:elf-no-pie": 1
+  },
+  "identification": {
+   "architecture": "x86-64",
+   "bits": 64,
+   "board_id": null,
+   "endianness": "little",
+   "format": "tar",
+   "os_hint": "linux",
+   "platform": "ArduPilot",
+   "platform_version": "3.3.0",
+   "vehicle_type": "ArduPlane"
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "ardupilot/sitl-linux-rover-2.50.tar.gz": {
+  "components": [
+   "ardupilot 2.50"
+  ],
+  "extraction": {
+   "artifacts": 4,
+   "failed": [],
+   "formats": {
+    "elf": 1,
+    "raw": 1,
+    "tar": 1,
+    "text": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:binary:cleartext-url": 1,
+   "builtin:binary:elf-no-pie": 1
+  },
+  "identification": {
+   "architecture": "x86-64",
+   "bits": 64,
+   "board_id": null,
+   "endianness": "little",
+   "format": "tar",
+   "os_hint": "linux",
+   "platform": "ArduPilot",
+   "platform_version": "2.50",
+   "vehicle_type": "ArduRover"
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
  "ark_can-flow_canbootloader.px4": {
   "components": [],
   "extraction": {
@@ -411,10 +554,15 @@
    "px4 1.17.0"
   ],
   "extraction": {
-   "artifacts": 1,
+   "artifacts": 34,
    "failed": [],
    "formats": {
-    "elf": 1
+    "cortexm_raw": 3,
+    "cromfs": 1,
+    "elf": 1,
+    "empty": 2,
+    "text": 26,
+    "xz": 1
    },
    "limits_hit": []
   },

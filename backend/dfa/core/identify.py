@@ -308,16 +308,21 @@ PLATFORMS: list[PlatformSignature] = [
         # PX4 builds; a *populated* descriptor is added as a hint by the analysis stage instead.
         strong=[b"APJFWv1", b"ArduCopter V", b"ArduPlane V", b"ArduRover V", b"ArduSub V",
                 b"AntennaTracker V", b"AP_Periph", b"Blimp V",
+                # naming used by real releases: 'APM:Copter V3.3' (3.3 era), 'ArduRover v2.50'
+                b"APM:Copter V", b"APM:Plane V", b"APM:Rover V", b"APM:AntennaTracker V", b"ArduRover v",
+                b"APMrover2",
                 # AP_Bootloader (official builds in ardupilot/Tools/bootloaders): ChibiOS USB product
                 # template and the SD-card update image name
                 b"%BOARD%-BL", b"/ardupilot.abin"],
         weak=[b"ArduPilot", b"ChibiOS", b"AP_HAL", b"ARMING_CHECK", b"SYSID_THISMAV",
               b"@PARAM", b"PreArm:", b"ArduCopter", b"ArduPlane", b"%BOARD%", b"%SERIAL%"],
         version_patterns=[
-            re.compile(r"(?:ArduCopter|ArduPlane|ArduRover|ArduSub|AntennaTracker|Blimp|AP_Periph)"
-                       r"\s+V(\d+\.\d+\.\d+(?:-?[\w.]+)?)"),
+            re.compile(r"(?:ArduCopter|ArduPlane|ArduRover|ArduSub|AntennaTracker|Blimp|AP_Periph|"
+                       r"APM:(?:Copter|Plane|Rover|Sub|AntennaTracker))"
+                       r"\s+[Vv](\d+\.\d+(?:\.\d+)?(?:-[\w.]+)?)\b"),
         ],
         vehicle_patterns=[re.compile(r"(ArduCopter|ArduPlane|ArduRover|ArduSub|AntennaTracker|Blimp|AP_Periph)\b"),
+                          re.compile(r"\bAPM:(Copter|Plane|Rover|Sub|AntennaTracker)\b"),
                           re.compile(r"%BOARD%-(BL)\b")],
     ),
     PlatformSignature(
@@ -436,7 +441,8 @@ class PlatformAccumulator:
         return out
 
 
-VEHICLE_ALIASES = {"BL": "AP_Bootloader"}
+VEHICLE_ALIASES = {"BL": "AP_Bootloader", "Copter": "ArduCopter", "Plane": "ArduPlane", "Rover": "ArduRover",
+                   "Sub": "ArduSub"}
 
 
 def _show(sig: bytes) -> str:

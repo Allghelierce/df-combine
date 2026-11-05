@@ -17,8 +17,10 @@ Mounts are derived from the scan id only:
 """
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
+import logging
 import os
 import re
 import secrets
@@ -33,6 +35,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 
 from .config import BACKEND_DIR, Settings
+
+log = logging.getLogger("dfa.containers")
 
 GHIDRA_SCRIPTS = BACKEND_DIR / "dfa" / "ghidra_scripts"
 SANDBOX_UID = 10001  # 'analyzer' in docker/sandbox.Dockerfile
@@ -239,14 +243,27 @@ class DockerJobExecutor:
             os.close(root_fd)
 
     @staticmethod
-    def _chown_tree_fd(top_fd: int, uid: int, gid: int, skip: str | None = None) -> None:
-        """chown a tree through directory fds: never follows a symlink, not even one swapped in mid-walk."""
+    def _chown_tree_fd(top_fd: int, uid: int, gid: int, skip: str | None = None, strip: bool = False) -> int:
+        """chown a tree through directory fds: never follows a symlink, not even one swapped in mid-walk.
+
+        With ``strip``, every entry that is neither a directory nor a regular file is removed (unlink never
+        follows links). Analysis output never contains links or special files - the extractor records links
+        in the manifest instead of creating them - so any found were planted by a compromised container to
+        make the worker follow them. Returns the number of entries removed."""
+        removed = 0
         os.fchown(top_fd, uid, gid)
         for dirpath, dirs, files, dfd in os.fwalk(".", dir_fd=top_fd, follow_symlinks=False):
             if skip and dirpath == "." and skip in dirs:
                 dirs.remove(skip)
             for name in dirs + files:
+                if strip:
+                    st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+                    if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
+                        os.unlink(name, dir_fd=dfd)
+                        removed += 1
+                        continue
                 os.chown(name, uid, gid, dir_fd=dfd, follow_symlinks=False)
+        return removed
 
     @staticmethod
     def _writable_subdir(prof: Profile) -> str | None:
@@ -275,21 +292,60 @@ class DockerJobExecutor:
         st = os.stat(self.settings.data_dir, follow_symlinks=False)
         return st.st_uid, st.st_gid
 
+    @property
+    def inputs_dir(self) -> Path:
+        # inside the broker-owned work root, so the worker cannot rename or replace it
+        return self.settings.work_root / ".inputs"
+
     def secure_work_root(self) -> None:
-        """As root, own the work root so the worker can create files inside scan directories but can never
-        replace a scan directory (a bind-mount source) with a link between our checks and Docker's mount."""
-        root = self.settings.work_root
-        root.mkdir(parents=True, exist_ok=True)
+        """As root, own the work root and the inputs directory so the worker can create files inside scan
+        directories but can never replace a bind-mount source (scan directory or upload) with a link
+        between our checks and Docker's mount."""
+        for root in (self.settings.work_root, self.inputs_dir):  # parent first
+            root.mkdir(parents=True, exist_ok=True)
+            if os.getuid() != 0:
+                continue
+            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                st = os.fstat(fd)
+                if (st.st_uid, st.st_gid) != (0, 0) or stat.S_IMODE(st.st_mode) != 0o755:
+                    os.fchown(fd, 0, 0)
+                    os.fchmod(fd, 0o755)
+            finally:
+                os.close(fd)
+
+    def _pinned_input(self, scan_id: str) -> Path | None:
+        """Hard-link the verified upload into the broker-owned inputs directory and mount that link: the API
+        owns uploads/ and could otherwise swap uploads/<id>.bin for a link to another host file between our
+        check and Docker resolving the mount source. None when not possible (not root, other filesystem)."""
         if os.getuid() != 0:
-            return
-        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            return None
+        self.secure_work_root()
+        name = f"{scan_id}.bin"
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
         try:
-            st = os.fstat(fd)
-            if (st.st_uid, st.st_gid) != (0, 0) or stat.S_IMODE(st.st_mode) != 0o755:
-                os.fchown(fd, 0, 0)
-                os.fchmod(fd, 0o755)
+            up_fd = os.open(self.settings.uploads_dir, flags)
+        except OSError:
+            return None
+        try:
+            in_fd = os.open(self.inputs_dir, flags)
+        except OSError:
+            os.close(up_fd)
+            return None
+        try:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(name, dir_fd=in_fd)
+            try:  # linkat without AT_SYMLINK_FOLLOW: a symlink is linked as a symlink, never followed
+                os.link(name, name, src_dir_fd=up_fd, dst_dir_fd=in_fd, follow_symlinks=False)
+            except OSError:
+                return None
+            if not stat.S_ISREG(os.stat(name, dir_fd=in_fd, follow_symlinks=False).st_mode):
+                os.unlink(name, dir_fd=in_fd)
+                raise JobRejected("scan upload is not a regular file")
+            return self.inputs_dir / name
         finally:
-            os.close(fd)
+            os.close(in_fd)
+            os.close(up_fd)
 
     def workdir(self, scan_id: str, action: str) -> None:
         """'reset': empty work/<id>, owned by the worker; 'remove': delete it. Never follows links."""
@@ -300,6 +356,12 @@ class DockerJobExecutor:
         root_fd = os.open(self.settings.work_root, flags)
         try:
             _rmtree_at(root_fd, scan_id)
+            with contextlib.suppress(OSError):  # the pinned upload link, if any
+                in_fd = os.open(".inputs", flags, dir_fd=root_fd)
+                try:
+                    os.unlink(f"{scan_id}.bin", dir_fd=in_fd)
+                finally:
+                    os.close(in_fd)
             if action == "reset":
                 os.mkdir(scan_id, 0o755, dir_fd=root_fd)
                 fd = os.open(scan_id, flags, dir_fd=root_fd)
@@ -324,7 +386,12 @@ class DockerJobExecutor:
             return
         try:
             uid, gid = self._worker_identity()
-            self._chown_tree_fd(fd, uid, gid, skip="tools" if sub == "" else None)
+            # the whole writable tree, 'tools/' included: the analysis sandbox owned the scan directory, so
+            # it could have replaced 'tools/' too
+            removed = self._chown_tree_fd(fd, uid, gid, strip=True)
+            if removed:
+                log.warning("scan %s: removed %d link(s)/special file(s) left by the %s job", scan_id, removed,
+                            prof.name)
         finally:
             os.close(fd)
             if work_fd != fd:
@@ -351,7 +418,8 @@ class DockerJobExecutor:
             cmd += ["--runtime", s.sandbox_runtime]
         for t in prof.tmpfs:
             cmd += ["--tmpfs", t]
-        cmd += ["-v", f"{self._host(upload)}:/in/firmware:ro", "-v", f"{self._host(work)}:/work:rw"]
+        cmd += ["-v", f"{self._host(self._pinned_input(scan_id) or upload)}:/in/firmware:ro",
+                "-v", f"{self._host(work)}:/work:rw"]
         if profile == "ghidra":
             scripts = s.ghidra_scripts_host_dir or GHIDRA_SCRIPTS
             cmd += ["-v", f"{scripts}:/dfa_scripts:ro", "--entrypoint", argv[0]]
@@ -408,6 +476,8 @@ class DockerJobExecutor:
                         proc.wait(timeout=30)
                     except subprocess.TimeoutExpired:
                         proc.kill()
+                    # the container must be gone before its directory is handed back to the worker
+                    subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=60)
                     break
             for th in threads:
                 th.join(timeout=10)

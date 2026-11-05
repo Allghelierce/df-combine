@@ -242,3 +242,29 @@ def test_purge_extracted_files(client, settings, fixtures):
     work = settings.work_root / s["id"]
     assert not (work / "files").exists() and (work / "manifest.json").exists()
     assert client.get(f"/api/scans/{s['id']}/artifacts").json()["total"] > 5
+
+
+def test_links_planted_by_a_compromised_sandbox_are_not_followed(client, settings, fixtures, monkeypatch):
+    """A compromised sandbox can leave anything in the scan directory. The worker must not write its
+    results through a planted link (here: into the database or a directory outside the scan)."""
+    import dfa.pipeline
+    real = dfa.pipeline.run_analysis
+    outside = settings.data_dir / "outside"
+    outside.mkdir(parents=True, exist_ok=True)
+
+    def compromised(input_path, name, work, s, progress=None):
+        res = real(input_path, name, work, s, progress)
+        (work / "findings.json").symlink_to(settings.data_dir / "dfa.db")
+        (work / "tools").symlink_to(outside)
+        return res
+    monkeypatch.setattr(dfa.pipeline, "run_analysis", compromised)
+    db_before = (settings.data_dir / "dfa.db").read_bytes()[:16]
+    s = upload(client, fixtures["px4"])
+    process_all(settings)
+    d = client.get(f"/api/scans/{s['id']}").json()
+    assert d["status"] == "completed"
+    assert (settings.data_dir / "dfa.db").read_bytes()[:16] == db_before == b"SQLite format 3\x00"
+    work = settings.work_root / s["id"]
+    assert not (work / "findings.json").is_symlink() and (work / "findings.json").read_text().startswith("[")
+    assert list(outside.iterdir()) == []  # no tool directory was created through the link
+    assert client.get(f"/api/scans/{s['id']}/artifacts").status_code == 200

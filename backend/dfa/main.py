@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from . import __version__
+from . import __version__, safefs
 from .adapters.registry import all_statuses
 from .auth import (
     CSRF_HEADER,
@@ -409,9 +409,16 @@ def create_app(settings: Settings | None = None, start_worker: bool | None = Non
         return {"items": [finding_to_dict(f) for f in rows]}
 
     def _manifest(scan: Scan) -> dict | None:
-        if not scan.manifest_path or not Path(scan.manifest_path).exists():
+        if not scan.manifest_path:
             return None
-        return json.loads(Path(scan.manifest_path).read_text())
+        p = Path(scan.manifest_path)
+        try:
+            return json.loads(safefs.read_bytes(p.parent, p.name, settings.max_manifest_mb * 1024 * 1024))
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            log.warning("unreadable manifest for scan %s: %s", scan.id, exc)
+            return None
 
     @app.get("/api/scans/{scan_id}/artifacts")
     def get_artifacts(scan_id: str, limit: int = Query(500, ge=1, le=5000), offset: int = Query(0, ge=0),

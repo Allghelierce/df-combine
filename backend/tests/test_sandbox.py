@@ -124,6 +124,10 @@ def test_job_output_is_handed_back_to_the_worker(settings, monkeypatch):
             (work / "files" / "out.bin").write_bytes(b"y")
             os.chown(work / "files" / "out.bin", 10001, 10001)  # written by the sandbox user
             (work / "evil").symlink_to("/etc/passwd")
+            (work / "findings.json").symlink_to(settings.data_dir / "dfa.db")  # for the worker to write through
+            os.mkfifo(work / "files" / "pipe")  # would block a reader
+            (work / "tools").rename(work / "tools.orig")  # the sandbox owns the scan dir: it can swap tools/
+            (work / "tools").symlink_to(settings.data_dir)
 
         def poll(self):
             return 0
@@ -135,9 +139,11 @@ def test_job_output_is_handed_back_to_the_worker(settings, monkeypatch):
     before = os.stat("/etc/passwd")
     DockerJobExecutor(settings).run("analyze", sid, {"name": "x", "limits": {}})
     assert seen["during_analyze_work"] == 10001 and seen["during_tools"] == 12345
-    for p in (work, work / "files", work / "files" / "out.bin", work / "tools" / "fwanalyzer" / "cfg.toml"):
+    for p in (work, work / "files", work / "files" / "out.bin", work / "tools.orig" / "fwanalyzer" / "cfg.toml"):
         assert (p.stat().st_uid, p.stat().st_gid) == (12345, 12346), p
-    assert os.lstat(work / "evil").st_uid == 12345  # the link itself, never its target
+    # links and special files planted by the job are removed before the worker gets the directory back
+    for p in ("evil", "findings.json", "files/pipe", "tools"):
+        assert not os.path.lexists(work / p), p
     after = os.stat("/etc/passwd")
     assert (after.st_uid, after.st_gid) == (before.st_uid, before.st_gid)
 
@@ -315,3 +321,28 @@ def test_broker_protocol_over_unix_socket(settings, tmp_path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+@pytest.mark.skipif(os.getuid() != 0, reason="pinning uploads needs root (as the broker runs)")
+def test_broker_mounts_a_pinned_copy_of_the_upload(settings, tmp_path):
+    """The API owns uploads/, so the broker mounts a hard link in the broker-owned work/.inputs instead of
+    uploads/<id>.bin: swapping the upload for a link afterwards cannot change what the container reads."""
+    settings.ensure_dirs()
+    os.chown(settings.data_dir, 12345, 12346)
+    sid = str(uuid.uuid4())
+    up = settings.uploads_dir / f"{sid}.bin"
+    up.write_bytes(b"firmware")
+    ex = DockerJobExecutor(settings)
+    ex.workdir(sid, "reset")
+    cmd, _n, _t = ex.command("analyze", sid, {"name": "x", "limits": {}})
+    pinned = settings.work_root / ".inputs" / f"{sid}.bin"
+    assert f"{pinned}:/in/firmware:ro" in cmd
+    assert os.stat(pinned).st_ino == os.stat(up).st_ino and not pinned.is_symlink()
+    st = os.stat(settings.work_root / ".inputs")
+    assert (st.st_uid, st.st_mode & 0o777) == (0, 0o755)
+    up.unlink()
+    up.symlink_to("/etc/passwd")  # swapped after the upload was accepted
+    with pytest.raises(JobRejected):
+        ex.command("analyze", sid, {"name": "x", "limits": {}})
+    ex.workdir(sid, "remove")
+    assert not pinned.exists()

@@ -98,6 +98,10 @@ class CweCheckerAdapter(ToolAdapter):
             if a.get("format") == "elf" and elf:
                 if elf.get("machine") not in SUPPORTED_ELF_ARCH or elf.get("is_kernel_module"):
                     continue
+                if elf.get("arch") == CORTEX_M and not elf.get("interpreter"):
+                    # cwe_checker 0.9 panics on these ELFs (ReorderFnBlocksPass, fn_start_blocks.rs:44); their
+                    # flash image (derived in the sandbox) is analysed in bare-metal mode and symbolised instead
+                    continue
                 score = 0
                 if a.get("category") == "executable":
                     score += 10
@@ -136,9 +140,7 @@ class CweCheckerAdapter(ToolAdapter):
                     + (" in bare-metal mode" if t["bare_metal"] else ""))
             cfg_rel = None
             if t["bare_metal"]:
-                cfg_path = out_dir / f"bare_metal_{i}.json"
-                cfg_path.write_text(json.dumps(t["bare_metal"]))
-                cfg_rel = cfg_path
+                cfg_rel = ctx.write_file(out_dir / f"bare_metal_{i}.json", json.dumps(t["bare_metal"]))
             try:
                 if local:
                     cmd = [local, str(ctx.artifact_path(a)), "--json", "--quiet"]
@@ -161,8 +163,8 @@ class CweCheckerAdapter(ToolAdapter):
                 failures += 1
                 per_target.append({"binary": a["display_path"], "status": "failed", "error": str(exc)[:300]})
                 continue
-            (out_dir / f"result_{i}.json").write_text(stdout)
-            (out_dir / f"stderr_{i}.log").write_text(stderr[-20000:])
+            ctx.write_file(out_dir / f"result_{i}.json", stdout)
+            ctx.write_file(out_dir / f"stderr_{i}.log", stderr[-20000:])
             if killed or rc != 0:
                 failures += 1
                 per_target.append({"binary": a["display_path"], "status": "timeout" if killed else "failed",
@@ -174,7 +176,8 @@ class CweCheckerAdapter(ToolAdapter):
                 failures += 1
                 per_target.append({"binary": a["display_path"], "status": "failed", "error": str(exc)})
                 continue
-            fs = normalize(warnings, a["display_path"], bare_metal=bool(t["bare_metal"]))
+            fs = normalize(warnings, a["display_path"], bare_metal=bool(t["bare_metal"]),
+                           symbols=_load_symbols(ctx, a))
             findings += fs
             per_target.append({"binary": a["display_path"], "status": "completed", "warnings": len(warnings),
                                "duration_s": dur, "mode": "bare-metal" if t["bare_metal"] else "elf",
@@ -237,7 +240,42 @@ def _addresses(w: dict) -> list[str]:
     return list(dict.fromkeys(out))
 
 
-def normalize(warnings: list[dict], binary: str, bare_metal: bool = False) -> list[Finding]:
+CORTEX_M = "ARM Cortex-M (Thumb-2)"
+
+
+class SymbolMap:
+    """Function symbols of the ELF a flash image was derived from: address -> 'name+0xoff'."""
+
+    def __init__(self, entries: list) -> None:
+        clean = sorted((int(s), int(n), str(name)) for s, n, name in entries
+                       if isinstance(s, int) and isinstance(n, int) and isinstance(name, str))
+        self.starts = [e[0] for e in clean]
+        self.entries = clean
+
+    def lookup(self, addr: int) -> str | None:
+        import bisect
+        i = bisect.bisect_right(self.starts, addr) - 1
+        if i < 0:
+            return None
+        start, size, name = self.entries[i]
+        if size and addr >= start + size:
+            return None
+        return f"{name}+{addr - start:#x}" if addr != start else name
+
+
+def _load_symbols(ctx: AdapterContext, art: dict) -> SymbolMap | None:
+    rel = (art.get("details") or {}).get("symbol_map")
+    if not rel:
+        return None
+    try:  # written by the sandbox: regular file below the work directory, size limited
+        data = json.loads(ctx.read_artifact({"path": str(rel)}, 64 * 1024 * 1024))
+        return SymbolMap(data) if isinstance(data, list) else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def normalize(warnings: list[dict], binary: str, bare_metal: bool = False,
+              symbols: SymbolMap | None = None) -> list[Finding]:
     grouped: dict[str, list[dict]] = defaultdict(list)
     for w in warnings:
         grouped[str(w.get("name", "CWE?"))].append(w)
@@ -247,7 +285,18 @@ def normalize(warnings: list[dict], binary: str, bare_metal: bool = False) -> li
         title = CWE_TITLES.get(cwe_name, cwe_name)
         ev = []
         for w in ws[:25]:
-            addrs = ",".join(_addresses(w)[:3])
+            raw_addrs = _addresses(w)[:3]
+            if symbols:
+                named = []
+                for x in raw_addrs:
+                    try:
+                        where = symbols.lookup(int(x, 16))
+                    except ValueError:
+                        where = None
+                    named.append(f"{x} ({where})" if where else x)
+                addrs = ",".join(named)
+            else:
+                addrs = ",".join(raw_addrs)
             syms = ",".join(w.get("symbols", [])[:3])
             desc = str(w.get("description", ""))[:240]
             ev.append(Evidence("address", desc, f"{addrs}{' in ' + syms if syms else ''}"))
@@ -256,7 +305,9 @@ def normalize(warnings: list[dict], binary: str, bare_metal: bool = False) -> li
             description=("cwe_checker's static analysis (Ghidra P-Code + abstract interpretation) reported potential "
                          f"instances of CWE-{num} ({title}). These are analysis warnings with known false "
                          "positives; each location requires manual review before it can be called a vulnerability."
-                         + (" Analysed in experimental bare-metal mode (raw firmware, no symbols)." if bare_metal
+                         + ((" Analysed in experimental bare-metal mode; addresses are mapped to the function "
+                             "symbols of the ELF the image was built from." if symbols else
+                             " Analysed in experimental bare-metal mode (raw firmware, no symbols).") if bare_metal
                             else "")),
             severity=CWE_SEVERITY.get(cwe_name, S.low), classification=C.unverified, confidence=K.low,
             source_tool="cwe_checker", rule_id=cwe_name, affected_component=binary,

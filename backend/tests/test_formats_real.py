@@ -315,3 +315,57 @@ def test_real_ardupilot_bootloaders_identified(run_analysis):
         assert (ident["platform"], ident["platform_confidence"], ident["vehicle_type"]) == \
             ("ArduPilot", "high", "AP_Bootloader"), (name, ident["platform_candidates"])
         assert ident["architecture"] == "ARM Cortex-M (Thumb-2)"
+
+
+@pytest.mark.skipif(not ((REAL / "px4_fmu-v2_default.elf").exists() and (REAL / "px4_fmu-v2_default.px4").exists()),
+                    reason="official PX4 FMUv2 ELF/.px4 not downloaded")
+def test_real_px4_elf_yields_the_official_flash_image(tmp_path):
+    """The flash image derived from the unstripped ELF's load segments is byte-identical to the image in the
+    official .px4 of the same release, and its function symbols are recorded for cwe_checker."""
+    import base64
+    import zlib
+
+    from dfa.core.analyze import run
+    from dfa.core.limits import Limits
+    work = tmp_path / "work"
+    m = run(REAL / "px4_fmu-v2_default.elf", "px4_fmu-v2_default.elf", work, Limits())
+    arts = m["extraction"]["artifacts"]
+    flash = next(a for a in arts if a["name"] == "flash.bin")
+    assert flash["format"] == "cortexm_raw" and flash["details"]["derived_from_elf"] is True
+    assert flash["details"]["flash_base"] == "0x8004000"
+    assert flash["details"]["flash_base_source"] == "ELF load address"
+    assert flash["details"]["symbol_count"] > 5000
+    px4 = json.loads((REAL / "px4_fmu-v2_default.px4").read_text())
+    official = zlib.decompress(base64.b64decode(px4["image"]))
+    assert (work / flash["path"]).read_bytes() == official
+    symbols = json.loads((work / flash["details"]["symbol_map"]).read_text())
+    assert any(name == "main" or name.endswith("_main") for _a, _s, name in symbols)
+    # the NuttX /etc CROMFS inside the image is extracted as it is from the .px4
+    assert {"/init.d/rcS", "/extras/px4_io-v2_default.bin"} <= {a["name"] for a in arts}
+
+
+SITL = {  # ArduPilot SITL builds from dronekit-sitl's public bucket: (platform version, vehicle)
+    "sitl-linux-copter-3.2.1.tar.gz": ("3.2.1", "ArduCopter"),  # 'ArduCopter V3.2.1'
+    "sitl-linux-copter-3.3.tar.gz": ("3.3", "ArduCopter"),      # 'APM:Copter V3.3'
+    "sitl-linux-plane-3.3.0.tar.gz": ("3.3.0", "ArduPlane"),
+    "sitl-linux-rover-2.50.tar.gz": ("2.50", "ArduRover"),      # 'ArduRover v2.50', 'APMrover2'
+}
+
+
+@pytest.mark.skipif(not (APBL / "sitl-linux-copter-3.3.tar.gz").exists(),
+                    reason="ArduPilot SITL builds not fetched (scripts/fetch_real_firmware.py)")
+def test_real_ardupilot_vehicle_builds_identified(run_analysis):
+    from dfa.vulndb import _ardupilot_tags
+    for name, (version, vehicle) in SITL.items():
+        m = run_analysis(APBL / name)
+        ident = m["identification"]
+        assert (ident["platform"], ident["platform_confidence"], ident["platform_version"],
+                ident["vehicle_type"]) == ("ArduPilot", "high", version, vehicle), (name, ident["platform_candidates"])
+        assert [(c["name"], c["version"], c.get("variant")) for c in m["components"]] == \
+            [("ardupilot", version, vehicle)]
+        # the bundled default.parm is checked by the drone rules; these SITL defaults contain no unsafe values
+        assert not [f for f in m["findings"] if f["rule_id"].startswith("ardupilot-")]
+    # release tags used for OSV matching follow ArduPilot's historical naming
+    assert "APMrover2-2.50" in _ardupilot_tags("2.50", "ArduRover")
+    assert "ArduCopter-3.2.1" in _ardupilot_tags("3.2.1", "ArduCopter")
+    assert "Copter-3.3" in _ardupilot_tags("3.3", "ArduCopter")

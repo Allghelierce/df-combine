@@ -23,6 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import safefs
 from .config import BACKEND_DIR, Settings
 
 
@@ -126,13 +127,15 @@ def _mem_bytes(spec: str) -> int:
 
 
 def _pump_progress(work_dir: Path, progress: Callable[[str], None] | None, seen: int) -> int:
-    progress_file = work_dir / "progress.log"
-    if progress and progress_file.exists():
-        lines = progress_file.read_text(errors="replace").splitlines()
-        for ln in lines[seen:]:
-            progress(ln.split(" ", 1)[-1])
-        return len(lines)
-    return seen
+    if not progress:
+        return seen
+    try:  # written by the sandbox while it runs: never follow a link or block on a FIFO
+        lines = safefs.read_text(work_dir, "progress.log", 8 * 1024 * 1024).splitlines()
+    except OSError:
+        return seen
+    for ln in lines[seen:]:
+        progress(ln.split(" ", 1)[-1][:500])
+    return len(lines)
 
 
 def run_analysis(input_path: Path, original_name: str, work_dir: Path, settings: Settings,
@@ -214,11 +217,15 @@ def run_analysis(input_path: Path, original_name: str, work_dir: Path, settings:
         if timed_out:
             raise SandboxError(f"analysis sandbox timed out after {settings.sandbox_timeout_s}s")
         returncode = proc.returncode
-    manifest_path = work_dir / "manifest.json"
-    if not manifest_path.exists():
+    try:
+        manifest = json.loads(safefs.read_bytes(work_dir, "manifest.json", settings.max_manifest_mb * 1024 * 1024))
+    except FileNotFoundError:
         raise SandboxError(f"analysis sandbox exited with status {returncode} without a manifest. "
-                           f"Output: {log_tail[-1500:]}")
-    manifest = json.loads(manifest_path.read_text())
+                           f"Output: {log_tail[-1500:]}") from None
+    except (OSError, ValueError) as exc:
+        raise SandboxError(f"unusable manifest from the analysis sandbox: {exc}") from None
+    if not isinstance(manifest, dict):
+        raise SandboxError("unusable manifest from the analysis sandbox: not a JSON object")
     if "fatal_error" in manifest:
         raise SandboxError(f"analysis failed: {manifest['fatal_error']}")
     if returncode != 0:

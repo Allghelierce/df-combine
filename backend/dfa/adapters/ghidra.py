@@ -74,7 +74,8 @@ class GhidraAdapter(ToolAdapter):
                 if "busybox" in a["name"]:
                     score -= 20
                 cands.append((score, a["size"], {"artifact": a, "raw": None}))
-            elif a.get("format") == "cortexm_raw":
+            elif a.get("format") == "cortexm_raw" and not a.get("details", {}).get("derived_from_elf"):
+                # (images derived from an ELF are covered by analysing the ELF itself, with its symbols)
                 base = a.get("details", {}).get("flash_base")
                 if base:
                     cands.append((8, a["size"], {"artifact": a, "raw": {"processor": "ARM:LE:32:Cortex",
@@ -106,14 +107,22 @@ class GhidraAdapter(ToolAdapter):
                 failures += 1
                 summaries.append({"binary": a["display_path"], "status": "failed", "error": str(exc)[:300]})
                 continue
-            (out_dir / f"ghidra_{i}.log").write_text((res.stdout + res.stderr)[-200_000:])
-            if res.killed_reason or not out.exists():
+            ctx.write_file(out_dir / f"ghidra_{i}.log", (res.stdout + res.stderr)[-200_000:])
+            try:
+                raw = None if res.killed_reason else ctx.read_file(out, 256 * 1024 * 1024)
+            except FileNotFoundError:
+                raw = None
+            except OSError as exc:  # a link or special file where the report should be
+                failures += 1
+                summaries.append({"binary": a["display_path"], "status": "failed", "error": f"unusable report: {exc}"})
+                continue
+            if raw is None:
                 failures += 1
                 err = res.killed_reason or _last_error(res.stdout + res.stderr) or f"exit code {res.exit_code}"
                 summaries.append({"binary": a["display_path"], "status": "failed", "error": err[:400]})
                 continue
             try:
-                data = json.loads(out.read_text())
+                data = json.loads(raw)
             except json.JSONDecodeError as exc:
                 failures += 1
                 summaries.append({"binary": a["display_path"], "status": "failed", "error": f"bad JSON: {exc}"})

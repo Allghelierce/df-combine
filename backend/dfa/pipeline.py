@@ -9,6 +9,7 @@ from pathlib import Path
 
 from sqlalchemy import delete
 
+from . import safefs
 from .adapters.base import AdapterContext
 from .adapters.registry import get_adapters
 from .config import Settings
@@ -137,7 +138,7 @@ def process_scan(scan_id: str, settings: Settings) -> None:
                 sc = s.get(Scan, scan_id)
                 sc.components = manifest["components"]
                 sc.packages = manifest.get("packages")
-            (work / "manifest.json").write_text(json.dumps(manifest, indent=1, default=str))
+            safefs.write_text(work, "manifest.json", json.dumps(manifest, indent=1, default=str))
 
     # ---- stage 2: external tool adapters ----
     adapters = get_adapters(settings)
@@ -187,7 +188,7 @@ def process_scan(scan_id: str, settings: Settings) -> None:
         scan.severity_counts = {k: sev.get(k, 0) for k in SEVERITY_ORDER}
         scan.classification_counts = {k: cls.get(k, 0) for k in ("detected", "suspicious", "unverified", "info")}
         scan.risk_score = risk_score(final)
-    (work / "findings.json").write_text(json.dumps(final, indent=1))
+    safefs.write_text(work, "findings.json", json.dumps(final, indent=1))
     if not settings.keep_extracted:
         import shutil
         shutil.rmtree(work / "files", ignore_errors=True)

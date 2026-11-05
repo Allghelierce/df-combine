@@ -90,7 +90,11 @@ class FwAnalyzerAdapter(ToolAdapter):
             if not art:
                 continue
             fallback = fs.get("root")
-            if fstype and _looks_like_rootfs(ctx.work_dir / fs["root"]):
+            if fs.get("mode_image") and _looks_like_rootfs(ctx.work_dir / fs["root"]):
+                # cpio written by the sandbox with the original modes/owners: permission rules work
+                targets.append({"kind": "image", "fstype": "cpiofs", "artifact": art, "fallback_dir": fallback,
+                                "image_path": fs["mode_image"]})
+            elif fstype and _looks_like_rootfs(ctx.work_dir / fs["root"]):
                 targets.append({"kind": "image", "fstype": fstype, "artifact": art, "fallback_dir": fallback})
             elif fs["type"] in ("tar", "zip", "romfs") and _looks_like_rootfs(ctx.work_dir / fs["root"]):
                 targets.append({"kind": "dir", "fstype": "dirfs", "artifact": art, "fallback_dir": fallback})
@@ -117,7 +121,8 @@ class FwAnalyzerAdapter(ToolAdapter):
             art = t["artifact"]
             report, mode, note = None, t["fstype"], None
             if t["kind"] == "image":
-                report, err = self._run_one(runner, b, out_dir, i, t["fstype"], art,
+                image = ctx.artifact_path({"path": t["image_path"]}) if t.get("image_path") else art
+                report, err = self._run_one(runner, b, out_dir, i, t["fstype"], image,
                                             ctx.work_dir / t["fallback_dir"], perms=True)
                 if report is None:
                     note = f"image mode ({t['fstype']}) failed: {err}; fell back to dirfs on extracted tree"
@@ -130,7 +135,7 @@ class FwAnalyzerAdapter(ToolAdapter):
                 if report is None:
                     runs.append({"target": art["display_path"], "status": "failed", "error": err, "note": note})
                     continue
-            fs = normalize(report, art["display_path"], perms=(mode != "dirfs"))
+            fs = normalize(report, art["display_path"], perms=(mode != "dirfs"), modes=_original_modes(ctx, t))
             findings += fs
             runs.append({"target": art["display_path"], "status": "completed", "mode": mode, "note": note,
                          "offenders": len(report.get("offenders", {}) or {}),
@@ -149,8 +154,7 @@ class FwAnalyzerAdapter(ToolAdapter):
                  target: Path | dict, tree: Path, perms: bool, profile: str = "linux") -> tuple[dict | None, str]:
         """``target`` is an artifact dict (filesystem image) or a directory (dirfs)."""
         ctx, how = runner
-        cfg = out_dir / f"config_{i}_{fstype}.toml"
-        cfg.write_text(build_config(fstype, tree, perms, profile))
+        cfg = ctx.write_file(out_dir / f"config_{i}_{fstype}.toml", build_config(fstype, tree, perms, profile))
         out = out_dir / f"report_{i}_{fstype}.json"
         out.unlink(missing_ok=True)
         if how == "sandbox":
@@ -167,14 +171,34 @@ class FwAnalyzerAdapter(ToolAdapter):
             host_target = ctx.artifact_path(target) if isinstance(target, dict) else target
             rc, stdout, stderr, _ = run_cmd([b, "-cfg", str(cfg), "-in", str(host_target), "-out", str(out)],
                                             timeout=self.settings.fwanalyzer_timeout_s)
-        (out_dir / f"stderr_{i}_{fstype}.log").write_text((stdout + stderr)[-20000:])
-        if rc != 0 or not out.exists():
+        ctx.write_file(out_dir / f"stderr_{i}_{fstype}.log", (stdout + stderr)[-20000:])
+        try:
+            raw = ctx.read_file(out, 256 * 1024 * 1024) if rc == 0 else None
+        except FileNotFoundError:
+            raw = None
+        except OSError as exc:
+            return None, f"unusable report: {exc}"
+        if raw is None:
             first = (stderr or stdout).strip().splitlines()[:1]
             return None, f"exit code {rc}: {first[0][:200] if first else 'no output'}"
         try:
-            return json.loads(out.read_text()), ""
+            return json.loads(raw), ""
         except json.JSONDecodeError as exc:
             return None, f"invalid JSON report: {exc}"
+
+
+def _original_modes(ctx: AdapterContext, t: dict) -> dict[str, tuple[int, bool]]:
+    """Original modes of the filesystem's files (artifacts) and special directories (recorded by the sandbox)."""
+    fs = next((f for f in ctx.manifest.get("extraction", {}).get("filesystems", [])
+               if f.get("artifact_id") == t["artifact"].get("id")), {})
+    out: dict[str, tuple[int, bool]] = {}
+    for a in ctx.manifest.get("extraction", {}).get("artifacts", []):
+        if a.get("parent_id") == fs.get("artifact_id") and isinstance(a.get("mode"), int):
+            out[str(a.get("name"))] = (a["mode"], False)
+    for d, m in (fs.get("special_dirs") or {}).items():
+        if isinstance(m, int):
+            out[str(d)] = (m, True)
+    return out
 
 
 def _looks_like_rootfs(d: Path) -> bool:
@@ -242,8 +266,8 @@ def build_config(fstype: str, tree: Path, perms: bool, profile: str = "linux") -
 def _classify(msg: str, path: str, perms: bool) -> tuple[str, S, str, str]:
     """Return (rule, severity, title, cwe) for an FwAnalyzer offender message."""
     m = msg.lower()
-    if "suid" in m:
-        return "fwa-suid", S.low, "setuid file not in allow-list", "CWE-250"
+    if "suid" in m:  # FwAnalyzer's Suid check covers setuid *and* setgid and labels both "File is SUID"
+        return "fwa-suid", S.low, "setuid/setgid file not in allow-list", "CWE-250"
     if "worldwrite" in m:
         return "fwa-world-writable", S.medium, "World-writable file", "CWE-732"
     if "not allowed for pattern" in m or m.startswith("file not allowed"):
@@ -268,8 +292,18 @@ def _classify(msg: str, path: str, perms: bool) -> tuple[str, S, str, str]:
     return "fwa-offender", S.low, "FwAnalyzer policy violation", None
 
 
-def normalize(report: dict, target: str, perms: bool) -> list[Finding]:
+def _mode_note(mode: int | None, is_dir: bool) -> str:
+    if mode is None:
+        return ""
+    bits = [b for b, v in (("setuid", 0o4000), ("setgid", 0o2000)) if mode & v]
+    kind = "directory" if is_dir else "file"
+    return f" [{'+'.join(bits) or 'no setuid/setgid bit'} {kind}, mode {mode & 0o7777:04o}]"
+
+
+def normalize(report: dict, target: str, perms: bool, modes: dict[str, tuple[int, bool]] | None = None) -> list[Finding]:
+    """``modes``: original mode (and whether it is a directory) per path, from the archive metadata."""
     out = []
+    modes = modes or {}
     groups: dict[tuple[str, str], list[tuple[str, str]]] = {}
     meta: dict[str, tuple[S, str, str | None]] = {}
     for path, msgs in (report.get("offenders") or {}).items():
@@ -288,7 +322,9 @@ def normalize(report: dict, target: str, perms: bool) -> list[Finding]:
                          + ("" if perms else " Run in directory mode: file ownership/permissions were not available.")),
             severity=sev, classification=C.detected, confidence=K.high, source_tool="fwanalyzer", rule_id=rule,
             affected_component=target, remediation=_REMEDIATION.get(rule, "Review the offending files."),
-            evidence=[Evidence("tool_output", m[:240], p) for p, m in items[:25]], cwe=cwe, tags=["policy"]))
+            evidence=[Evidence("tool_output", (m + (_mode_note(*modes[p]) if rule == "fwa-suid" and p in modes
+                                                    else ""))[:240], p) for p, m in items[:25]],
+            cwe=cwe, tags=["policy"]))
     info = report.get("informational") or {}
     if info:
         out.append(Finding(
