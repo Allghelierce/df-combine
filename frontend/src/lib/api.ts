@@ -178,6 +178,14 @@ export interface ImageInfo {
   symbol_count?: number;
   symbols_from?: string;
   identical_to?: number;
+  /** where a carved or trailing artifact starts in its parent */
+  carved_offset?: string;
+  /** data before an archive (e.g. a vendor header) */
+  prepended_bytes?: number;
+  /** 0xFF/0x00 padding after the data */
+  trailing_padding_bytes?: number;
+  /** a few bytes after the data (size field, checksum), not analysed */
+  trailing_bytes?: number;
 }
 
 export interface Artifact {

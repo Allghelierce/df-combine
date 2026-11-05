@@ -122,7 +122,8 @@ def _bootstrap_admin(settings: Settings) -> None:
 
 
 # raw MCU image facts shown in the inventory (load address, symbols borrowed from the build's ELF)
-IMAGE_KEYS = ("flash_base", "flash_base_source", "derived_from_elf", "symbol_count", "symbols_from", "identical_to")
+IMAGE_KEYS = ("flash_base", "flash_base_source", "derived_from_elf", "symbol_count", "symbols_from", "identical_to",
+              "carved_offset", "prepended_bytes", "trailing_padding_bytes", "trailing_bytes")
 
 
 def create_app(settings: Settings | None = None, start_worker: bool | None = None) -> FastAPI:

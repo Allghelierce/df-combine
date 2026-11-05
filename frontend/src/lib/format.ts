@@ -105,8 +105,16 @@ export function buildLine(b: BuildInfo | null | undefined): string | null {
 }
 
 export function imageSummary(i: ImageInfo | null | undefined): string | null {
-  if (!i || !i.flash_base) return null;
-  const parts = [`load address ${i.flash_base}`];
+  if (!i) return null;
+  const n = (x: number) => x.toLocaleString("en-US");
+  const parts: string[] = [];
+  // where the artifact came from: content found after other data, or data around it
+  if (i.carved_offset) parts.push(`found at ${i.carved_offset}`);
+  if (i.prepended_bytes) parts.push(`${n(i.prepended_bytes)} bytes before the archive (e.g. a vendor header)`);
+  if (i.trailing_padding_bytes) parts.push(`${n(i.trailing_padding_bytes)} bytes of padding after the data`);
+  if (i.trailing_bytes) parts.push(`${n(i.trailing_bytes)} bytes after the data (size field or checksum)`);
+  if (!i.flash_base) return parts.length ? parts.join(" · ") : null;
+  parts.push(`load address ${i.flash_base}`);
   if (i.symbol_count) {
     parts.push(
       i.derived_from_elf

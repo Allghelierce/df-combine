@@ -65,3 +65,14 @@ describe("finding references", () => {
     expect(externalUrl("https://")).toBeNull();
   });
 });
+
+describe("artifact placement", () => {
+  it("says where carved and trailing content came from", () => {
+    expect(imageSummary({ carved_offset: "0x1840000" })).toBe("found at 0x1840000");
+    expect(imageSummary({ prepended_bytes: 1032 })).toBe("1,032 bytes before the archive (e.g. a vendor header)");
+    expect(imageSummary({ trailing_padding_bytes: 4096 })).toBe("4,096 bytes of padding after the data");
+    expect(imageSummary({ trailing_bytes: 4 })).toBe("4 bytes after the data (size field or checksum)");
+    expect(imageSummary({ carved_offset: "0x10000", flash_base: "0x8000000" })).toBe("found at 0x10000 · load address 0x8000000");
+    expect(imageSummary({})).toBeNull();
+  });
+});
