@@ -544,3 +544,62 @@ def test_zip_name_fixes_follow_prepended_data(tmp_path):
     src.write_bytes(b"not a zip at all")
     with pytest.raises(ValueError):
         zipnames.utf8_flag_fixes(src)
+
+
+def _cpio_modes(path: Path) -> dict[str, tuple[int, int, int]]:
+    """name -> (mode, uid, gid) from a newc cpio archive."""
+    data, out, i = path.read_bytes(), {}, 0
+    while data[i:i + 6] == b"070701":
+        f = [int(data[i + 6 + 8 * k:i + 14 + 8 * k], 16) for k in range(13)]
+        name = data[i + 110:i + 110 + f[11] - 1].decode("utf-8", "replace")
+        i = (i + 110 + f[11] + 3) & ~3
+        i = (i + f[6] + 3) & ~3
+        if name == "TRAILER!!!":
+            break
+        out[name] = (f[1], f[2], f[3])
+    return out
+
+
+def test_squashfs_keeps_original_permissions_when_extracted_unprivileged(tmp_path, monkeypatch, run_analysis):
+    """unsquashfs run by an unprivileged user, as in the sandbox, drops setuid/setgid bits and owners (observed
+    with unsquashfs 4.6.1 as nobody: /bin/su 4755 in the image, 0755 on disk). The original modes now come from
+    'unsquashfs -lln', for the built-in setuid check and for FwAnalyzer's permission image."""
+    import subprocess
+    if not shutil.which("mksquashfs"):
+        pytest.skip("mksquashfs unavailable")
+    tree = tmp_path / "tree"
+    for d in ("etc", "bin", "tmp", "usr/share"):
+        (tree / d).mkdir(parents=True)
+    (tree / "etc" / "passwd").write_text("root:x:0:0:root:/root:/bin/sh\n")
+    for name, mode in (("su", 0o4755), ("wall", 0o2755), ("ls", 0o755), ("bad\udc80", 0o4711)):
+        p = tree / "bin" / name
+        p.write_bytes(b"\x7fELF-not-really")
+        os.chmod(p, mode)
+    os.chmod(tree / "tmp", 0o1777)
+    img = tmp_path / "rootfs.squashfs"
+    subprocess.run(["mksquashfs", str(tree), str(img), "-noappend", "-quiet"], check=True, capture_output=True)
+
+    real_run_tool = Extractor._run_tool
+
+    def as_unprivileged(self, art, cmd, out, env=None):  # what unsquashfs leaves behind for a non-root user
+        real_run_tool(self, art, cmd, out, env)
+        for p in out.rglob("*"):
+            if not p.is_symlink():
+                os.chmod(p, p.lstat().st_mode & 0o1777)
+    monkeypatch.setattr(Extractor, "_run_tool", as_unprivileged)
+
+    ex = Extractor(tmp_path / "w", Limits())
+    res = ex.run(img, "rootfs.squashfs")
+    modes = {a.name: a.mode for a in res.artifacts if a.origin == "extracted"}
+    assert (modes["/bin/su"], modes["/bin/wall"], modes["/bin/ls"]) == (0o4755, 0o2755, 0o755)
+    assert modes["/bin/bad\\x80"] == 0o4711  # listing names are escaped like the renamed file on disk
+    fs = next(f for f in res.filesystems if f["type"] == "squashfs")
+    assert fs["unix_modes"] and fs["special_dirs"]["/tmp"] == 0o1777
+    cpio = _cpio_modes(tmp_path / "w" / fs["mode_image"])
+    assert cpio["bin/su"][0] == 0o104755 and cpio["bin/wall"][0] == 0o102755 and cpio["tmp"][0] == 0o041777
+    if os.geteuid() == 0:  # mksquashfs records the builder's owner; only root builds root-owned images
+        assert cpio["bin/su"][1:] == (0, 0)
+
+    manifest = run_analysis(img)
+    setuid = [f for f in manifest["findings"] if f["rule_id"] == "setuid-files"]
+    assert setuid and {"/bin/su", "/bin/bad\\x80"} <= {e["value"].split(" (mode")[0] for e in setuid[0]["evidence"]}

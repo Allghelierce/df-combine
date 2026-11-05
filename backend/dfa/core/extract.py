@@ -31,6 +31,7 @@ import stat
 import struct
 import subprocess
 import tarfile
+import threading
 import time
 import zipfile
 import zlib
@@ -210,9 +211,10 @@ class Extractor:
     def _write_mode_images(self) -> None:
         """An extracted tree has normalised modes (setuid bits are never applied), so FwAnalyzer cannot check
         permissions on it. For root filesystems whose original metadata is known (tar, ext) write a cpio (newc)
-        archive that carries modes and owners as header fields; FwAnalyzer reads it in cpio image mode."""
+        archive that carries modes and owners as header fields; FwAnalyzer reads it in cpio image mode.
+        Also for SquashFS, whose original metadata comes from 'unsquashfs -lln'."""
         for fs in self.result.filesystems:
-            if fs["type"] not in ("tar", "ext") and not (fs["type"] == "zip" and fs.get("unix_modes")):
+            if fs["type"] not in ("tar", "ext") and not fs.get("unix_modes"):  # zip made on Unix, listed SquashFS
                 continue
             root = self.work_dir / fs["root"]
             if not (root / "etc").is_dir() or not ((root / "bin").exists() or (root / "usr").is_dir()):
@@ -1047,8 +1049,60 @@ class Extractor:
                              str(self.path_of(art.id))], out)
         self._sanitize_tree(art, out)
         root = dest if dest.exists() else out
-        self._record_fs(art, "squashfs", root, image_artifact=art.id)
+        listed = self._squashfs_modes(art, tool, root)
+        self._record_fs(art, "squashfs", root, image_artifact=art.id, **({"unix_modes": True} if listed else {}))
         return self._register_tree(art, root)
+
+    def _squashfs_modes(self, art: Artifact, tool: str, root: Path) -> bool:
+        """Original modes and owners from 'unsquashfs -lln'. Extraction by an unprivileged user, as in the
+        sandbox, drops setuid/setgid bits and owners, so the permission checks (built-in and FwAnalyzer) saw
+        none in SquashFS root filesystems. Streams the listing with an entry cap and a deadline."""
+        cpu = self.limits.tool_timeout_s
+
+        def preexec() -> None:  # pragma: no cover - runs in child
+            resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 5))
+            os.setsid()
+
+        files: dict[str, tuple[int, int, int]] = {}
+        dirs: dict[str, tuple[int, int, int]] = {}
+        complete = False
+        proc = subprocess.Popen([tool, "-lln", "-no-xattrs", str(self.path_of(art.id))], stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, preexec_fn=preexec,
+                                env={"PATH": os.environ.get("PATH", "")})
+        timer = threading.Timer(self.limits.tool_timeout_s, proc.kill)
+        timer.start()
+        try:
+            assert proc.stdout is not None
+            for n, raw in enumerate(proc.stdout):
+                if n > self.limits.max_files + 1:
+                    break
+                m = _LS_LINE.match(raw.rstrip(b"\n"))
+                if not m or b"/" not in m.group(4):
+                    continue  # the root line itself, device numbers, names with newlines
+                mode = _ls_mode(m.group(1).decode("ascii"))
+                rel = escape_surrogates(m.group(4).split(b"/", 1)[1].decode("utf-8", "surrogateescape"))
+                if mode is None or not rel:
+                    continue
+                if stat.S_ISREG(mode):
+                    files[rel] = (mode & 0o7777, int(m.group(2)), int(m.group(3)))
+                elif stat.S_ISDIR(mode):
+                    dirs[rel] = (mode & 0o7777, int(m.group(2)), int(m.group(3)))
+            else:
+                complete = proc.wait() == 0
+        finally:
+            timer.cancel()
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+        if not complete:
+            self.result.warnings.append(f"{art.name}: no original permissions (unsquashfs listing incomplete)")
+            return False
+        for rel, (mode, uid, gid) in files.items():
+            p = root / rel
+            if str(p) in self._pending_meta or p.is_file():
+                self._pending_meta[str(p)] = {"mode": mode, "uid": uid, "gid": gid}
+        self._dir_meta.setdefault(art.id, {}).update(dirs)
+        return True
 
     def h_ext(self, art: Artifact) -> list[Artifact]:
         """ext2/3/4 via debugfs, without 'rdump'.
@@ -1584,6 +1638,29 @@ def _single_child_root(dest: Path) -> Path:
 
 
 _UNSQUASHFS_OK: dict[str, bool] = {}
+
+
+# 'unsquashfs -lln' lines: mode, uid/gid, size (or "major, minor"), date, time, path ("squashfs-root/...")
+_LS_LINE = re.compile(rb"^([-dlcbps][-rwxsStT]{9}) +(\d+)/(\d+) +(?:\d+|\d+, *\d+) +\d{4}-\d\d-\d\d \d\d:\d\d (.+)$")
+_LS_TYPES = {"-": stat.S_IFREG, "d": stat.S_IFDIR, "l": stat.S_IFLNK, "c": stat.S_IFCHR, "b": stat.S_IFBLK,
+             "p": stat.S_IFIFO, "s": stat.S_IFSOCK}
+
+
+def _ls_mode(text: str) -> int | None:
+    """'-rwsr-xr-x' -> 0o104755 ('s'/'S' setuid/setgid with/without x, 't'/'T' sticky)."""
+    if len(text) != 10 or text[0] not in _LS_TYPES:
+        return None
+    mode = _LS_TYPES[text[0]]
+    for i, c in enumerate(text[1:]):
+        bit = 0o400 >> i
+        special = {2: 0o4000, 5: 0o2000, 8: 0o1000}.get(i)
+        if c == "rwx"[i % 3]:
+            mode |= bit
+        elif special and c in ("sS" if i < 8 else "tT"):
+            mode |= special | (bit if c.islower() else 0)
+        elif c != "-":
+            return None
+    return mode
 
 
 def _unsquashfs_safe(tool: str) -> bool:
