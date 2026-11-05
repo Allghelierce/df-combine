@@ -847,3 +847,25 @@ def test_ext_names_with_quotes_newlines_or_bytes_that_are_not_utf8_are_extracted
                    '/dir"x/deeper/inner.txt': b"inside a quoted directory"}
     assert not res.warnings
     assert not list((tmp_path / "w" / "files").rglob(".dump"))  # the staging directory is removed
+
+
+def test_zip_after_a_vendor_header_is_extracted(tmp_path):
+    """A zip that ends the file after other data (a vendor header, a self-extracting shell stub) was unrecognised
+    (format detection only looked for 'PK' at offset 0), so its content went unanalysed; zipfile opens it as is."""
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w") as zf:
+        zf.writestr("etc/passwd", "root::0:0::/root:/bin/sh\n")
+    archive = b.getvalue()
+    cases = {"vendor.bin": b"VNDRFW\x01\x00" + bytes(range(256)) * 4 + archive,
+             "installer.sh": b"#!/bin/sh\nexec unzip -o \"$0\"\n" + archive}
+    for name, data in cases.items():
+        src = tmp_path / name
+        src.write_bytes(data)
+        res = Extractor(tmp_path / f"w_{name}", Limits()).run(src, name)
+        assert res.artifacts[0].format == "zip", name
+        assert res.artifacts[0].details["prepended_bytes"] == len(data) - len(archive)
+        assert {a.name for a in res.artifacts if a.origin == "extracted"} == {"/etc/passwd"}, name
+    # an end-of-central-directory signature alone at the end of random data is not a zip
+    fake = tmp_path / "fake.bin"
+    fake.write_bytes(bytes(range(256)) * 8 + b"PK\x05\x06" + b"\x00" * 6 + b"\x01\x00" + b"\x50\x00\x00\x00" * 2 + b"\x00\x00")
+    assert Extractor(tmp_path / "w_fake", Limits()).run(fake, "fake.bin").artifacts[0].format != "zip"

@@ -14,6 +14,7 @@ from collections import Counter
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import BinaryIO
 
 from .formats import esp
 from .formats.cortexm import analyze_vector_table
@@ -95,7 +96,31 @@ def detect_format(path: Path) -> FormatInfo:
         return _fmt("empty")
     with path.open("rb") as fp:
         head = fp.read(HEAD_BYTES)
-    return detect_format_bytes(head, size)
+        info = detect_format_bytes(head, size)
+        if info.format in ("raw", "text") and (start := zip_at_end(fp, size)):
+            return _fmt("zip", prepended_bytes=start)  # e.g. a vendor header before the archive
+    return info
+
+
+def zip_at_end(fp: BinaryIO, size: int) -> int | None:
+    """Offset of a zip archive that ends the file after other data (a vendor header, a self-extracting stub),
+    which zipfile opens as it is; None if there is none. Needs the end record at the very end (no comment),
+    a central directory and a first local header where the end record says."""
+    if size < 22 + 46 + 30:
+        return None
+    fp.seek(size - 22)
+    end = fp.read(22)
+    if end[:4] != b"PK\x05\x06" or end[20:22] != b"\x00\x00":
+        return None
+    count, cd_size, cd_off = struct.unpack_from("<HII", end, 10)
+    start = size - 22 - cd_size - cd_off
+    if not count or cd_size < 46 or start <= 0:
+        return None
+    fp.seek(start + cd_off)
+    if fp.read(4) != b"PK\x01\x02":
+        return None
+    fp.seek(start)
+    return start if fp.read(4) == b"PK\x03\x04" else None
 
 
 def detect_format_bytes(head: bytes, size: int) -> FormatInfo:
