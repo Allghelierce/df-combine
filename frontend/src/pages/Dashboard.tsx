@@ -6,7 +6,7 @@ import { Empty, ErrorBox, Panel, Stat, StatusBadge, usePolling } from "../compon
 import { api, AppConfig, Scan, Stats, ToolStatus } from "../lib/api";
 import { formatBytes, formatDate } from "../lib/format";
 
-export default function Dashboard({ config }: { config: AppConfig | null }) {
+export default function Dashboard({ config, canUpload = true }: { config: AppConfig | null; canUpload?: boolean }) {
   const [stats, setStats] = useState<Stats | null>(null);
   const [recent, setRecent] = useState<Scan[]>([]);
   const [tools, setTools] = useState<ToolStatus[]>([]);
@@ -36,13 +36,17 @@ export default function Dashboard({ config }: { config: AppConfig | null }) {
       <header className="page-head">
         <div>
           <h1>Firmware security dashboard</h1>
-          <p className="muted">Upload PX4, ArduPilot or companion-computer firmware for automated static security analysis.</p>
+          <p className="muted">Upload PX4, ArduPilot, ESP32 peripheral or companion-computer firmware for automated static security analysis.</p>
         </div>
       </header>
       <ErrorBox error={error} />
       <div className="grid-2">
         <Panel title="New scan">
-          <Dropzone maxMb={config?.max_upload_mb} onUploaded={load} />
+          {canUpload ? (
+            <Dropzone maxMb={config?.max_upload_mb} onUploaded={load} />
+          ) : (
+            <Empty>Your role is read-only; ask an administrator for analyst access to upload firmware.</Empty>
+          )}
         </Panel>
         <Panel title="Overview">
           <div className="stats">

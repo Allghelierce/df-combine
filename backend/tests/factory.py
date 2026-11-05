@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import gzip
+import hashlib
 import io
 import json
 import os
@@ -443,3 +444,86 @@ def ext_duplicate_entry_attack(out: Path, victim: Path) -> Path | None:
     out.write_bytes(bytes(data))
     shutil.rmtree(src)
     return out
+
+
+def cromfs(files: dict[str, bytes]) -> bytes:
+    """Minimal NuttX CROMFS volume (uncompressed LZF type-0 blocks) containing /init.d/<files>.
+
+    As in real volumes (verified against PX4 v1.17 images), cv_root points to the first entry of
+    the root directory list; directory nodes point (cn_child) to their first entry.
+    """
+    import struct as st
+    items = list(files.items())
+    n_nodes = 1 + len(items)
+    nodes_end = 20 + 20 * n_nodes
+    name_table, blob = {}, bytearray()
+    for n in ["init.d"] + [k for k, _ in items]:
+        name_table[n] = nodes_end + len(blob)
+        blob += n.encode() + b"\x00"
+    data_off = nodes_end + len(blob)
+    blocks, block_off = bytearray(), {}
+    for k, v in items:
+        block_off[k] = data_off + len(blocks)
+        for i in range(0, len(v), 512):
+            chunk = v[i:i + 512]
+            blocks += b"ZV\x00" + st.pack(">H", len(chunk)) + chunk
+    fsize = data_off + len(blocks)
+    out = bytearray(st.pack("<IHHIII", 0x4D4F5243, n_nodes, len(items), 20, fsize, 512))
+    out += st.pack("<HHIIII", 0o40555, 0, name_table["init.d"], 0, 0, 40)  # root list: one directory
+    for i, (k, v) in enumerate(items):
+        peer = 40 + 20 * (i + 1) if i + 1 < len(items) else 0
+        out += st.pack("<HHIIII", 0o100444, 0, name_table[k], len(v), peer, block_off[k])
+    out += blob + blocks
+    assert len(out) == fsize
+    return bytes(out)
+
+
+# ----------------------------------------------------------------------------- Espressif
+def esp_app_desc(project: str, version: str, idf_ver: str, date: str = "Jan  1 2026", time: str = "12:00:00") -> bytes:
+    """esp_app_desc_t (256 bytes) as ESP-IDF places it at the start of the first flash data segment."""
+    d = struct.pack("<II8x", 0xABCD5432, 0) + version.encode().ljust(32, b"\0") + project.encode().ljust(32, b"\0")
+    d += time.encode().ljust(16, b"\0") + date.encode().ljust(16, b"\0") + idf_ver.encode().ljust(32, b"\0")
+    return (d + hashlib.sha256(project.encode()).digest()).ljust(256, b"\0")
+
+
+def esp_image(segments: list[tuple[int, bytes]], entry: int = 0x40080400, chip_id: int | None = 0,
+              hash_appended: bool = False) -> bytes:
+    """Espressif application image in esptool's layout; ``chip_id=None`` gives the ESP8266 (v1) header."""
+    hdr = bytes([0xE9, len(segments), 2, 0x20]) + struct.pack("<I", entry)
+    if chip_id is not None:
+        hdr += bytes([0xEE, 0, 0, 0]) + struct.pack("<H", chip_id) + bytes(9) + bytes([1 if hash_appended else 0])
+    body, c = b"", 0xEF
+    for addr, data in segments:
+        body += struct.pack("<II", addr, len(data)) + data
+        for b in data:
+            c ^= b
+    img = hdr + body
+    img += b"\0" * (15 - len(img) % 16) + bytes([c])
+    return img + hashlib.sha256(img).digest() if hash_appended else img
+
+
+def esp_partition_table(entries: list[tuple[str, int, int, int, int, int]], md5: bool = True) -> bytes:
+    """ESP-IDF partition table: (label, type, subtype, offset, size, flags) entries."""
+    t = b""
+    for label, typ, sub, off, size, flags in entries:
+        t += b"\xaa\x50" + bytes([typ, sub]) + struct.pack("<II", off, size) + label.encode().ljust(16, b"\0")
+        t += struct.pack("<I", flags)
+    if md5:
+        t += b"\xeb\xeb" + b"\xff" * 14 + hashlib.md5(t, usedforsecurity=False).digest()
+    return t.ljust(0xC00, b"\xff")
+
+
+def esp_flash_dump(bootloader: bytes, table: bytes, parts: dict[int, bytes], size: int = 0x200000,
+                   boot_offset: int = 0x1000) -> bytes:
+    d = bytearray(b"\xff" * size)
+    d[boot_offset:boot_offset + len(bootloader)] = bootloader
+    d[0x8000:0x8000 + len(table)] = table
+    for off, data in parts.items():
+        d[off:off + len(data)] = data
+    return bytes(d)
+
+
+def xtensa_code(n: int = 64) -> bytes:
+    """Bytes with the density of Xtensa windowed-ABI prologues/epilogues found in ESP32 code."""
+    rnd = random.Random(7)
+    return b"".join(b"\x36\x41\x00" + bytes(rnd.randrange(256) for _ in range(13)) + b"\x1d\xf0" for _ in range(n))

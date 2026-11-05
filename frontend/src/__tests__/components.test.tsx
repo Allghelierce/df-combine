@@ -3,6 +3,7 @@ import { MemoryRouter } from "react-router-dom";
 import { SeverityDonut } from "../components/charts";
 import { FindingsTable } from "../components/FindingsTable";
 import type { Finding, Scan } from "../lib/api";
+import { findingBasis } from "../lib/format";
 import { pipelineSteps } from "../pages/ScanDetail";
 
 const base: Omit<Finding, "id" | "severity" | "classification" | "title" | "source_tool"> = {
@@ -60,20 +61,59 @@ describe("charts", () => {
   });
 });
 
+describe("finding basis and package attribution", () => {
+  it("labels static-analysis warnings and shows the owning package", () => {
+    const f: Finding = {
+      ...base,
+      id: 9,
+      severity: "medium",
+      classification: "unverified",
+      title: "Use of potentially dangerous function strcpy",
+      source_tool: "cwe_checker",
+      rule_id: "CWE-676",
+      tags: ["static-analysis"],
+      package: "sysvinit-utils 2.96-7",
+    };
+    render(<FindingsTable findings={[f]} />);
+    expect(screen.getByTitle("Installed package that owns the affected file")).toHaveTextContent("sysvinit-utils 2.96-7");
+    expect(screen.getByRole("combobox", { name: /filter by package/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /strcpy/i }));
+    expect(screen.getByText(/Static-analysis warning\./)).toBeInTheDocument();
+    expect(screen.getByText(/not a confirmed vulnerability/)).toBeInTheDocument();
+  });
+  it("shows a spoofing name in a finding as it is", () => {
+    const f: Finding = { ...base, id: 9, severity: "high", classification: "detected", title: "Key in evil\u202etxt.exe",
+      source_tool: "builtin:secrets", affected_component: "fw > /bin/evil\u202etxt.exe" };
+    render(<FindingsTable findings={[f]} />);
+    expect(screen.getByText("Key in evil\\u202etxt.exe")).toBeInTheDocument();
+    expect(screen.getByTitle("fw > /bin/evil\\u202etxt.exe")).toHaveTextContent("fw > /bin/evil\\u202etxt.exe");
+  });
+  it("distinguishes advisories from version matches", () => {
+    expect(findingBasis({ source_tool: "osv", rule_id: "osv-distro-package", classification: "detected", tags: [] }).label).toBe(
+      "Distribution security advisory",
+    );
+    expect(findingBasis({ source_tool: "osv", rule_id: "osv-upstream-px4", classification: "unverified", tags: [] }).label).toBe(
+      "Version-based match",
+    );
+  });
+});
+
 describe("pipelineSteps", () => {
   const scan = {
     status: "completed",
     stage: "complete",
     tool_runs: [
       { tool: "builtin:secrets", status: "completed" },
+      { tool: "osv", status: "completed" },
       { tool: "fwanalyzer", status: "skipped" },
       { tool: "cwe_checker", status: "unavailable" },
+      { tool: "ghidra", status: "completed" },
       { tool: "fact", status: "failed" },
     ],
   } as unknown as Scan;
   it("maps tool runs to step states", () => {
     const s = Object.fromEntries(pipelineSteps(scan).map((x) => [x.key, x.state]));
-    expect(s).toMatchObject({ sandbox: "done", fwanalyzer: "skipped", cwe_checker: "unavailable", fact: "failed", report: "done" });
+    expect(s).toMatchObject({ sandbox: "done", osv: "done", fwanalyzer: "skipped", cwe_checker: "unavailable", ghidra: "done", fact: "failed", report: "done" });
   });
   it("marks the active tool while running", () => {
     const running = { ...scan, status: "running", stage: "tool:cwe_checker", tool_runs: [{ tool: "builtin:secrets", status: "completed" }] } as unknown as Scan;

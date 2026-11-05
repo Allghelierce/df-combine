@@ -12,3 +12,4 @@ var/
 *.sqlite3
 .env
 fixtures/generated/
+fixtures/real/

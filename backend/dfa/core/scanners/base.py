@@ -10,8 +10,10 @@ from ..identify import iter_strings
 from ..limits import Limits
 
 # Formats whose content is covered by their extracted children once unpacked.
-UNPACKED_CONTAINERS = {"zip", "tar", "gzip", "bzip2", "xz", "lzma", "squashfs", "ext", "fat", "cpio",
-                       "romfs", "disk_image", "ubi", "ubifs", "jffs2", "dfu", "uimage", "px4", "apj", "fw_json", "ihex"}
+UNPACKED_CONTAINERS = {"zip", "tar", "gzip", "bzip2", "xz", "lzma", "zstd", "lz4", "lz4_legacy", "lzop", "cramfs",
+                       "erofs", "android_sparse", "parrot_plf", "dji_imah", "esp_image", "esp_flash",
+                       "squashfs", "ext", "fat", "cpio",
+                       "romfs", "cromfs", "disk_image", "ubi", "ubifs", "jffs2", "dfu", "uimage", "px4", "apj", "fw_json", "ihex"}
 
 TEXT_SUFFIXES = (".conf", ".cfg", ".ini", ".txt", ".sh", ".param", ".params", ".parm", ".json",
                  ".yaml", ".yml", ".xml", ".py", ".lua", ".service", ".rules", ".env", ".properties")
@@ -25,6 +27,8 @@ class ScanContext:
     limits: Limits
     elf: dict[int, dict] = field(default_factory=dict)  # artifact id -> ElfInfo dict
     category: dict[int, str] = field(default_factory=dict)
+    # artifact id -> (start, end, child id): byte ranges copied verbatim into a child artifact
+    copied: dict[int, list[tuple[int, int, int]]] = field(default_factory=dict)
     _strings: dict[int, list[tuple[int, str]]] = field(default_factory=dict)
     _text: dict[int, str | None] = field(default_factory=dict)
 

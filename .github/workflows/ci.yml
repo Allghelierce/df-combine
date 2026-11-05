@@ -8,8 +8,8 @@ jobs:
   backend:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: System tools used by extraction/fixtures
@@ -23,8 +23,8 @@ jobs:
   frontend:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       - run: npm ci
@@ -35,9 +35,9 @@ jobs:
   sandbox-image:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker build -f docker/sandbox.Dockerfile -t dfa-sandbox:latest .
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: sudo apt-get update && sudo apt-get install -y squashfs-tools e2fsprogs
@@ -45,3 +45,27 @@ jobs:
       - name: Docker-isolated sandbox tests
         run: python -m pytest -q tests/test_sandbox.py
         working-directory: backend
+
+  real-samples:
+    # Regression suite over public, pinned real firmware (PX4 builds, ArduPilot bootloaders, ESP images)
+    # and root filesystems exported from official Docker images. Nothing is committed to the repository.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y squashfs-tools e2fsprogs e2tools mtools cpio
+      - run: python -m pip install -r backend/requirements-dev.txt
+      - name: Fetch pinned public samples (SHA-256 verified)
+        run: python scripts/fetch_real_firmware.py
+      - name: Export Debian 11 armhf and Alpine 3.15 arm64 root filesystems
+        working-directory: fixtures/real
+        run: |
+          cid=$(docker create --platform linux/arm/v7 debian:bullseye-20210816-slim) && docker export "$cid" | gzip -1 > debian11-armhf-rootfs-20210816.tar.gz && docker rm "$cid"
+          cid=$(docker create --platform linux/arm64 alpine:3.15.0) && docker export "$cid" | gzip -1 > alpine3.15.0-arm64-rootfs.tar.gz && docker rm "$cid"
+      - name: Real-sample regression and format tests
+        run: python -m pytest -q tests/test_regression_real.py tests/test_formats_real.py
+        working-directory: backend
+      - name: Parser fuzzing seeded with the real samples (time-boxed)
+        run: python -I scripts/fuzz_parsers.py backend fixtures/real 5 "$RUNNER_TEMP/fuzz-out"

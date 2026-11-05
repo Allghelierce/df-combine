@@ -38,7 +38,12 @@ FINGERPRINTS: list[tuple[str, re.Pattern]] = [
     ("freertos", re.compile(r"\bFreeRTOS (?:Kernel )?V(\d+\.\d+\.\d+)")),
     ("sqlite", re.compile(r"\bSQLite version (\d+\.\d+\.\d+)")),
     ("mavlink-router", re.compile(r"\bmavlink-routerd? version (\d+(?:\.\d+)*)")),
+    ("zephyr", re.compile(r"Booting Zephyr OS (?:build |version )?(?:zephyr-)?v?(\d+\.\d+\.\d+)")),
 ]
+
+
+DOC_PATHS = re.compile(r"(/share/(doc|man|info|locale|common-licenses)/|/(copyright|changelog[^/]*|NEWS|"
+                       r"README[^/]*|LICEN[SC]E[^/]*|COPYING[^/]*)$)", re.I)
 
 
 @dataclass
@@ -47,9 +52,19 @@ class Component:
     version: str
     sources: list[str] = field(default_factory=list)
     method: str = "string-match"
+    variant: str | None = None  # e.g. the ArduPilot vehicle, which selects the upstream release tags
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def merge(comps: list[Component], comp: Component) -> None:
+    """Add ``comp`` unless the same name/version is already listed (then only merge its sources)."""
+    for c in comps:
+        if (c.name, c.version) == (comp.name, comp.version):
+            c.sources.extend(s for s in comp.sources if s not in c.sources and len(c.sources) < 5)
+            return
+    comps.append(comp)
 
 
 def parse_version(v: str) -> tuple:
@@ -89,6 +104,9 @@ def load_kb() -> dict:
 def fingerprint(ctx: ScanContext) -> list[Component]:
     found: dict[tuple[str, str], Component] = {}
     for art in ctx.content_artifacts():
+        fsp = ctx.fs_path(art)
+        if DOC_PATHS.search(fsp):
+            continue  # licences/changelogs mention arbitrary versions ("version 2.23" in glibc's copyright)
         if art.format in ("text",):
             text = ctx.text(art) or ""
             lines = text.splitlines()[:20_000]

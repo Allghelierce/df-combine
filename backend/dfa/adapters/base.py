@@ -20,6 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .. import safefs
 from ..config import Settings
 from ..core.findings import Finding
 
@@ -59,10 +60,70 @@ class AdapterContext:
             raise ValueError(f"manifest path escapes the work directory: {art['path']!r}")
         return p
 
+    def container_path(self, art: dict) -> str:
+        """Path of an artifact inside sandbox/tool containers (/in/firmware or /work/...)."""
+        if art["path"] == "<input>":
+            return "/in/firmware"
+        return self.container_path_of(self.artifact_path(art))
+
+    def container_path_of(self, p: Path) -> str:
+        rel = p.resolve().relative_to(self.work_dir.resolve())
+        return "/work/" + str(rel)
+
     def tool_dir(self, tool: str) -> Path:
-        d = self.work_dir / "tools" / tool
-        d.mkdir(parents=True, exist_ok=True)
-        return d
+        return safefs.ensure_dir(self.work_dir, f"tools/{tool}")
+
+    # Containers that processed untrusted firmware may have written anything below the work directory,
+    # so the worker reads and writes there only through these (no links followed, regular files only).
+    def write_file(self, path: Path, data: str | bytes) -> Path:
+        rel = path.relative_to(self.work_dir)  # lexical: worker-chosen paths below the work directory
+        return safefs.write_bytes(self.work_dir, rel, data.encode("utf-8", "replace") if isinstance(data, str)
+                                  else data)
+
+    def read_file(self, path: Path, limit: int) -> bytes:
+        return safefs.read_bytes(self.work_dir, path.relative_to(self.work_dir), limit)
+
+    def read_artifact(self, art: dict, limit: int) -> bytes:
+        """Contents of a manifest artifact (``path`` comes from the untrusted manifest)."""
+        if art["path"] == "<input>":
+            if self.input_path.stat().st_size > limit:
+                raise safefs.UnsafeEntry(27, f"input is larger than {limit} bytes")
+            return self.input_path.read_bytes()
+        return safefs.read_bytes(self.work_dir, art["path"], limit)
+
+
+def unique_targets(cands: list[tuple[int, int, dict]]) -> list[dict]:
+    """Planned targets in priority order with identical binaries (same SHA-256) merged: e.g. the image of a
+    .px4 and the one derived from the ELF of the same build, or a file present twice. The copy that has function
+    symbols is analysed; the others are listed in ``duplicates``."""
+    out: list[dict] = []
+    by_sha: dict[str, dict] = {}
+    for _score, _size, t in cands:
+        a = t["artifact"]
+        sha = a.get("sha256")
+        kept = by_sha.get(sha) if sha else None
+        if kept is None:
+            t["duplicates"] = []
+            if sha:
+                by_sha[sha] = t
+            out.append(t)
+            continue
+        if (a.get("details") or {}).get("symbol_map") and not (kept["artifact"].get("details") or {}).get("symbol_map"):
+            dup = kept["artifact"]
+            kept.update({k: v for k, v in t.items() if k != "duplicates"})
+        else:
+            dup = a
+        kept["duplicates"].append(dup.get("display_path") or dup.get("name"))
+    return out
+
+
+def note_identical_copies(findings: list[Finding], duplicates: list[str] | None) -> list[Finding]:
+    """Say where else an identical binary (analysed once) occurs, e.g. the .px4 image of the same build."""
+    if duplicates:
+        listed = "; ".join(duplicates[:5]) + (f" (+{len(duplicates) - 5} more)" if len(duplicates) > 5 else "")
+        for f in findings:
+            f.description += f" The same binary (identical SHA-256, analysed once) is also present as: {listed}."
+    return findings
 
 
 @dataclass

@@ -1,16 +1,18 @@
 import { useMemo, useState } from "react";
 import { CLASSIFICATIONS, Classification, Finding, SEVERITIES, Severity } from "../lib/api";
-import { CLASSIFICATION_HELP } from "../lib/format";
+import { CLASSIFICATION_HELP, externalUrl, findingBasis, shown } from "../lib/format";
 import { ClassBadge, Empty, SeverityBadge } from "./ui";
 
 export function FindingsTable({ findings }: { findings: Finding[] }) {
   const [sev, setSev] = useState<Set<Severity>>(new Set());
   const [cls, setCls] = useState<Set<Classification>>(new Set());
   const [tool, setTool] = useState("");
+  const [pkg, setPkg] = useState("");
   const [q, setQ] = useState("");
   const [open, setOpen] = useState<number | null>(null);
 
   const tools = useMemo(() => Array.from(new Set(findings.map((f) => f.source_tool))).sort(), [findings]);
+  const packages = useMemo(() => Array.from(new Set(findings.map((f) => f.package).filter((p): p is string => !!p))).sort(), [findings]);
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return findings.filter(
@@ -18,12 +20,14 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
         (!sev.size || sev.has(f.severity)) &&
         (!cls.size || cls.has(f.classification)) &&
         (!tool || f.source_tool === tool) &&
+        (!pkg || f.package === pkg) &&
         (!needle ||
           f.title.toLowerCase().includes(needle) ||
           f.affected_component.toLowerCase().includes(needle) ||
+          (f.package ?? "").toLowerCase().includes(needle) ||
           (f.cwe ?? "").toLowerCase().includes(needle)),
     );
-  }, [findings, sev, cls, tool, q]);
+  }, [findings, sev, cls, tool, pkg, q]);
 
   function toggle<T>(set: Set<T>, v: T, update: (s: Set<T>) => void) {
     const n = new Set(set);
@@ -74,7 +78,17 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
               </option>
             ))}
           </select>
-          <input type="search" placeholder="Search title, component, CWE…" value={q} onChange={(e) => setQ(e.target.value)} />
+          {packages.length > 0 && (
+            <select value={pkg} onChange={(e) => setPkg(e.target.value)} aria-label="Filter by package">
+              <option value="">All packages</option>
+              {packages.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+          )}
+          <input type="search" placeholder="Search title, component, package, CWE…" value={q} onChange={(e) => setQ(e.target.value)} />
           <span className="muted small">
             {filtered.length} / {findings.length}
           </span>
@@ -92,7 +106,7 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
                 <button type="button" className="finding-head" onClick={() => setOpen(isOpen ? null : f.id)} aria-expanded={isOpen}>
                   <SeverityBadge severity={f.severity} />
                   <ClassBadge value={f.classification} />
-                  <span className="finding-title">{f.title}</span>
+                  <span className="finding-title">{shown(f.title)}</span>
                   {f.tags
                     .filter((t) => t.startsWith("corroborated-by:"))
                     .map((t) => (
@@ -100,16 +114,31 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
                         ✓ {t.replace("corroborated-by:", "")}
                       </span>
                     ))}
+                  {f.package && (
+                    <span className="pill pkg" title="Installed package that owns the affected file">
+                      {shown(f.package)}
+                    </span>
+                  )}
                   <span className="finding-meta mono">{f.source_tool}</span>
                   <span className="chev">{isOpen ? "▾" : "▸"}</span>
                 </button>
-                <div className="finding-component mono" title={f.affected_component}>
-                  {f.affected_component}
+                <div className="finding-component mono" title={shown(f.affected_component)}>
+                  {shown(f.affected_component)}
                 </div>
                 {isOpen && (
                   <div className="finding-body">
-                    <p>{f.description}</p>
+                    <p>{shown(f.description)}</p>
                     <dl className="kv">
+                      <dt>Basis</dt>
+                      <dd>
+                        <b>{findingBasis(f).label}.</b> {findingBasis(f).text}
+                      </dd>
+                      {f.package && (
+                        <>
+                          <dt>Package</dt>
+                          <dd className="mono">{shown(f.package)}</dd>
+                        </>
+                      )}
                       <dt>Classification</dt>
                       <dd>
                         {f.classification} — {CLASSIFICATION_HELP[f.classification]} Confidence: <b>{f.confidence}</b>.
@@ -127,7 +156,7 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
                         )}
                       </dd>
                       <dt>Remediation</dt>
-                      <dd>{f.remediation}</dd>
+                      <dd>{shown(f.remediation)}</dd>
                     </dl>
                     {f.evidence.length > 0 && (
                       <div className="evidence">
@@ -137,8 +166,8 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
                             {f.evidence.map((e, i) => (
                               <tr key={i}>
                                 <td className="ev-kind">{e.kind}</td>
-                                <td className="mono ev-value">{e.value}</td>
-                                <td className="mono ev-loc">{e.location}</td>
+                                <td className="mono ev-value">{shown(e.value)}</td>
+                                <td className="mono ev-loc">{shown(e.location)}</td>
                               </tr>
                             ))}
                           </tbody>
@@ -147,17 +176,18 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
                     )}
                     {f.references.length > 0 && (
                       <div className="refs">
-                        {f.references.map((r) =>
-                          r.startsWith("http") ? (
-                            <a key={r} href={r} target="_blank" rel="noreferrer noopener">
+                        {f.references.map((r) => {
+                          const href = externalUrl(r);
+                          return href ? (
+                            <a key={r} href={href} target="_blank" rel="noreferrer noopener">
                               {r}
                             </a>
                           ) : (
                             <span key={r} className="tag">
                               {r}
                             </span>
-                          ),
-                        )}
+                          );
+                        })}
                       </div>
                     )}
                   </div>

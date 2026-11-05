@@ -1,10 +1,27 @@
-"""Sandbox runner tests (Docker mode runs only when the sandbox image is built)."""
+"""Sandbox runner tests. Docker-mode tests run only when Docker and the dfa-sandbox image exist."""
+import os
+import shutil
+import subprocess
+import uuid
+from pathlib import Path
 
 import pytest
 
+from dfa.containers import DockerJobExecutor, JobRejected, _image_has, build_argv
 from dfa.sandbox import SandboxError, docker_available, docker_image_present, resolve_mode, run_analysis
 
 DOCKER_OK = docker_available() and docker_image_present("dfa-sandbox:latest")
+
+
+def stage(settings, fixture: Path) -> tuple[str, Path, Path]:
+    """Place a fixture in the standard scan layout (<data>/uploads/<id>.bin, <data>/work/<id>)."""
+    sid = str(uuid.uuid4())
+    settings.ensure_dirs()
+    inp = settings.uploads_dir / f"{sid}.bin"
+    shutil.copy(fixture, inp)
+    work = settings.work_root / sid
+    work.mkdir(parents=True)
+    return sid, inp, work
 
 
 def test_local_mode(settings, fixtures, tmp_path):
@@ -34,40 +51,227 @@ def test_unsandboxed_fallback_can_be_disabled(settings):
         resolve_mode(settings)
 
 
+def test_docker_mode_requires_scan_layout(settings, fixtures, tmp_path):
+    if not DOCKER_OK:
+        pytest.skip("Docker or dfa-sandbox image not available")
+    settings.sandbox_mode = "docker"
+    with pytest.raises(SandboxError, match="uploads"):
+        run_analysis(fixtures["px4"], "fw.px4", tmp_path / "w", settings)
+
+
+# --------------------------------------------------------------- profile contract (no Docker needed)
+@pytest.mark.parametrize("profile,params", [
+    ("fwanalyzer", {"config": "/etc/passwd", "target": "/in/firmware", "out": "/work/tools/fwanalyzer/o.json"}),
+    ("fwanalyzer", {"config": "/work/tools/fwanalyzer/../../x.toml", "target": "/in/firmware",
+                    "out": "/work/tools/fwanalyzer/o.json"}),
+    ("fwanalyzer", {"config": "/work/tools/fwanalyzer/c.toml", "target": "/work/-rf", "out": "/work/tools/fwanalyzer/o"}),
+    ("cwe_checker", {"target": "/host/secret"}),
+    ("cwe_checker", {"target": "/in/firmware", "bare_metal_config": "/work/files/evil.json"}),
+    ("ghidra", {"target": "/in/firmware", "out": "/work/tools/ghidra/o.json", "raw": {"processor": "EVIL", "base": "0x0"}}),
+    ("ghidra", {"target": "/in/firmware", "out": "/work/tools/ghidra/o.json",
+                "raw": {"processor": "ARM:LE:32:Cortex", "base": "0x08000000; rm -rf /"}}),
+    ("ghidra", {"target": "/in/firmware", "out": "/tmp/x.json"}),
+    ("analyze", {"limits": {"max_files": "lots"}}),
+    ("privileged", {}),
+])
+def test_profile_contract_rejects_bad_requests(profile, params):
+    with pytest.raises(JobRejected):
+        build_argv(profile, params)
+
+
+def test_profile_command_is_hardened(settings):
+    sid = str(uuid.uuid4())
+    settings.ensure_dirs()
+    (settings.uploads_dir / f"{sid}.bin").write_bytes(b"x")
+    (settings.work_root / sid).mkdir()
+    ex = DockerJobExecutor(settings)
+    cmd, _name, _t = ex.command("cwe_checker", sid, {"target": "/in/firmware"})
+    joined = " ".join(cmd)
+    for flag in ("--network none", "--read-only", "--cap-drop ALL", "no-new-privileges", "--pids-limit",
+                 "--memory", "--ulimit core=0", ":/in/firmware:ro"):
+        assert flag in joined, flag
+    assert "--privileged" not in joined and "/var/run/docker.sock" not in joined
+    with pytest.raises(JobRejected):
+        ex.command("analyze", "../../etc", {})
+    with pytest.raises(JobRejected):
+        ex.command("analyze", str(uuid.uuid4()), {})  # unknown scan
+
+
+@pytest.mark.skipif(os.getuid() != 0, reason="ownership hand-over needs root (as the broker runs)")
+def test_job_output_is_handed_back_to_the_worker(settings, monkeypatch):
+    """The broker chowns the writable tree to the tool UID for the job and back to the worker afterwards."""
+    settings.ensure_dirs()
+    os.chown(settings.data_dir, 12345, 12346)  # the (unprivileged) worker owns the data directory
+    sid = str(uuid.uuid4())
+    (settings.uploads_dir / f"{sid}.bin").write_bytes(b"x")
+    work = settings.work_root / sid
+    (work / "tools" / "fwanalyzer").mkdir(parents=True)
+    (work / "tools" / "fwanalyzer" / "cfg.toml").write_text("x")
+    for dirpath, _d, files in os.walk(work):  # as if the worker had created them
+        os.chown(dirpath, 12345, 12346)
+        for f in files:
+            os.chown(os.path.join(dirpath, f), 12345, 12346)
+    seen = {}
+
+    class FakeProc:
+        returncode = 0
+        stdout = stderr = None
+
+        def __init__(self, cmd, **kw):
+            seen["during_analyze_work"] = work.stat().st_uid
+            seen["during_tools"] = (work / "tools").stat().st_uid
+            (work / "files").mkdir(exist_ok=True)
+            (work / "files" / "out.bin").write_bytes(b"y")
+            os.chown(work / "files" / "out.bin", 10001, 10001)  # written by the sandbox user
+            (work / "evil").symlink_to("/etc/passwd")
+            (work / "findings.json").symlink_to(settings.data_dir / "dfa.db")  # for the worker to write through
+            os.mkfifo(work / "files" / "pipe")  # would block a reader
+            (work / "tools").rename(work / "tools.orig")  # the sandbox owns the scan dir: it can swap tools/
+            (work / "tools").symlink_to(settings.data_dir)
+            (work / "files" / "drop").mkdir()
+            os.chmod(work / "files" / "drop", 0o777)  # would let the next job's UID plant links here
+            os.chmod(work / "files" / "out.bin", 0o4777)
+
+        def poll(self):
+            return 0
+
+    import io
+    FakeProc.stdout = io.BytesIO()
+    FakeProc.stderr = io.BytesIO()
+    monkeypatch.setattr("dfa.containers.subprocess.Popen", lambda cmd, **kw: _with_streams(FakeProc(cmd, **kw)))
+    monkeypatch.setattr(DockerJobExecutor, "daemon_status", lambda self, max_age=60.0: {"problems": []})
+    before = os.stat("/etc/passwd")
+    DockerJobExecutor(settings).run("analyze", sid, {"name": "x", "limits": {}})
+    assert seen["during_analyze_work"] == 10001 and seen["during_tools"] == 12345
+    for p in (work, work / "files", work / "files" / "out.bin", work / "tools.orig" / "fwanalyzer" / "cfg.toml"):
+        assert (p.stat().st_uid, p.stat().st_gid) == (12345, 12346), p
+    # links and special files planted by the job are removed before the worker gets the directory back
+    for p in ("evil", "findings.json", "files/pipe", "tools"):
+        assert not os.path.lexists(work / p), p
+    assert oct(os.stat(work / "files" / "drop").st_mode & 0o7777) == "0o755"
+    assert oct(os.stat(work / "files" / "out.bin").st_mode & 0o7777) == "0o755"
+    after = os.stat("/etc/passwd")
+    assert (after.st_uid, after.st_gid) == (before.st_uid, before.st_gid)
+
+
+@pytest.mark.skipif(os.getuid() != 0, reason="ownership hand-over needs root (as the broker runs)")
+def test_broker_never_chowns_through_symlinks(settings, tmp_path):
+    """A compromised worker owns work/ and tools/ and can swap them for symlinks to host paths
+    (e.g. the Docker socket's directory). The root broker must refuse instead of chowning the target."""
+    settings.ensure_dirs()
+    os.chown(settings.work_root, 12345, 12346)
+    victim = tmp_path / "host-secrets"
+    victim.mkdir()
+    (victim / "docker.sock").write_text("x")
+    before = {p.name: (p.stat().st_uid, p.stat().st_gid) for p in (victim, victim / "docker.sock")}
+
+    sid = str(uuid.uuid4())
+    (settings.uploads_dir / f"{sid}.bin").write_bytes(b"x")
+    work = settings.work_root / sid
+    (work / "tools").mkdir(parents=True)
+    (work / "tools" / "cwe_checker").symlink_to(victim)  # swapped tool directory
+    ex = DockerJobExecutor(settings)
+    with pytest.raises(JobRejected):
+        ex.command("cwe_checker", sid, {"target": "/in/firmware"})
+
+    sid2 = str(uuid.uuid4())
+    (settings.uploads_dir / f"{sid2}.bin").write_bytes(b"x")
+    (settings.work_root / sid2).symlink_to(victim)  # swapped scan directory
+    with pytest.raises(JobRejected):
+        ex.command("analyze", sid2, {"name": "x", "limits": {}})
+
+    sid3 = str(uuid.uuid4())
+    (settings.uploads_dir / f"{sid3}.bin").symlink_to(victim / "docker.sock")  # swapped upload
+    (settings.work_root / sid3).mkdir()
+    with pytest.raises(JobRejected):
+        ex.command("analyze", sid3, {"name": "x", "limits": {}})
+
+    after = {p.name: (p.stat().st_uid, p.stat().st_gid) for p in (victim, victim / "docker.sock")}
+    assert after == before
+
+
+@pytest.mark.skipif(os.getuid() != 0, reason="broker-managed directories need root (as the broker runs)")
+def test_broker_owns_work_root_and_manages_scan_dirs(settings, tmp_path):
+    """The worker cannot replace work/<id> (a bind-mount source) because only the broker can write the
+    work root; the broker resets and removes scan directories without following links."""
+    settings.ensure_dirs()
+    os.chown(settings.data_dir, 12345, 12346)
+    os.chown(settings.work_root, 12345, 12346)  # as left by an older version
+    victim = tmp_path / "outside"
+    victim.mkdir()
+    (victim / "keep.txt").write_text("x")
+    ex = DockerJobExecutor(settings)
+    sid = str(uuid.uuid4())
+    work = settings.work_root / sid
+    work.mkdir()
+    (work / "files").mkdir()
+    (work / "files" / "a.bin").write_bytes(b"1")
+    (work / "files" / "link").symlink_to(victim)  # attacker-chosen link inside the tree
+    ex.workdir(sid, "reset")
+    st = os.stat(settings.work_root)
+    assert (st.st_uid, st.st_gid, st.st_mode & 0o777) == (0, 0, 0o755)
+    assert list(work.iterdir()) == [] and (os.stat(work).st_uid, os.stat(work).st_gid) == (12345, 12346)
+    assert (victim / "keep.txt").exists()  # the link was removed, not followed
+    os.rmdir(work)
+    work.symlink_to(victim)  # a link where the scan directory should be
+    ex.workdir(sid, "reset")
+    assert work.is_dir() and not work.is_symlink() and (victim / "keep.txt").exists()
+    ex.workdir(sid, "remove")
+    assert not work.exists() and (victim / "keep.txt").exists()
+    with pytest.raises(JobRejected):
+        ex.workdir("../etc", "reset")
+
+
+def _with_streams(proc):
+    import io
+    proc.stdout, proc.stderr = io.BytesIO(), io.BytesIO()
+    return proc
+
+
+# --------------------------------------------------------------- real Docker runs
 @pytest.mark.skipif(not DOCKER_OK, reason="Docker or dfa-sandbox image not available")
-def test_docker_mode(settings, fixtures, tmp_path):
+def test_docker_mode(settings, fixtures):
     settings.sandbox_mode = "docker"
     settings.sandbox_image = "dfa-sandbox:latest"
-    res = run_analysis(fixtures["squashfs"], "rootfs.squashfs", tmp_path / "w", settings)
+    sid, inp, work = stage(settings, fixtures["squashfs"])
+    res = run_analysis(inp, "rootfs.squashfs", work, settings)
     assert res.isolation.startswith("docker")
     names = {a["name"] for a in res.manifest["extraction"]["artifacts"]}
     assert "/etc/shadow" in names
-    assert (tmp_path / "w" / "manifest.json").exists()
+    assert (work / "manifest.json").exists()
 
 
 @pytest.mark.skipif(not DOCKER_OK, reason="Docker or dfa-sandbox image not available")
-def test_docker_mode_has_no_network(settings, tmp_path):
-    import subprocess
+def test_docker_mode_has_no_network():
     r = subprocess.run(["docker", "run", "--rm", "--network", "none", "dfa-sandbox:latest", "python", "-c",
                         "import socket; socket.create_connection(('1.1.1.1', 53), timeout=3)"],
                        capture_output=True, timeout=60)
     assert r.returncode != 0
 
 
+def test_host_path_translation(settings, tmp_path):
+    settings.sandbox_host_data_dir = Path("/srv/dfa/var")
+    ex = DockerJobExecutor(settings)
+    inside = settings.work_root / "abc" / "files"
+    inside.mkdir(parents=True)
+    assert ex._host(inside) == "/srv/dfa/var/work/abc/files"
+    with pytest.raises(JobRejected):
+        ex._host(tmp_path / "elsewhere")
+
+
 @pytest.mark.skipif(not DOCKER_OK, reason="Docker or dfa-sandbox image not available")
-def test_fwanalyzer_runs_inside_sandbox(settings, fixtures, tmp_path):
+def test_fwanalyzer_runs_inside_sandbox(settings, fixtures):
     from dfa.adapters.base import AdapterContext
     from dfa.adapters.fwanalyzer import FwAnalyzerAdapter
-    from dfa.toolexec import image_has_binary
-    if not image_has_binary("dfa-sandbox:latest", "fwanalyzer"):
+    if not _image_has("dfa-sandbox:latest", "fwanalyzer"):
         pytest.skip("sandbox image built without FwAnalyzer")
     settings.sandbox_mode = "docker"
     settings.sandbox_image = "dfa-sandbox:latest"
-    work = tmp_path / "w"
-    res = run_analysis(fixtures["squashfs"], "rootfs.squashfs", work, settings)
+    sid, inp, work = stage(settings, fixtures["squashfs"])
+    res = run_analysis(inp, "rootfs.squashfs", work, settings)
     ad = FwAnalyzerAdapter(settings)
     assert ad.status().mode == "sandbox"
-    ctx = AdapterContext(scan_id="t", input_path=fixtures["squashfs"], original_name="rootfs.squashfs",
+    ctx = AdapterContext(scan_id=sid, input_path=inp, original_name="rootfs.squashfs",
                          work_dir=work, manifest=res.manifest, settings=settings)
     r = ad.execute(ctx)
     assert r.status == "completed", r.message
@@ -76,30 +280,247 @@ def test_fwanalyzer_runs_inside_sandbox(settings, fixtures, tmp_path):
     assert {"fwa-suid", "fwa-empty-password", "fwa-bad-file"} <= rules
 
 
-def test_host_path_translation(settings, tmp_path):
-    from pathlib import Path
-
-    from dfa.sandbox import _host_path
-    settings.sandbox_host_data_dir = Path("/srv/dfa/var")
-    inside = settings.work_root / "abc" / "files"
-    inside.mkdir(parents=True)
-    assert _host_path(inside, settings) == "/srv/dfa/var/work/abc/files"
-    assert _host_path(tmp_path, settings) == str(tmp_path.resolve())
-
-
 @pytest.mark.skipif(not DOCKER_OK, reason="Docker or dfa-sandbox image not available")
 @pytest.mark.parametrize("key", ["ubi", "jffs2", "ext4"])
-def test_docker_mode_filesystems(settings, fixtures, tmp_path, key):
-    from dfa.toolexec import image_has_binary
+def test_docker_mode_filesystems(settings, fixtures, key):
     if key not in fixtures:
         pytest.skip("fixture unavailable")
-    if key != "ext4" and not image_has_binary("dfa-sandbox:latest", "jefferson"):
+    if key != "ext4" and not _image_has("dfa-sandbox:latest", "jefferson"):
         pytest.skip("sandbox image built without UBI/JFFS2 tools")
     settings.sandbox_mode = "docker"
     settings.sandbox_image = "dfa-sandbox:latest"
-    res = run_analysis(fixtures[key], fixtures[key].name, tmp_path / "w", settings)
+    sid, inp, work = stage(settings, fixtures[key])
+    res = run_analysis(inp, fixtures[key].name, work, settings)
     arts = {a["name"]: a for a in res.manifest["extraction"]["artifacts"]}
     assert "/etc/shadow" in arts
     if key == "ext4":
         assert arts["/bin/busybox"]["mode"] == 0o4755
     assert any(f["rule_id"] == "empty-password" for f in res.manifest["findings"])
+
+
+def test_broker_protocol_over_unix_socket(settings, tmp_path):
+    """The real broker server and client: work directory management, rejected requests, token check."""
+    import threading
+
+    from dfa.broker import serve
+    from dfa.containers import BrokerRunner, JobError
+    settings.ensure_dirs()
+    sock = tmp_path / "b.sock"
+    server = serve(sock, settings, token="s3cret-token")
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        client = BrokerRunner(settings.model_copy(update={"broker_socket": sock, "broker_token": "s3cret-token"}))
+        sid = str(uuid.uuid4())
+        (settings.uploads_dir / f"{sid}.bin").write_bytes(b"x")
+        client.workdir(sid, "reset")
+        assert (settings.work_root / sid).is_dir()
+        client.workdir(sid, "remove")
+        assert not (settings.work_root / sid).exists()
+        with pytest.raises(JobRejected):
+            client.workdir("../../etc", "reset")
+        with pytest.raises(JobRejected):
+            client.run("shell", sid, {"cmd": "id"})  # only the fixed profiles exist
+        intruder = BrokerRunner(settings.model_copy(update={"broker_socket": sock, "broker_token": "guess"}))
+        with pytest.raises(JobError):
+            intruder.workdir(sid, "reset")
+        assert not (settings.work_root / sid).exists()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.skipif(os.getuid() != 0, reason="pinning uploads needs root (as the broker runs)")
+def test_broker_mounts_a_pinned_copy_of_the_upload(settings, tmp_path):
+    """The API owns uploads/, so the broker mounts a hard link in the broker-owned work/.inputs instead of
+    uploads/<id>.bin: swapping the upload for a link afterwards cannot change what the container reads."""
+    settings.ensure_dirs()
+    os.chown(settings.data_dir, 12345, 12346)
+    sid = str(uuid.uuid4())
+    up = settings.uploads_dir / f"{sid}.bin"
+    up.write_bytes(b"firmware")
+    ex = DockerJobExecutor(settings)
+    ex.workdir(sid, "reset")
+    cmd, _n, _t = ex.command("analyze", sid, {"name": "x", "limits": {}})
+    pinned = settings.work_root / ".inputs" / f"{sid}.bin"
+    assert f"{pinned}:/in/firmware:ro" in cmd
+    assert os.stat(pinned).st_ino == os.stat(up).st_ino and not pinned.is_symlink()
+    st = os.stat(settings.work_root / ".inputs")
+    assert (st.st_uid, st.st_mode & 0o777) == (0, 0o755)
+    up.unlink()
+    up.symlink_to("/etc/passwd")  # swapped after the upload was accepted
+    with pytest.raises(JobRejected):
+        ex.command("analyze", sid, {"name": "x", "limits": {}})
+    ex.workdir(sid, "remove")
+    assert not pinned.exists()
+
+
+def test_jobs_refused_when_the_daemon_cannot_enforce_limits(settings, monkeypatch):
+    """Rootless Docker without cgroup v2 delegation drops --memory/--pids-limit/--cpus with a warning only;
+    an unregistered DFA_SANDBOX_RUNTIME (e.g. runsc) would fail every job. Both are refused up front."""
+    import json as _json
+    import subprocess as _sp
+    infos = {"rootless-v1": {"MemoryLimit": False, "PidsLimit": False, "CpuCfsQuota": False, "CgroupVersion": "1",
+                             "SecurityOptions": ["name=seccomp,profile=builtin", "name=rootless"],
+                             "Runtimes": {"runc": {}}, "DefaultRuntime": "runc"},
+             "ok": {"MemoryLimit": True, "PidsLimit": True, "CpuCfsQuota": True, "CgroupVersion": "2",
+                    "SecurityOptions": [], "Runtimes": {"runc": {}}, "DefaultRuntime": "runc"}}
+    current = {"info": infos["rootless-v1"]}
+    real_run = _sp.run
+
+    def fake_run(cmd, *a, **kw):
+        if cmd[:2] == ["docker", "info"]:
+            return _sp.CompletedProcess(cmd, 0, _json.dumps(current["info"]).encode(), b"")
+        return real_run(cmd, *a, **kw)
+    monkeypatch.setattr("dfa.containers.subprocess.run", fake_run)
+    monkeypatch.setattr(DockerJobExecutor, "_daemon_cache", {})
+    ex = DockerJobExecutor(settings)
+    with pytest.raises(JobRejected, match="cannot enforce MemoryLimit, PidsLimit, CpuCfsQuota.*rootless"):
+        ex.run("analyze", str(uuid.uuid4()), {"name": "x", "limits": {}})
+    current["info"] = infos["ok"]
+    DockerJobExecutor._daemon_cache.clear()
+    settings.sandbox_runtime = "runsc"
+    ex = DockerJobExecutor(settings)
+    with pytest.raises(JobRejected, match="'runsc'.*not registered"):
+        ex.run("analyze", str(uuid.uuid4()), {"name": "x", "limits": {}})
+    settings.sandbox_runtime = None
+    DockerJobExecutor._daemon_cache.clear()
+    assert DockerJobExecutor(settings).daemon_status()["problems"] == []
+
+
+@pytest.mark.skipif(os.getuid() != 0, reason="ownership hand-over needs root (as the broker runs)")
+def test_hand_back_never_follows_a_link_swapped_in_mid_walk(settings, tmp_path, monkeypatch):
+    """Race from the security review: an entry is replaced by a symlink between the broker's stat and its
+    change of mode/owner. The broker must neither chmod nor chown the link's target."""
+    settings.ensure_dirs()
+    os.chown(settings.data_dir, 12345, 12346)
+    victim = tmp_path / "root-secret"
+    victim.write_text("secret")
+    os.chmod(victim, 0o600)
+    sid = str(uuid.uuid4())
+    (settings.uploads_dir / f"{sid}.bin").write_bytes(b"x")
+    work = settings.work_root / sid
+    (work / "files").mkdir(parents=True)
+    decoy = work / "files" / "decoy"
+    decoy.write_text("x")
+    os.chmod(decoy, 0o662)  # has bits the hand-back clears
+    import dfa.containers as containers
+    real_stat = os.stat
+    swapped = []
+
+    def racing_stat(path, *a, dir_fd=None, follow_symlinks=True):
+        st = real_stat(path, *a, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+        if path == "decoy" and dir_fd is not None and not swapped:  # swap right after the broker looked
+            swapped.append(1)
+            os.unlink("decoy", dir_fd=dir_fd)
+            os.symlink(victim, "decoy", dir_fd=dir_fd)
+        return st
+    monkeypatch.setattr(containers.os, "stat", racing_stat)
+    ex = DockerJobExecutor(settings)
+    ex._restore_owner(sid, containers.PROFILES["analyze"])
+    monkeypatch.setattr(containers.os, "stat", real_stat)
+    assert swapped
+    st = os.stat(victim)
+    assert (oct(st.st_mode & 0o7777), st.st_uid) == ("0o600", 0)
+    assert not os.path.lexists(decoy)  # the swapped-in link was removed
+    assert os.stat(work / "files").st_uid == 12345
+
+
+def test_hostile_manifests_are_rejected_cleanly(settings, tmp_path):
+    """A compromised sandbox controls manifest.json: oversized, deeply nested or malformed manifests give a
+    clear 'unusable manifest' error instead of exhausting memory or crashing on KeyError/RecursionError."""
+    import json as _json
+
+    from dfa.sandbox import load_manifest
+    work = tmp_path / "w"
+    work.mkdir()
+    cases = {
+        "deep": "[" * 200_000 + "]" * 200_000,
+        "not-object": "[1, 2]",
+        "missing-keys": _json.dumps({"identification": {}}),
+        "bad-artifact": _json.dumps({"identification": {}, "components": [], "findings": [], "scanner_runs": [],
+                                     "inventory": {"categories": {}},
+                                     "extraction": {"artifacts": [{"id": "1"}], "filesystems": [], "warnings": [],
+                                                    "limits_hit": [], "stats": {}, "link_count": 0, "rootfs": None}}),
+    }
+    good_finding = {"title": "t", "description": "d", "severity": "low", "classification": "suspicious",
+                    "confidence": "low", "source_tool": "builtin:x", "rule_id": "r", "affected_component": "c",
+                    "remediation": "m", "evidence": [{"kind": "path", "value": "/etc/x", "location": None}],
+                    "cwe": None, "references": ["https://example.org/"], "tags": [], "package": None}
+    bad_findings = {
+        "severity": {"severity": "catastrophic"}, "unhashable-severity": {"severity": ["high"]},
+        "title-list": {"title": ["t"]}, "references-string": {"references": "javascript:alert(1)"},
+        "references-dict": {"references": [{"href": "x"}]},
+        "evidence-extra-key": {"evidence": [{"kind": "k", "value": "v", "boom": 1}]},
+        "evidence-value": {"evidence": [{"kind": "k", "value": 5}]}, "cwe-int": {"cwe": 22},
+    }
+    base = _json.loads(cases["bad-artifact"])
+    base["extraction"]["artifacts"] = []
+    (work / "manifest.json").write_text(_json.dumps({**base, "findings": [good_finding]}))
+    assert load_manifest(work, "manifest.json", settings)["findings"] == [good_finding]
+    for name, patch in bad_findings.items():
+        cases[f"finding-{name}"] = _json.dumps({**base, "findings": [good_finding, {**good_finding, **patch}]})
+    for name, text in cases.items():
+        (work / "manifest.json").write_text(text)
+        try:
+            load_manifest(work, "manifest.json", settings)
+        except (ValueError, RecursionError):
+            continue
+        pytest.fail(f"hostile manifest '{name}' was accepted")
+    settings.max_manifest_mb = 1
+    (work / "manifest.json").write_text(" " * (2 * 1024 * 1024))
+    with pytest.raises(OSError):
+        load_manifest(work, "manifest.json", settings)
+
+
+def test_manifest_strings_that_are_not_utf8_are_escaped(settings, tmp_path):
+    """Lone surrogates (non-UTF-8 bytes decoded with surrogateescape, or written by a compromised sandbox) cannot
+    be stored in SQLite or served as JSON; load_manifest shows them as \\xNN, keys included."""
+    import json as _json
+
+    from dfa.sandbox import load_manifest
+    work = tmp_path / "w"
+    work.mkdir()
+    finding = {"title": "key in /home/user\udc80dir", "description": "d", "severity": "low",
+               "classification": "suspicious", "confidence": "low", "source_tool": "builtin:x", "rule_id": "r",
+               "affected_component": "c\ud800", "remediation": "m", "evidence": [], "references": [], "tags": []}
+    man = {"identification": {"weird\udcff": "v"}, "components": [], "findings": [finding], "scanner_runs": [],
+           "inventory": {"categories": {}},
+           "extraction": {"artifacts": [{"id": 1, "path": "files/x\udc80", "name": "/x\udc80", "format": "f"}],
+                          "filesystems": [], "warnings": [], "limits_hit": [], "stats": {}, "link_count": 0,
+                          "rootfs": None, "links": [{"path": "/l\udc80", "target": "\udc80"}]}}
+    (work / "manifest.json").write_text(_json.dumps(man))  # ensure_ascii: surrogates as \\udc80 escapes
+    got = load_manifest(work, "manifest.json", settings)
+    assert got["findings"][0]["title"] == "key in /home/user\\x80dir"
+    assert got["findings"][0]["affected_component"] == "c\\ud800"
+    assert got["identification"] == {"weird\\xff": "v"}
+    assert got["extraction"]["artifacts"][0]["name"] == "/x\\x80"
+    assert got["extraction"]["links"] == [{"path": "/l\\x80", "target": "\\x80"}]
+    _json.dumps(got, ensure_ascii=False).encode("utf-8")  # what the API's JSON responses do
+    (work / "manifest.json").write_bytes(b'{"fatal_error": "bad \xed\xb2\x80 bytes"}')  # CESU-8 bytes
+    assert load_manifest(work, "manifest.json", settings)["fatal_error"] == "bad \\x80 bytes"
+
+
+def test_progress_flood_is_bounded(tmp_path):
+    """progress.log is written by the sandbox; ~800k stage-marker lines must not become ~800k DB events."""
+    from dfa.sandbox import PROGRESS_LINES_PER_POLL, _pump_progress
+    work = tmp_path / "w"
+    work.mkdir()
+    (work / "progress.log").write_text("t inventory\n" * 400_000)
+    got = []
+    seen = _pump_progress(work, got.append, 0)
+    assert seen == 400_000 and len(got) == PROGRESS_LINES_PER_POLL
+
+
+def test_sandbox_status_reports_a_daemon_that_cannot_enforce_limits(settings, monkeypatch):
+    """The dashboard's sandbox status (resolve_mode) names the reason instead of letting every scan fail."""
+    from dfa.containers import BrokerRunner
+    settings.broker_socket = Path("/run/dfa/broker.sock")
+    settings.sandbox_mode = "broker"
+    monkeypatch.setattr(BrokerRunner, "capabilities", lambda self: {
+        "images": {settings.sandbox_image: True}, "runtime": "runc",
+        "daemon": {"known": True, "problems": ["the Docker daemon cannot enforce MemoryLimit, PidsLimit"]}})
+    with pytest.raises(SandboxError, match="refuses jobs: the Docker daemon cannot enforce MemoryLimit"):
+        resolve_mode(settings)
+    monkeypatch.setattr(BrokerRunner, "capabilities", lambda self: {
+        "images": {settings.sandbox_image: True}, "runtime": "runc", "daemon": {"known": True, "problems": []}})
+    assert resolve_mode(settings)[0] == "broker"

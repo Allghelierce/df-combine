@@ -38,7 +38,10 @@ def _kind_from_mode(mode: int) -> str:
     return {0o100000: "file", 0o040000: "dir", 0o120000: "symlink"}.get(fmt, "other")
 
 
-def iter_cpio(fp: BinaryIO, total_size: int, max_entries: int) -> Iterator[Entry]:
+def iter_cpio(fp: BinaryIO, total_size: int, max_entries: int, state: dict | None = None) -> Iterator[Entry]:
+    """Entries of a cpio archive and of archives concatenated to it (after zero padding), as the kernel reads an
+    initramfs; where other data follows the last trailer (e.g. a compressed archive), its offset is put in
+    ``state["trailing_offset"]``."""
     pos = 0
     count = 0
     while pos < total_size:
@@ -78,6 +81,21 @@ def iter_cpio(fp: BinaryIO, total_size: int, max_entries: int) -> Iterator[Entry
         fp.seek(name_off)
         name = fp.read(namesize).split(b"\x00", 1)[0].decode("utf-8", "replace")
         if name == "TRAILER!!!":
+            pos = next_pos
+            fp.seek(pos)
+            while pos < total_size:  # zero padding, then possibly another archive
+                chunk = fp.read(min(64 * 1024, total_size - pos))
+                rest = chunk.lstrip(b"\x00")
+                pos += len(chunk) - len(rest)
+                if rest or not chunk:
+                    break
+            if pos >= total_size:
+                return
+            fp.seek(pos)
+            if fp.read(6) in (b"070701", b"070702", b"070707"):
+                continue
+            if state is not None:
+                state["trailing_offset"] = pos
             return
         kind = _kind_from_mode(mode)
         link = None
@@ -288,3 +306,146 @@ def _parse_gpt(fp: BinaryIO, total_size: int) -> list[Partition]:
     if not parts:
         raise FormatError("GPT has no partitions")
     return parts
+
+
+# ---------------------------------------------------------------- NuttX CROMFS
+# Layout from apache/nuttx fs/cromfs/cromfs.h. PX4 stores its ROMFS (/etc init scripts,
+# airframe defaults, mixers) as CROMFS; file data is a chain of LZF blocks ("ZV" headers).
+CROMFS_MAGIC = b"CROM"
+
+
+def cromfs_header(data: bytes, total_size: int) -> dict | None:
+    """Validate a CROMFS volume header; returns fields or None."""
+    if len(data) < 20 or data[:4] != CROMFS_MAGIC:
+        return None
+    _m, nnodes, nblocks, root, fsize, bsize = struct.unpack_from("<IHHIII", data, 0)
+    if not (0 < nnodes <= 65535 and 20 <= root < fsize <= total_size and 64 <= bsize <= 65536):
+        return None
+    if bsize & (bsize - 1):
+        return None
+    return {"nnodes": nnodes, "nblocks": nblocks, "root": root, "fsize": fsize, "bsize": bsize}
+
+
+def lzf_decompress(data: bytes, out_len: int) -> bytes:
+    """liblzf decompression (as used by NuttX CROMFS). Raises FormatError on corrupt input."""
+    out = bytearray()
+    ip, n = 0, len(data)
+    while ip < n:
+        ctrl = data[ip]
+        ip += 1
+        if ctrl < 32:  # literal run of ctrl+1 bytes
+            ln = ctrl + 1
+            if ip + ln > n or len(out) + ln > out_len:
+                raise FormatError("LZF literal run out of bounds")
+            out += data[ip:ip + ln]
+            ip += ln
+        else:  # back reference
+            ln = ctrl >> 5
+            if ln == 7:
+                if ip >= n:
+                    raise FormatError("truncated LZF data")
+                ln += data[ip]
+                ip += 1
+            if ip >= n:
+                raise FormatError("truncated LZF data")
+            ref = len(out) - ((ctrl & 0x1F) << 8) - 1 - data[ip]
+            ip += 1
+            ln += 2
+            if ref < 0 or len(out) + ln > out_len:
+                raise FormatError("LZF back reference out of bounds")
+            for _ in range(ln):  # may overlap
+                out.append(out[ref])
+                ref += 1
+    return bytes(out)
+
+
+def _cromfs_read_file(fp: BinaryIO, base: int, blocks_off: int, size: int, bsize: int, end: int) -> bytes:
+    out = bytearray()
+    pos = base + blocks_off
+    while len(out) < size:
+        if pos + 5 > end:
+            raise FormatError("CROMFS block chain exceeds volume")
+        fp.seek(pos)
+        hdr = fp.read(7)
+        if hdr[:2] != b"ZV":
+            raise FormatError(f"bad LZF block magic at {pos:#x}")
+        if hdr[2] == 0:
+            ln = (hdr[3] << 8) | hdr[4]
+            fp.seek(pos + 5)
+            chunk = fp.read(ln)
+            pos += 5 + ln
+        elif hdr[2] == 1:
+            clen = (hdr[3] << 8) | hdr[4]
+            ulen = (hdr[5] << 8) | hdr[6]
+            if ulen > max(bsize, 65535):
+                raise FormatError("LZF block larger than block size")
+            fp.seek(pos + 7)
+            chunk = lzf_decompress(fp.read(clen), ulen)
+            pos += 7 + clen
+        else:
+            raise FormatError("unknown LZF block type")
+        if not chunk:
+            raise FormatError("empty LZF block")
+        out += chunk
+        if pos > end:
+            raise FormatError("CROMFS block exceeds volume")
+    return bytes(out[:size])
+
+
+def iter_cromfs(fp: BinaryIO, base: int, total_size: int, max_entries: int,
+                max_file: int) -> Iterator[tuple[Entry, bytes | None]]:
+    fp.seek(base)
+    hdr = cromfs_header(fp.read(20), total_size - base)
+    if hdr is None:
+        raise FormatError("not a CROMFS volume")
+    end = base + hdr["fsize"]
+    seen: set[int] = set()
+    count = 0
+
+    def name_at(off: int) -> str:
+        fp.seek(base + off)
+        raw = fp.read(256)
+        if b"\x00" not in raw:
+            raise FormatError("unterminated CROMFS name")
+        return raw.split(b"\x00", 1)[0].decode("utf-8", "replace")
+
+    # Each directory's own list is walked completely before any of its subdirectories (stack of child lists).
+    stack: list[tuple[int, str, int]] = [(hdr["root"], "", 0)]
+    while stack:
+        off, prefix, depth = stack.pop()
+        while off:
+            if off >= hdr["fsize"]:
+                break  # NuttX's cromfs_offset2addr() maps offsets >= cv_fsize to NULL: end of the list
+            if off < 20:
+                raise FormatError("CROMFS node offset inside the volume header")
+            if off in seen:
+                # The list runs into a node that is already listed. Real PX4 v1.15 images do this: the last
+                # entry of a subdirectory points to the parent's next entry ("threaded" lists), which the
+                # parent's list - walked first - has already yielded. It ends this list; it also ends a loop.
+                break
+            seen.add(off)
+            fp.seek(base + off)
+            raw = fp.read(20)
+            if len(raw) < 20:
+                raise FormatError("truncated CROMFS node")
+            mode, _pad, name_off, size, peer, child = struct.unpack("<HHIIII", raw)
+            name = name_at(name_off)
+            kind = _kind_from_mode(mode)
+            path = f"{prefix}/{name}" if prefix else name
+            if name not in (".", ".."):
+                count += 1
+                if count > max_entries:
+                    raise FormatError("too many CROMFS entries")
+                if kind == "dir":
+                    yield Entry(name=path, kind="dir", mode=mode & 0o7777, size=0, offset=0), None
+                    if depth < 32 and child:
+                        stack.append((child, path, depth + 1))
+                elif kind == "file":
+                    if size > max_file:
+                        raise FormatError(f"CROMFS file {path} exceeds per-file limit")
+                    data = _cromfs_read_file(fp, base, child, size, hdr["bsize"], end)
+                    yield Entry(name=path, kind="file", mode=mode & 0o7777, size=size, offset=0), data
+                else:
+                    yield Entry(name=path, kind="other" if kind == "other" else kind, mode=mode & 0o7777,
+                                size=0, offset=0), None
+            off = peer

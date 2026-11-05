@@ -6,8 +6,9 @@ from .base import ToolAdapter, ToolStatus
 from .cwe_checker import CweCheckerAdapter
 from .fact import FactAdapter
 from .fwanalyzer import FwAnalyzerAdapter
+from .ghidra import GhidraAdapter
 
-ADAPTER_CLASSES: list[type[ToolAdapter]] = [FwAnalyzerAdapter, CweCheckerAdapter, FactAdapter]
+ADAPTER_CLASSES: list[type[ToolAdapter]] = [FwAnalyzerAdapter, CweCheckerAdapter, GhidraAdapter, FactAdapter]
 
 
 def get_adapters(settings: Settings) -> list[ToolAdapter]:

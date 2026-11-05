@@ -14,10 +14,14 @@ from collections import Counter
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import BinaryIO
 
+from .formats import esp
 from .formats.cortexm import analyze_vector_table
 from .formats.ihex import looks_like_ihex
+from .formats.more import cramfs_offset
 from .formats.px4json import looks_like_container
+from .formats.simplefs import cromfs_header
 
 HEAD_BYTES = 64 * 1024
 
@@ -36,6 +40,9 @@ class FormatInfo:
 FORMAT_DESCRIPTIONS = {
     "elf": "ELF executable/object",
     "zip": "ZIP archive",
+    "7z": "7-Zip archive (not unpacked)",
+    "rar": "RAR archive (not unpacked)",
+    "cab": "Microsoft Cabinet archive (not unpacked)",
     "tar": "POSIX tar archive",
     "gzip": "gzip compressed data",
     "bzip2": "bzip2 compressed data",
@@ -54,18 +61,32 @@ FORMAT_DESCRIPTIONS = {
     "jffs2": "JFFS2 filesystem image",
     "cortexm_raw": "Raw ARM Cortex-M flash image",
     "romfs": "ROMFS image (NuttX/Linux romfs)",
+    "cromfs": "NuttX CROMFS image (LZF-compressed ROM filesystem)",
     "disk_image": "Partitioned disk image (MBR/GPT)",
     "dfu": "DfuSe (STM32 DFU) firmware file",
     "text": "Text file",
     "raw": "Unrecognised binary data",
     "lzma": "LZMA (alone/legacy) compressed data",
+    "zstd": "Zstandard compressed data",
+    "lz4": "LZ4 frame compressed data",
+    "lz4_legacy": "LZ4 legacy (Linux kernel) compressed data",
+    "lzop": "lzop (LZO) compressed data",
+    "cramfs": "CramFS filesystem image",
+    "erofs": "EROFS filesystem image",
+    "android_sparse": "Android sparse image",
+    "esp_image": "Espressif (ESP32/ESP8266) application image",
+    "esp_flash": "Espressif flash dump (bootloader + partition table)",
+    "esp_partition_table": "Espressif ESP-IDF partition table",
     "dji_imah": "DJI IM*H signed/encrypted firmware module",
     "parrot_plf": "Parrot PLF firmware container",
     "empty": "Empty file",
 }
 
-CONTAINER_FORMATS = {"zip", "tar", "gzip", "bzip2", "xz", "lzma", "ihex", "px4", "apj", "fw_json",
-                     "squashfs", "ext", "fat", "cpio", "uimage", "dfu", "romfs", "disk_image", "ubi", "ubifs", "jffs2"}
+CONTAINER_FORMATS = {"zip", "tar", "gzip", "bzip2", "xz", "lzma", "zstd", "lz4", "lz4_legacy", "lzop", "cramfs",
+                     "esp_image", "esp_flash",
+                     "erofs", "android_sparse", "parrot_plf", "dji_imah", "ihex", "px4", "apj", "fw_json",
+                     "squashfs", "ext", "fat", "cpio", "uimage", "dfu", "romfs", "cromfs", "disk_image", "ubi", "ubifs", "jffs2",
+                     "7z", "rar", "cab"}
 
 
 def _fmt(name: str, **details) -> FormatInfo:
@@ -79,7 +100,104 @@ def detect_format(path: Path) -> FormatInfo:
         return _fmt("empty")
     with path.open("rb") as fp:
         head = fp.read(HEAD_BYTES)
-    return detect_format_bytes(head, size)
+        info = detect_format_bytes(head, size)
+        if info.format in ("raw", "text") and (start := zip_at_end(fp, size)):
+            return _fmt("zip", prepended_bytes=start)  # e.g. a vendor header before the archive
+    return info
+
+
+def zip_at_end(fp: BinaryIO, size: int) -> int | None:
+    """Offset of a zip archive that ends the file after other data (a vendor header, a self-extracting stub),
+    which zipfile opens as it is; None if there is none. Needs the end record zipfile would use, followed by its
+    comment up to the very end, and a central directory and a first local header where the record says."""
+    if size < 22 + 46 + 30:
+        return None
+    end = _end_record_at_end(fp, size)
+    if end is None:
+        return None
+    start = zip_start(fp, end)
+    if start == 0:  # offsets counted from the file's start (zip -A adjusts a self-extractor's): the first member
+        start = _first_member_at(fp, end)  # follows the stub
+    return start if start else None
+
+
+def _end_record_at_end(fp: BinaryIO, size: int) -> int | None:
+    """Where the end record that zipfile uses lies - at the very end, else the last signature within reach of a
+    comment - if its comment then ends the file exactly."""
+    fp.seek(size - 22)
+    rec = fp.read(22)
+    if rec[:4] == b"PK\x05\x06" and rec[20:22] == b"\x00\x00":
+        return size - 22
+    n = min(size, 22 + 0xFFFF)
+    fp.seek(size - n)
+    tail = fp.read(n)
+    i = tail.rfind(b"PK\x05\x06")
+    if i < 0 or i + 22 > n or i + 22 + struct.unpack_from("<H", tail, i + 20)[0] != n:
+        return None
+    return size - n + i
+
+
+def _first_member_at(fp: BinaryIO, end_record: int) -> int | None:
+    """Where the first member of a zip whose offsets count from the start of the file lies (a self-extractor that
+    'zip -A' adjusted): its central directory ends at the end record, and the first entry's local header is found
+    where the entry says."""
+    fp.seek(end_record)
+    rec = fp.read(22)
+    if len(rec) < 22 or rec[:4] != b"PK\x05\x06":
+        return None
+    count, cd_size, cd_off = struct.unpack_from("<HII", rec, 10)
+    if not count or count == 0xFFFF or cd_size < 46 or cd_off + cd_size != end_record:
+        return None
+    fp.seek(cd_off)
+    cd = fp.read(46)
+    if cd[:4] != b"PK\x01\x02":
+        return None
+    (lho,) = struct.unpack_from("<I", cd, 42)
+    if not 0 < lho < cd_off:
+        return None
+    fp.seek(lho)
+    return lho if fp.read(4) == b"PK\x03\x04" else None
+
+
+def zip_start(fp: BinaryIO, end_record: int) -> int | None:
+    """Where the zip archive whose end-of-central-directory record is at ``end_record`` starts, if its central
+    directory and first local header are where the record says - for zip64, where its zip64 end record says."""
+    fp.seek(end_record)
+    rec = fp.read(22)
+    if len(rec) < 22 or rec[:4] != b"PK\x05\x06":
+        return None
+    count, cd_size, cd_off = struct.unpack_from("<HII", rec, 10)
+    cd_end = end_record
+    if 0xFFFFFFFF in (cd_size, cd_off) or count == 0xFFFF:  # zip64: the sizes are in the zip64 end record
+        if end_record < 20 + 56:
+            return None
+        fp.seek(end_record - 20)
+        if fp.read(4) != b"PK\x06\x07":  # its locator; the record itself precedes it (no extensible data)
+            return None
+        cd_end = end_record - 20 - 56
+        fp.seek(cd_end)
+        rec64 = fp.read(56)
+        if rec64[:4] != b"PK\x06\x06":
+            return None
+        count, cd_size, cd_off = struct.unpack_from("<QQQ", rec64, 32)
+    start = cd_end - cd_size - cd_off
+    if not count or cd_size < 46 or start < 0:
+        return None
+    fp.seek(start + cd_off)
+    cd = fp.read(46)
+    if cd[:4] != b"PK\x01\x02":
+        return None
+    fp.seek(start)
+    if fp.read(4) == b"PK\x03\x04":
+        return start
+    # offsets counted from the start of a stub in front of the archive ('zip -A' adjusts a self-extractor's): the
+    # archive, for zipfile, starts with the stub, and its first member lies where the first entry says
+    lho = struct.unpack_from("<I", cd, 42)[0] if len(cd) == 46 else 0
+    if 0 < lho < cd_off:
+        fp.seek(start + lho)
+        if fp.read(4) == b"PK\x03\x04":
+            return start
+    return None
 
 
 def detect_format_bytes(head: bytes, size: int) -> FormatInfo:
@@ -87,6 +205,12 @@ def detect_format_bytes(head: bytes, size: int) -> FormatInfo:
         return _fmt("elf")
     if head[:4] in (b"PK\x03\x04", b"PK\x05\x06"):
         return _fmt("zip")
+    if head.startswith(b"7z\xbc\xaf\x27\x1c"):
+        return _fmt("7z")
+    if head.startswith((b"Rar!\x1a\x07\x00", b"Rar!\x1a\x07\x01\x00")):
+        return _fmt("rar")
+    if head.startswith(b"MSCF\x00\x00\x00\x00"):
+        return _fmt("cab")
     if len(head) >= 262 and head[257:262] == b"ustar":
         return _fmt("tar")
     if head.startswith(b"\x1f\x8b"):
@@ -95,6 +219,20 @@ def detect_format_bytes(head: bytes, size: int) -> FormatInfo:
         return _fmt("bzip2")
     if head.startswith(b"\xfd7zXZ\x00"):
         return _fmt("xz")
+    if head[:4] == b"\x28\xb5\x2f\xfd":
+        return _fmt("zstd")
+    if head[:4] == b"\x04\x22\x4d\x18":
+        return _fmt("lz4")
+    if head[:4] == b"\x02\x21\x4c\x18":
+        return _fmt("lz4_legacy")
+    if head[:9] == b"\x89LZO\x00\r\n\x1a\n":
+        return _fmt("lzop")
+    if head[:4] == b"\x3a\xff\x26\xed":
+        return _fmt("android_sparse")
+    if cramfs_offset(head) is not None:
+        return _fmt("cramfs")
+    if len(head) >= 1028 and head[1024:1028] == b"\xe2\xe1\xf5\xe0":
+        return _fmt("erofs")
     if head[:4] in (b"hsqs", b"sqsh"):
         return _fmt("squashfs", endianness="little" if head[:4] == b"hsqs" else "big")
     if len(head) >= 1082 and head[1080:1082] == b"\x53\xef":
@@ -111,6 +249,8 @@ def detect_format_bytes(head: bytes, size: int) -> FormatInfo:
         return _fmt("jffs2")
     if head[:8] == b"-rom1fs-":
         return _fmt("romfs")
+    if head[:4] == b"CROM" and cromfs_header(head, size):
+        return _fmt("cromfs")
     if head[:4] == b"IM*H":
         return _fmt("dji_imah", **_imah_details(head))
     if head[:4] == b"PLF!":
@@ -133,6 +273,12 @@ def detect_format_bytes(head: bytes, size: int) -> FormatInfo:
         return _fmt("ihex")
     if _looks_like_lzma_alone(head):
         return _fmt("lzma")
+    if esp.looks_like_flash_dump(head):
+        return _fmt("esp_flash")
+    if head[:1] == b"\xe9" and esp.image_header_plausible(head, size):
+        return _fmt("esp_image")
+    if head[:2] == b"\xaa\x50" and size <= esp.PARTITION_TABLE_MAX and (pt := esp.parse_partition_table(head)):
+        return _fmt("esp_partition_table", partitions=pt["partitions"], md5_valid=pt["md5_valid"])
     vt = analyze_vector_table(head)
     if vt is not None:
         return _fmt("cortexm_raw", initial_sp=hex(vt.initial_sp),
@@ -249,6 +395,15 @@ class PlatformSignature:
     weak: list[bytes]  # contribute partial evidence
     version_patterns: list[re.Pattern]
     vehicle_patterns: list[re.Pattern] = field(default_factory=list)
+    # byte patterns for a build-information block (named groups: version, board, revision, date, time)
+    build_info: list[re.Pattern[bytes]] = field(default_factory=list)
+    # the version is stored as a standalone NUL-terminated "x.y.z" constant (too short for string scans)
+    version_constant: bool = False
+    version_constant_re: re.Pattern[bytes] | None = None  # another form of that constant (default: x.y.z)
+    boards: list[tuple[bytes, str]] = field(default_factory=list)  # (signature, board it names)
+
+
+VERSION_CONSTANT = re.compile(rb"(?<=\x00)(\d{1,2}\.\d{1,2}\.\d{1,2})\x00")
 
 
 PLATFORMS: list[PlatformSignature] = [
@@ -266,16 +421,26 @@ PLATFORMS: list[PlatformSignature] = [
     PlatformSignature(
         name="ArduPilot",
         family="flight-controller",
+        # Note: the 8-byte app-descriptor signature is NOT used here - it also occurs as a constant in
+        # PX4 builds; a *populated* descriptor is added as a hint by the analysis stage instead.
         strong=[b"APJFWv1", b"ArduCopter V", b"ArduPlane V", b"ArduRover V", b"ArduSub V",
                 b"AntennaTracker V", b"AP_Periph", b"Blimp V",
-                bytes([0x40, 0xA2, 0xE4, 0xF1, 0x64, 0x68, 0x91, 0x06])],  # AP app descriptor
+                # naming used by real releases: 'APM:Copter V3.3' (3.3 era), 'ArduRover v2.50'
+                b"APM:Copter V", b"APM:Plane V", b"APM:Rover V", b"APM:AntennaTracker V", b"ArduRover v",
+                b"APMrover2",
+                # AP_Bootloader (official builds in ardupilot/Tools/bootloaders): ChibiOS USB product
+                # template and the SD-card update image name
+                b"%BOARD%-BL", b"/ardupilot.abin"],
         weak=[b"ArduPilot", b"ChibiOS", b"AP_HAL", b"ARMING_CHECK", b"SYSID_THISMAV",
-              b"@PARAM", b"PreArm:", b"ArduCopter", b"ArduPlane"],
+              b"@PARAM", b"PreArm:", b"ArduCopter", b"ArduPlane", b"%BOARD%", b"%SERIAL%"],
         version_patterns=[
-            re.compile(r"(?:ArduCopter|ArduPlane|ArduRover|ArduSub|AntennaTracker|Blimp|AP_Periph)"
-                       r"\s+V(\d+\.\d+\.\d+(?:-?[\w.]+)?)"),
+            re.compile(r"(?:ArduCopter|ArduPlane|ArduRover|ArduSub|AntennaTracker|Blimp|AP_Periph|"
+                       r"APM:(?:Copter|Plane|Rover|Sub|AntennaTracker))"
+                       r"\s+[Vv](\d+\.\d+(?:\.\d+)?(?:-[\w.]+)?)\b"),
         ],
-        vehicle_patterns=[re.compile(r"(ArduCopter|ArduPlane|ArduRover|ArduSub|AntennaTracker|Blimp|AP_Periph)\b")],
+        vehicle_patterns=[re.compile(r"(ArduCopter|ArduPlane|ArduRover|ArduSub|AntennaTracker|Blimp|AP_Periph)\b"),
+                          re.compile(r"\bAPM:(Copter|Plane|Rover|Sub|AntennaTracker)\b"),
+                          re.compile(r"%BOARD%-(BL)\b")],
     ),
     PlatformSignature(
         name="Betaflight",
@@ -283,13 +448,38 @@ PLATFORMS: list[PlatformSignature] = [
         strong=[b"Betaflight", b"BTFL"],
         weak=[b"betaflight", b"CLI", b"MSP"],
         version_patterns=[re.compile(r"Betaflight\s*/?\s*\w*\s*(\d+\.\d+\.\d+)")],
+        # official builds carry the version only as a standalone constant (FC_VERSION_STRING, e.g. "4.3.2";
+        # the only NUL-delimited x.y.z string in the 4.3.2 STM32F405/H743 builds)
+        version_constant=True,
+        # version.c in official 4.3 builds: target, git revision, build time, build date. 4.4/4.5 builds keep them with
+        # the CLI 'version' line instead (target, "Betaflight" since 4.5, format, MSP API version, revision, time,
+        # date, version) and in the "BTFL" identifier block (target, date, time, revision; 4.4 adds "# Betaflight")
+        build_info=[re.compile(rb"(?P<board>[A-Z0-9][A-Z0-9_]{2,31})\x00+(?P<revision>[0-9a-f]{7,8})\x00+"
+                               rb"(?P<time>\d\d:\d\d:\d\d)\x00+(?P<date>[A-Z][a-z]{2} [ \d]\d \d{4})\x00"),
+                    re.compile(rb"(?P<board>[A-Z0-9][A-Z0-9_]{2,31})\x00+(?:Betaflight\x00+)?# %s / %s \(%s\) %s %s / %s "
+                               rb"\(%s\) MSP API: %s\x00+\d{1,2}\.\d{1,3}\x00+(?P<revision>[0-9a-f]{7,8})\x00+"
+                               rb"(?P<time>\d\d:\d\d:\d\d)\x00+(?P<date>[A-Z][a-z]{2} [ \d]\d \d{4})\x00+"
+                               rb"(?P<version>\d{1,2}\.\d{1,2}\.\d{1,2})\x00"),
+                    re.compile(rb"BTFL\x00+(?:# Betaflight\x00+)?(?P<board>[A-Z0-9][A-Z0-9_]{2,31})\x00+"
+                               rb"(?P<date>[A-Z][a-z]{2} [ \d]\d \d{4})\x00+(?P<time>\d\d:\d\d:\d\d)\x00+"
+                               rb"(?P<revision>[0-9a-f]{7,8})\x00")],
     ),
     PlatformSignature(
         name="INAV",
         family="flight-controller",
-        strong=[b"INAV/", b"INAV "],
+        strong=[b"INAV/", b"INAV ", b"INAV_ALL.BBL", b"INAV VERSION"],
         weak=[b"inav"],
         version_patterns=[re.compile(r"INAV/?\s*\w*\s*(\d+\.\d+\.\d+)")],
+        version_constant=True,
+        # official builds keep the CLI 'version' format and its arguments together, in one of two orders:
+        # git revision, build time, build date, version, target (6.x, 7.x, 9.x F7/H7) or version, target, format,
+        # revision, time, date (9.x F405 builds)
+        build_info=[re.compile(rb"(?P<revision>[0-9a-f]{7,8})\x00+(?P<time>\d\d:\d\d:\d\d)\x00+"
+                               rb"(?P<date>[A-Z][a-z]{2} [ \d]\d \d{4})\x00+(?P<version>\d{1,2}\.\d{1,2}\.\d{1,2})"
+                               rb"\x00+(?P<board>[A-Z0-9][A-Z0-9_]{2,31})\x00"),
+                    re.compile(rb"(?P<version>\d{1,2}\.\d{1,2}\.\d{1,2})\x00+(?P<board>[A-Z0-9][A-Z0-9_]{2,31})\x00+"
+                               rb"%s/%s %s %s / %s \(%s\)(?: %s)?\x00+(?P<revision>[0-9a-f]{7,8})\x00+"
+                               rb"(?P<time>\d\d:\d\d:\d\d)\x00+(?P<date>[A-Z][a-z]{2} [ \d]\d \d{4})\x00")],
     ),
     PlatformSignature(
         name="DJI",
@@ -303,6 +493,30 @@ PLATFORMS: list[PlatformSignature] = [
         family="vendor-proprietary",
         strong=[b"PLF!", b"parrot_bebop", b"Parrot Bebop", b"Parrot ANAFI"],
         weak=[b"Parrot", b"parrot"],
+        version_patterns=[],
+    ),
+    PlatformSignature(
+        name="Crazyflie",
+        family="flight-controller",
+        # Bitcraze's open-source nano quadcopter: the STM32 flight controller (crazyflie-firmware), the nRF51 radio and
+        # power controller (crazyflie2-nrf-firmware) and its bootloader. "0;CF20" starts the platform's device type
+        # string, in all three.
+        strong=[b"Bitcraze Crazyflie", b"Crazyflie 2.X", b"Crazyflie Loader", b"CRAZYFLIE_SRV:", b"0;CF20",
+                b"SYS: Build %s:%s (%s) %s"],
+        weak=[b"Crazyflie", b"Bitcraze", b"CRTP", b"Syslink", b"DECK_INFO"],
+        version_patterns=[],
+        # version.c in crazyflie-firmware: branch, release tag (2023.11, 2024.2), git revision
+        build_info=[re.compile(rb"\x00[\w./-]{1,40}\x00(?P<version>20\d\d\.\d{1,2}(?:\.\d+)?)\x00"
+                               rb"(?P<revision>[0-9a-f]{12,40})\x00")],
+        version_constant=True,  # crazyflie2-nrf-firmware keeps only the release tag
+        version_constant_re=re.compile(rb"(?<=\x00)(20\d\d\.\d{1,2}(?:\.\d+)?)\x00"),
+        boards=[(b"Crazyflie 2.X", "cf2"), (b"0;CF20", "cf2")],  # the cf2 platform: Crazyflie 2.0, 2.1, 2.1 Brushless
+    ),
+    PlatformSignature(
+        name="Espressif",
+        family="embedded-peripheral",  # e.g. Remote ID modules, RC-link receivers, telemetry bridges
+        strong=[],  # image structures are added as hints by the analysis stage
+        weak=[b"esp_image", b"ESP-IDF", b"nvs_flash", b"esp_ota_", b"ets_printf", b"esp_partition"],
         version_patterns=[],
     ),
     PlatformSignature(
@@ -324,6 +538,8 @@ class PlatformGuess:
     evidence: list[str]
     version: str | None = None
     vehicle: str | None = None
+    board: str | None = None
+    build: dict | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -337,12 +553,24 @@ class PlatformAccumulator:
         self.versions: dict[str, Counter] = {p.name: Counter() for p in PLATFORMS}
         self.vehicles: dict[str, Counter] = {p.name: Counter() for p in PLATFORMS}
         self.hints: dict[str, list[str]] = {p.name: [] for p in PLATFORMS}
+        self.build: dict[str, dict] = {}
+        self.constants: dict[str, Counter] = {}
+        self.info: dict[str, dict] = {}  # version/board/build from structured metadata (e.g. a release manifest)
 
     def feed_bytes(self, block: bytes) -> None:
         for p in PLATFORMS:
-            for sig in p.strong + p.weak:
+            for sig in p.strong + p.weak + [b for b, _board in p.boards]:
                 if sig not in self.hits[p.name] and sig in block:
                     self.hits[p.name][sig] = 1
+            if p.version_constant and any(s in block for s in p.strong):
+                for m in (p.version_constant_re or VERSION_CONSTANT).finditer(block):
+                    self.constants.setdefault(p.name, Counter())[m.group(1).decode("ascii")] += 1
+            if p.build_info and p.name not in self.build and any(s in block for s in p.strong):
+                for pat in p.build_info:
+                    m = pat.search(block)
+                    if m:
+                        self.build[p.name] = {k: v.decode("ascii") for k, v in m.groupdict().items() if v}
+                        break
 
     def feed_string(self, s: str) -> None:
         for p in PLATFORMS:
@@ -359,12 +587,26 @@ class PlatformAccumulator:
         """Strong out-of-band evidence (e.g. container magic) for a platform."""
         self.hints.setdefault(platform, []).append(evidence)
 
+    def set_info(self, platform: str, version: str | None = None, board: str | None = None,
+                 build: dict | None = None) -> None:
+        """Version, board and build details from structured metadata (a release manifest); they take precedence over
+        what signatures suggest."""
+        info = self.info.setdefault(platform, {})
+        for key, value in (("version", version), ("board", board)):
+            if value and key not in info:
+                info[key] = value
+        if build:
+            info.setdefault("build", {}).update(build)
+
     def results(self) -> list[PlatformGuess]:
         out: list[PlatformGuess] = []
         for p in PLATFORMS:
             strong = [s for s in p.strong if s in self.hits[p.name]]
             weak = [s for s in p.weak if s in self.hits[p.name]]
-            hints = self.hints.get(p.name, [])
+            hints = list(self.hints.get(p.name, []))
+            build = self.build.get(p.name) if strong else None
+            if build:  # the block layout is specific to this project's version.c
+                hints.append("build information block (" + ", ".join(f"{k} {v}" for k, v in build.items()) + ")")
             score = 10 * len(hints) + 4 * len(strong) + len(weak)
             if score < 3:
                 continue
@@ -375,14 +617,29 @@ class PlatformAccumulator:
             else:
                 conf = "low"
             ev = hints + [f"signature '{_show(s)}'" for s in strong] + [f"string '{_show(s)}'" for s in weak]
-            version = None
-            if self.versions[p.name] and (strong or hints):
+            info = self.info.get(p.name, {})
+            if info.get("build"):
+                build = {**(build or {}), **info["build"]}
+            version = info.get("version") or (build or {}).get("version")
+            if version is None and self.versions[p.name] and (strong or hints):
                 version = self.versions[p.name].most_common(1)[0][0]
+            if version is None and strong and self.constants.get(p.name):
+                version = self.constants[p.name].most_common(1)[0][0]
             vehicle = self.vehicles[p.name].most_common(1)[0][0] if self.vehicles[p.name] else None
+            vehicle = VEHICLE_ALIASES.get(vehicle, vehicle)
+            board = None
+            if strong or hints:
+                board = info.get("board") or (build or {}).get("board") or next(
+                    (name for sig, name in p.boards if sig in self.hits[p.name]), None)
             out.append(PlatformGuess(name=p.name, family=p.family, confidence=conf, score=score,
-                                     evidence=ev[:12], version=version, vehicle=vehicle))
+                                     evidence=ev[:12], version=version, vehicle=vehicle,
+                                     board=board, build=build or None))
         out.sort(key=lambda g: -g.score)
         return out
+
+
+VEHICLE_ALIASES = {"BL": "AP_Bootloader", "Copter": "ArduCopter", "Plane": "ArduPlane", "Rover": "ArduRover",
+                   "Sub": "ArduSub"}
 
 
 def _show(sig: bytes) -> str:

@@ -60,6 +60,18 @@ def test_end_to_end_companion(client, settings, fixtures):
     rp = client.get(f"/api/scans/{scan['id']}/report.pdf")
     assert rp.status_code == 200 and rp.content.startswith(b"%PDF") and len(rp.content) > 3000
 
+    rs = client.get(f"/api/scans/{scan['id']}/report.sarif")
+    assert rs.status_code == 200 and rs.headers["content-type"].startswith("application/sarif+json")
+    sar = rs.json()
+    assert sar["version"] == "2.1.0" and len(sar["runs"][0]["results"]) == len(f)
+    res0 = sar["runs"][0]["results"][0]
+    assert res0["ruleId"] in {r["id"] for r in sar["runs"][0]["tool"]["driver"]["rules"]}
+    assert res0["properties"]["classification"] in ("detected", "suspicious", "unverified", "info")
+    assert all(r["kind"] == "review" for r in sar["runs"][0]["results"] if r["properties"]["classification"] != "detected")
+
+    pk = client.get(f"/api/scans/{scan['id']}/packages").json()
+    assert set(pk) >= {"distro", "managers", "total", "items"}
+
 
 @pytest.mark.parametrize("key,platform", [("px4", "PX4"), ("apj", "ArduPilot"), ("hex", "ArduPilot")])
 def test_end_to_end_flight_controllers(client, settings, fixtures, key, platform):
@@ -130,22 +142,9 @@ def test_malicious_archive_scan_completes(client, settings, fixtures):
     assert any("traversal" in w for w in d["extraction_summary"]["warnings"])
 
 
-def test_api_key(settings, fixtures):
-    from fastapi.testclient import TestClient
-
-    from dfa.main import create_app
-    settings.api_key = "s3cret"
-    with TestClient(create_app(settings, start_worker=False)) as c:
-        assert c.get("/api/health").status_code == 200
-        assert c.get("/api/scans").status_code == 401
-        assert c.get("/api/scans", headers={"X-API-Key": "s3cret"}).status_code == 200
-
-
-def test_inprocess_worker_thread(settings, fixtures):
-    from fastapi.testclient import TestClient
-
-    from dfa.main import create_app
-    with TestClient(create_app(settings, start_worker=True)) as c:
+def test_inprocess_worker_thread(make_client, fixtures):
+    c = make_client(start_worker=True)
+    if True:
         s = upload(c, fixtures["px4"])
         for _ in range(120):
             d = c.get(f"/api/scans/{s['id']}").json()
@@ -230,7 +229,7 @@ def test_spa_route_does_not_serve_sibling_dirs(settings, tmp_path, monkeypatch):
     (tmp_path / "dist-old" / "secret.txt").write_text("SECRET")
     monkeypatch.setenv("DFA_FRONTEND_DIST", str(dist))
     with TestClient(create_app(settings, start_worker=False)) as c:
-        r = c.get("/%2e%2e/dist-old/secret.txt")
+        r = c.get("/%2e%2e/dist-old/secret.txt")  # SPA route is public by design (static assets only)
         assert "SECRET" not in r.text
 
 
@@ -243,3 +242,153 @@ def test_purge_extracted_files(client, settings, fixtures):
     work = settings.work_root / s["id"]
     assert not (work / "files").exists() and (work / "manifest.json").exists()
     assert client.get(f"/api/scans/{s['id']}/artifacts").json()["total"] > 5
+
+
+def test_links_planted_by_a_compromised_sandbox_are_not_followed(client, settings, fixtures, monkeypatch):
+    """A compromised sandbox can leave anything in the scan directory. The worker must not write its
+    results through a planted link (here: into the database or a directory outside the scan)."""
+    import dfa.pipeline
+    real = dfa.pipeline.run_analysis
+    outside = settings.data_dir / "outside"
+    outside.mkdir(parents=True, exist_ok=True)
+
+    def compromised(input_path, name, work, s, progress=None):
+        res = real(input_path, name, work, s, progress)
+        (work / "findings.json").symlink_to(settings.data_dir / "dfa.db")
+        (work / "tools").symlink_to(outside)
+        return res
+    monkeypatch.setattr(dfa.pipeline, "run_analysis", compromised)
+    db_before = (settings.data_dir / "dfa.db").read_bytes()[:16]
+    s = upload(client, fixtures["px4"])
+    process_all(settings)
+    d = client.get(f"/api/scans/{s['id']}").json()
+    assert d["status"] == "completed"
+    assert (settings.data_dir / "dfa.db").read_bytes()[:16] == db_before == b"SQLite format 3\x00"
+    work = settings.work_root / s["id"]
+    assert not (work / "findings.json").is_symlink() and (work / "findings.json").read_text().startswith("[")
+    assert list(outside.iterdir()) == []  # no tool directory was created through the link
+    assert client.get(f"/api/scans/{s['id']}/artifacts").status_code == 200
+
+
+def test_artifacts_expose_raw_image_facts(client, settings, fixtures):
+    """The inventory shows a raw MCU image's load address (curated keys only, not arbitrary details)."""
+    s = upload(client, fixtures["px4"])
+    process_all(settings)
+    arts = client.get(f"/api/scans/{s['id']}/artifacts").json()["items"]
+    from dfa.main import IMAGE_KEYS
+    images = [a["image"] for a in arts if a.get("image")]
+    assert any(i.get("flash_base", "").startswith("0x") for i in images)
+    assert all(set(i) <= set(IMAGE_KEYS) for i in images)  # curated keys only, never arbitrary details
+    carved = [a for a in arts if a["origin"] == "carved"]  # the embedded ROMFS: where it was found
+    assert carved and all(a["image"]["carved_offset"].startswith("0x") for a in carved)
+
+
+def test_cyclonedx_sbom(client, settings, fixtures):
+    """CycloneDX 1.5 export: firmware metadata (incl. board/build from the .px4 container), components with
+    purl/CPE where known, attachment download."""
+    s = upload(client, fixtures["px4"])
+    process_all(settings)
+    r = client.get(f"/api/scans/{s['id']}/sbom.cdx.json")
+    assert r.status_code == 200 and "attachment" in r.headers.get("content-disposition", "")
+    bom = r.json()
+    assert (bom["bomFormat"], bom["specVersion"]) == ("CycloneDX", "1.5")
+    comp = bom["metadata"]["component"]
+    assert comp["type"] == "firmware" and comp["hashes"][0]["content"] == s["sha256"]
+    props = {p["name"]: p["value"] for p in comp["properties"]}
+    assert props["dfa:platform"] == "PX4" and props["dfa:board"] == "PX4FMUv5" and props["dfa:board-id"] == "50"
+    assert all(c.get("bom-ref") for c in bom["components"])
+    assert bom["dependencies"][0]["ref"] == comp["bom-ref"]
+
+
+def test_file_names_that_are_not_utf8_do_not_break_a_scan(client, settings, tmp_path):
+    """Archive member names are bytes; a name with an invalid UTF-8 byte (0x80) reaches the manifest as a lone
+    surrogate. Before the fix the database rejected it and the scan failed after the analysis had finished."""
+    import io
+    import tarfile
+    key = (b"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun\n"
+           b"-----END RSA PRIVATE KEY-----\n")
+    src = tmp_path / "rootfs.tar.gz"
+    with tarfile.open(src, "w:gz", format=tarfile.GNU_FORMAT, encoding="utf-8", errors="surrogateescape") as tf:
+        for name, data in [("etc/passwd", b"root:x:0:0:root:/root:/bin/sh\n"), ("etc/os-release", b"ID=probe\n"),
+                           (b"home/user\x80dir/.ssh/id_rsa".decode("utf-8", "surrogateescape"), key)]:
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            tf.addfile(ti, io.BytesIO(data))
+    scan = upload(client, src)
+    process_all(settings)
+    d = client.get(f"/api/scans/{scan['id']}").json()
+    assert d["status"] == "completed", d.get("error")
+    items = client.get(f"/api/scans/{scan['id']}/findings").json()["items"]
+    keyf = [f for f in items if "id_rsa" in f["affected_component"]]
+    assert keyf and all("\\x80" in f["affected_component"] for f in keyf), [f["affected_component"] for f in items]
+    arts = [a for a in client.get(f"/api/scans/{scan['id']}/artifacts").json()["items"] if "id_rsa" in a["name"]]
+    assert arts and all("\\x80" in a["name"] for a in arts), arts
+    for route in ("report.json", "report.pdf", "report.sarif", "sbom.cdx.json"):
+        assert client.get(f"/api/scans/{scan['id']}/{route}").status_code == 200, route
+
+
+def test_pdf_report_survives_texts_longer_than_a_page(client, settings, fixtures):
+    """A reportlab table cell taller than a page raises LayoutError and failed the whole PDF. Finding texts and
+    names come from firmware and tools (a long config line, a big tool message), so the PDF cuts them and points
+    to the JSON report, which keeps the full text."""
+    from dfa.db import session_scope
+    from dfa.models import FindingRow, Scan
+    s = upload(client, fixtures["tar_gz"])
+    process_all(settings)
+    wide = "\n".join(["W" * 75] * 60)
+    with session_scope() as db:
+        scan = db.get(Scan, s["id"])
+        scan.identification = {**(scan.identification or {}), "board_name": wide, "platform_version": "9" * 20000}
+        scan.components = [{"name": wide, "version": wide, "method": "probe", "sources": [wide],
+                            "vulnerabilities_note": wide}]
+        row = db.query(FindingRow).filter_by(scan_id=s["id"]).first()
+        # escapes are up to 6x longer than the characters they show: escaping comes before the cut
+        row.description, row.remediation, row.affected_component = "D" * 60000, wide, "\x01" * 2250 + "c" * 9000
+        row.evidence = [{"kind": "string", "value": "V" * 20000, "location": "L" * 5000}] * 30
+    rp = client.get(f"/api/scans/{s['id']}/report.pdf")
+    assert rp.status_code == 200 and rp.content.startswith(b"%PDF")
+    full = client.get(f"/api/scans/{s['id']}/report.json").json()["scan"]["findings"]
+    assert any(f["description"] == "D" * 60000 for f in full)
+
+
+
+def test_px4_container_with_non_finite_numbers_stays_viewable(client, settings, fixtures, tmp_path):
+    """.px4/.apj containers are JSON, and Python's json accepts NaN, Infinity and 1e999 (= inf). Such values in
+    the metadata must not make the scan unviewable: Starlette's JSON responses reject non-finite floats."""
+    import json as _json
+    doc = _json.loads(fixtures["px4"].read_text())
+    text = _json.dumps({**doc, "board_id": "@NAN@", "build_time": "@BIG@", "image_maxsize": "@NINF@",
+                        "board_revision": "@BIG@", "flash_free": "@NAN@", "flash_total": "@LONG@"})
+    text = (text.replace('"@NAN@"', "NaN").replace('"@BIG@"', "1e999").replace('"@NINF@"', "-Infinity")
+            .replace('"@LONG@"', "9" * 5000))  # int() refuses more than 4,300 digits
+    src = tmp_path / "odd.px4"
+    src.write_text(text)
+    s = upload(client, src)
+    process_all(settings)
+    d = client.get(f"/api/scans/{s['id']}")
+    assert d.status_code == 200, d.text[:300]
+    assert d.json()["status"] == "completed", d.json().get("error")
+    for route in ("findings", "artifacts", "packages", "report.json", "report.pdf", "report.sarif", "sbom.cdx.json"):
+        assert client.get(f"/api/scans/{s['id']}/{route}").status_code == 200, route
+    assert client.get("/api/scans").status_code == 200
+    ident = d.json()["identification"]
+    assert ident["platform"] == "PX4" and ident.get("board_id") is None  # NaN parsed as null, rest kept
+    arts = client.get(f"/api/scans/{s['id']}/artifacts").json()["items"]
+    assert any(a["name"].endswith("rcS") for a in arts)  # the container was still unpacked and analysed
+    # last line of defence: a non-finite float already stored (or from a tool) is sent as null
+    from dfa.db import session_scope
+    from dfa.models import Scan
+    with session_scope() as db:
+        db.get(Scan, s["id"]).identification = {**ident, "board_id": float("nan"), "odd": [float("inf")]}
+    d = client.get(f"/api/scans/{s['id']}")
+    assert d.status_code == 200 and d.json()["identification"]["odd"] == [None]
+
+
+def test_pdf_shows_spoofing_characters_as_escapes():
+    """Like the UI, the PDF shows a reversing U+202E or a zero-width character from a firmware name as an escape
+    instead of applying or hiding it; newlines in descriptions still break lines."""
+    from reportlab.lib.styles import getSampleStyleSheet
+
+    from dfa.reports.export import _p
+    para = _p("key in /bin/evil‮txt.exe​\nsecond line", getSampleStyleSheet()["BodyText"])
+    assert para.text == "key in /bin/evil\\u202etxt.exe\\u200b<br/>second line"

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 import traceback
@@ -24,7 +25,7 @@ from .findings import Finding, dedupe
 from .formats.elfinfo import inspect_elf
 from .identify import PlatformAccumulator, file_entropy, parse_ardupilot_descriptor, scan_file_for_platform
 from .limits import Limits
-from .scanners import binaries, components, configs, drone, secrets
+from .scanners import binaries, components, configs, drone, packages, secrets
 from .scanners.base import ScanContext, build_display_paths
 
 MANIFEST_VERSION = 1
@@ -56,11 +57,12 @@ def categorize(art: Artifact, elf: dict | None, ctx: ScanContext) -> str:
         return "executable"
     if art.format in ("cortexm_raw",):
         return "firmware_image"
-    if art.format in ("squashfs", "ext", "fat", "romfs", "disk_image", "ubi", "ubifs", "jffs2"):
+    if art.format in ("squashfs", "ext", "fat", "romfs", "cromfs", "cramfs", "erofs", "android_sparse", "disk_image",
+                      "ubi", "ubifs", "jffs2"):
         return "filesystem_image"
-    if art.format in ("zip", "tar", "gzip", "bzip2", "xz", "lzma", "cpio"):
+    if art.format in ("zip", "tar", "gzip", "bzip2", "xz", "lzma", "zstd", "lz4", "lz4_legacy", "lzop", "cpio"):
         return "archive"
-    if art.format in ("px4", "apj", "fw_json", "ihex", "dfu", "uimage"):
+    if art.format in ("px4", "apj", "fw_json", "ihex", "dfu", "uimage", "parrot_plf", "dji_imah", "esp_image", "esp_flash"):
         return "firmware_container"
     if art.format == "text":
         text = ctx.text(art) or ""
@@ -105,7 +107,8 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
     result = ex.run(input_path, original_name)
     arts = result.artifacts
     display = build_display_paths(arts)
-    ctx = ScanContext(artifacts=arts, paths={a.id: ex.path_of(a.id) for a in arts}, display=display, limits=limits)
+    ctx = ScanContext(artifacts=arts, paths={a.id: ex.path_of(a.id) for a in arts}, display=display, limits=limits,
+                      copied=result.copied)
 
     progress("inventory")
     for a in arts:
@@ -116,6 +119,34 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
             except Exception as exc:  # noqa: BLE001 - malformed ELF is data, not a crash
                 a.details["elf_error"] = str(exc)[:200]
         ctx.category[a.id] = categorize(a, ctx.elf.get(a.id), ctx)
+
+    from .formats.arch import guess_architecture
+    for a in arts:  # instruction set of headerless code blobs
+        if a.format == "raw" and a.size >= 4096 and a.extraction in (None, "ok"):
+            with ex.path_of(a.id).open("rb") as fp:
+                g = guess_architecture(fp.read(8 * 1024**2))
+            if g:
+                a.details["arch_guess"] = g.to_dict()
+    for a in arts:  # load address of raw MCU images (needed for disassembly / bare-metal analysis)
+        if a.format == "cortexm_raw":
+            from .formats.cortexm import analyze_vector_table, estimate_flash_base
+            with ex.path_of(a.id).open("rb") as fp:
+                data = fp.read(16 * 1024**2)
+            vt = analyze_vector_table(data)
+            if vt:
+                a.details["initial_sp"] = hex(vt.initial_sp)
+                a.details["reset_handler"] = hex(vt.reset_handler)
+            if "load_address" in a.details:
+                a.details["flash_base"] = a.details["load_address"]
+                a.details["flash_base_source"] = ("ELF load address" if a.details.get("derived_from_elf")
+                                                  else "container metadata")
+            else:
+                est = estimate_flash_base(data)
+                if est:
+                    a.details["flash_base"] = hex(est[0])
+                    a.details["flash_base_source"] = est[1]["method"]
+                    a.details["flash_base_scores"] = est[1]["candidates"]
+    _link_images_to_elf_symbols(arts, ctx)
 
     progress("platform detection")
     acc = PlatformAccumulator()
@@ -135,8 +166,10 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
         if a.format == "cortexm_raw" and ap_desc is None:
             with ex.path_of(a.id).open("rb") as fp:
                 ap_desc = parse_ardupilot_descriptor(fp.read(4 * 1024**2), a.size)
-            if ap_desc:
-                acc.hint("ArduPilot", f"ArduPilot app descriptor at {ap_desc['offset']}")
+            if ap_desc and "board_id" in ap_desc:  # only a populated descriptor is evidence
+                acc.hint("ArduPilot", f"populated ArduPilot app descriptor at {ap_desc['offset']}")
+            elif ap_desc:
+                ap_desc = None
     for a in arts:
         if a.format == "px4":
             acc.hint("PX4", "PX4 firmware container magic 'PX4FWv1'")
@@ -146,6 +179,15 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
             acc.hint("DJI", "DJI 'IM*H' module header")
         elif a.format == "parrot_plf":
             acc.hint("Parrot", "Parrot 'PLF!' container header")
+        elif a.format == "esp_image" and a.details.get("checksum_valid"):
+            app = a.details.get("esp_app")
+            acc.hint("Espressif", f"{a.details.get('esp_chip')} application image with a valid checksum"
+                     + (f" (ESP-IDF project '{app.get('project_name')}')" if app else ""))
+        elif a.format == "text" and a.name.rsplit("/", 1)[-1] == "manifest.json" and a.size <= 64 * 1024:
+            if cf := _crazyflie_manifest(ex.path_of(a.id)):
+                acc.hint("Crazyflie", f"Crazyflie release manifest {ctx.where(a)} (release {cf['release']}, "
+                         f"platform {cf['platform']})")
+                acc.set_info("Crazyflie", version=cf["release"], board=cf["platform"], build=cf["targets"])
     platforms = acc.results()
 
     progress("components")
@@ -155,7 +197,28 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
     for p in platforms[:2]:
         if p.version and p.confidence in ("high", "medium"):
             comps.append(components.Component(name=p.name.lower(), version=p.version, sources=["platform signature"],
-                                              method="platform-signature"))
+                                              method="platform-signature", variant=p.vehicle))
+    for a in arts:  # ESP-IDF application descriptors name the SDK version and the application itself
+        app = a.details.get("esp_app") or {}
+        if app.get("idf_version"):
+            components.merge(comps, components.Component(
+                name="esp-idf", version=app["idf_version"].removeprefix("v"), sources=[ctx.where(a)],
+                method="esp_app_desc"))
+        if app.get("project_name") and app.get("version"):
+            components.merge(comps, components.Component(
+                name=app["project_name"], version=app["version"], sources=[ctx.where(a)], method="esp_app_desc"))
+
+    st = time.monotonic()
+    try:
+        pkg_inv = packages.inventory(ctx)
+        manifest["scanner_runs"].append({"name": "builtin:packages", "status": "completed",
+                                         "findings": 0, "duration_s": round(time.monotonic() - st, 3),
+                                         "packages": len(pkg_inv["packages"])})
+    except Exception as exc:  # noqa: BLE001
+        pkg_inv = {"distro": None, "managers": [], "packages": []}
+        manifest["scanner_runs"].append({"name": "builtin:packages", "status": "failed", "findings": 0,
+                                         "error": f"{type(exc).__name__}: {exc}"})
+    manifest["packages"] = pkg_inv
 
     findings: list[Finding] = []
     for name, fn in SCANNERS:
@@ -180,6 +243,7 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
         manifest["scanner_runs"].append({"name": "builtin:components", "status": "failed", "findings": 0,
                                          "error": f"{type(exc).__name__}: {exc}"})
     findings += _identification_findings(ctx, arts, platforms)
+    findings += _appended_data_findings(ctx, arts)
     findings += _archive_anomaly_findings(ctx, result)
 
     # ---- identification summary --------------------------------------------
@@ -202,11 +266,13 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
         "platform": primary.name if primary else "Unknown",
         "platform_family": primary.family if primary else None,
         "platform_confidence": primary.confidence if primary else None,
-        "platform_version": (primary.version if primary else None) or container_meta.get("git_identity"),
+        "platform_version": _plain_version((primary.version if primary else None) or container_meta.get("git_identity")),
         "vehicle_type": primary.vehicle if primary else None,
         "platform_candidates": [p.to_dict() for p in platforms],
         "board_id": board_id,
         "board_hint": BOARD_IDS.get(board_id) if isinstance(board_id, int) else None,
+        "board_name": (primary.board if primary else None) or _container_board(container_meta),
+        "build": (primary.build if primary else None) or _container_build(container_meta),
         "container_metadata": container_meta,
         "ardupilot_descriptor": ap_desc,
         "details": root.details,
@@ -233,6 +299,42 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
     return manifest
 
 
+def _container_board(meta: dict) -> str | None:
+    """Board named by a .px4/.apj container ('summary', e.g. 'CubeOrange', 'PX4FMUv6C')."""
+    s = meta.get("summary")
+    return s[:64] if isinstance(s, str) and s.strip() and s.isprintable() else None
+
+
+def _container_build(meta: dict) -> dict | None:
+    """Build facts recorded by a .px4/.apj container: git commit and build time (UTC)."""
+    out: dict[str, str] = {}
+    h = meta.get("git_hash")
+    if isinstance(h, str) and re.fullmatch(r"[0-9a-f]{7,40}", h):
+        out["revision"] = h[:12]
+    t = meta.get("build_time")
+    if isinstance(t, int) and 946684800 <= t < 4102444800:  # 2000..2100
+        from datetime import UTC, datetime
+        dt = datetime.fromtimestamp(t, UTC)
+        out["date"], out["time"] = dt.strftime("%b %d %Y"), dt.strftime("%H:%M:%S UTC")
+    return out or None
+
+
+def _link_images_to_elf_symbols(arts: list[Artifact], ctx: ScanContext) -> None:
+    """A stripped image (e.g. from a .px4) that is byte-identical to the flash image derived from an ELF in the
+    same upload - same SHA-256 and same load address, as for a PX4 build's .px4 and .elf - is the same program,
+    so the ELF's function symbols apply to it."""
+    derived = {(a.sha256, a.details.get("flash_base")): a for a in arts
+               if a.format == "cortexm_raw" and a.details.get("derived_from_elf") and a.details.get("symbol_map")}
+    if not derived:
+        return
+    for a in arts:
+        src = derived.get((a.sha256, a.details.get("flash_base")))
+        if a.format != "cortexm_raw" or src is None or src.id == a.id or a.details.get("symbol_map"):
+            continue
+        a.details.update({"symbol_map": src.details["symbol_map"], "symbol_count": src.details.get("symbol_count"),
+                          "symbols_from": ctx.display.get(src.parent_id, ""), "identical_to": src.id})
+
+
 def _art_dict(a: Artifact, ctx: ScanContext) -> dict:
     d = a.to_dict()
     d["category"] = ctx.category.get(a.id)
@@ -242,6 +344,11 @@ def _art_dict(a: Artifact, ctx: ScanContext) -> dict:
         e.pop("imports", None)
         d["elf"] = e
     return d
+
+
+def _plain_version(v: str | None) -> str | None:
+    """'v1.17.0' (git tag style, e.g. PX4's git_identity) -> '1.17.0'."""
+    return v[1:] if v and len(v) > 1 and v[0] in "vV" and v[1].isdigit() else v
 
 
 def _primary_arch(arts: list[Artifact], ctx: ScanContext) -> tuple[str | None, int | None, str | None, str | None]:
@@ -261,7 +368,41 @@ def _primary_arch(arts: list[Artifact], ctx: ScanContext) -> tuple[str | None, i
     any_elf = Counter((e["arch"], e["bits"], e["endianness"], e["os_hint"]) for e in ctx.elf.values())
     if any_elf:
         return any_elf.most_common(1)[0][0]
+    for a in arts:
+        if a.details.get("esp_architecture"):
+            return f"{a.details['esp_architecture']} ({a.details['esp_chip']})", 32, "little", "bare-metal"
+    guesses = sorted((a for a in arts if a.details.get("arch_guess")), key=lambda a: -a.size)
+    if guesses:
+        g = guesses[0].details["arch_guess"]
+        return f"{g['architecture']} (opcode heuristic)", g["bits"], g["endianness"], None
     return None, None, None, None
+
+
+_MANIFEST_VALUE = re.compile(r"[\w.:+-]{1,40}")
+
+
+def _crazyflie_manifest(path: Path) -> dict | None:
+    """Release and targets from the manifest.json of a Bitcraze Crazyflie release bundle (fw_platform, release, and
+    per file: platform, target, type, release, repository); None if it is not one. Firmware-supplied: only short
+    word-like values are kept."""
+    try:
+        data = json.loads(path.read_bytes()[:64 * 1024])
+    except (ValueError, OSError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("files"), dict):
+        return None
+    ok = lambda v: isinstance(v, str) and _MANIFEST_VALUE.fullmatch(v) is not None  # noqa: E731
+    platform, release = data.get("fw_platform"), data.get("release")
+    entries = [e for e in list(data["files"].values())[:32] if isinstance(e, dict)]
+    if not (ok(platform) and ok(release)) or not any(
+            isinstance(e.get("repository"), str) and e["repository"].startswith("crazyflie") for e in entries):
+        return None
+    targets = {}
+    for e in entries:
+        if ok(e.get("target")) and ok(e.get("release")):
+            key = f"{e['target']} {e['type']}" if ok(e.get("type")) and e["type"] != "fw" else e["target"]
+            targets[key] = e["release"]
+    return {"platform": platform, "release": release, "targets": targets}
 
 
 def _identification_findings(ctx: ScanContext, arts: list[Artifact], platforms) -> list[Finding]:
@@ -271,18 +412,6 @@ def _identification_findings(ctx: ScanContext, arts: list[Artifact], platforms) 
     from .findings import Severity as S
     out = []
     root = arts[0]
-    for a in arts:
-        if a.format in ("dji_imah", "parrot_plf"):
-            out.append(Finding(
-                title=f"Vendor firmware container not unpacked: {a.format_description}",
-                description=("The file was identified as a proprietary drone vendor container. DJI IM*H modules "
-                             "are signed and typically encrypted; Parrot PLF unpacking is not implemented. Only "
-                             "identification and metadata were produced - this is not evidence of security or "
-                             "insecurity."),
-                severity=S.info, classification=C.info, confidence=K.high, source_tool="builtin:identify",
-                rule_id=f"vendor-container-{a.format}", affected_component=ctx.where(a),
-                remediation="Analyse a decrypted/unpacked image obtained through authorised means.",
-                evidence=[Evidence("string", a.format_description)]))
     if root.format in ("raw",) and len(arts) == 1:
         ent = file_entropy(ctx.paths[root.id])
         if ent > 7.6:
@@ -304,6 +433,58 @@ def _identification_findings(ctx: ScanContext, arts: list[Artifact], platforms) 
                 rule_id=f"extraction-{a.extraction}", affected_component=ctx.where(a),
                 remediation="Review the artifact manually or install the missing unpacker.",
                 evidence=[Evidence("string", a.extraction_note or "")]))
+    return out
+
+
+def _appended_data_findings(ctx: ScanContext, arts: list[Artifact]) -> list[Finding]:
+    """Data found after an executable's or an image's own data (analysed as an artifact of its own) is worth a
+    look in itself: appended to an executable it is a pattern of packed and self-extracting programs and of
+    droppers (suspicious); after an image or archive it may be a normal layout, such as an overlay (info). Data
+    inside an executable that no section or segment covers is suspicious too: linkers leave none."""
+    from .findings import Classification as C
+    from .findings import Confidence as K
+    from .findings import Evidence
+    from .findings import Severity as S
+    by_id = {a.id: a for a in arts}
+    out = []
+    for a in arts:
+        parent = by_id.get(a.parent_id) if a.parent_id is not None else None
+        if parent is None or a.origin != "carved" or not a.name.startswith(("trailing_", "uncovered_")):
+            continue
+        ev = Evidence("offset", f"{a.details.get('carved_offset', '?')}: {a.size:,} bytes ({a.format_description})",
+                      ctx.where(a))
+        if a.name.startswith("uncovered_"):
+            if parent.format == "elf":
+                out.append(Finding(
+                    title="Executable holds data that no section or segment covers",
+                    description=f"'{parent.name}' holds {a.size:,} bytes inside its own extent that none of its headers, "
+                                "sections or segments covers. Linkers leave no such data; it can be a payload placed "
+                                "where an overlay check would not look. The data was analysed separately. This is a "
+                                "pattern, not a confirmed problem.",
+                    severity=S.low, classification=C.suspicious, confidence=K.medium, source_tool="builtin:extract",
+                    rule_id="uncovered-data-in-executable", affected_component=ctx.where(parent),
+                    remediation="Check what the data is and how the program was built or packed.",
+                    evidence=[ev], tags=["extraction"]))
+            continue
+        if parent.format == "elf":
+            out.append(Finding(
+                title="Executable carries appended data (overlay)",
+                description=f"'{parent.name}' has {a.size:,} bytes after its own segments and sections. Self-extracting "
+                            "and packed programs keep their payload there, and so can a dropper; the appended data was "
+                            "analysed separately. This is a pattern, not a confirmed problem.",
+                severity=S.low, classification=C.suspicious, confidence=K.medium, source_tool="builtin:extract",
+                rule_id="appended-to-executable", affected_component=ctx.where(parent),
+                remediation="Check what the appended data is and whether the vendor ships the program packed.",
+                evidence=[ev], tags=["extraction"]))
+        else:
+            out.append(Finding(
+                title=f"Data after the end of a {parent.format_description}",
+                description=f"{a.size:,} bytes follow the end of '{parent.name}' and were analysed separately (an "
+                            "overlay or another image may sit there, or something added later).",
+                severity=S.info, classification=C.info, confidence=K.high, source_tool="builtin:extract",
+                rule_id="data-after-image", affected_component=ctx.where(parent),
+                remediation="Check that the data after the image belongs to the firmware layout.",
+                evidence=[ev], tags=["extraction"]))
     return out
 
 

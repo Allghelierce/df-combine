@@ -27,6 +27,37 @@ export interface Finding {
   cwe: string | null;
   references: string[];
   tags: string[];
+  /** Installed package owning the affected file (from the package manager's file lists), e.g. "openssh-server 1:8.4p1-5". */
+  package?: string | null;
+}
+
+export interface VulnRef {
+  id: string;
+  severity: string | null;
+  score: number | null;
+  fixed: string | null;
+  aliases: string[];
+  source: string;
+}
+
+export interface PackageItem {
+  name: string;
+  version: string;
+  manager: string;
+  source?: string | null;
+  source_version?: string | null;
+  arch?: string | null;
+  database?: string;
+  purl?: string;
+  owned_files?: number | null;
+  vulnerabilities?: VulnRef[];
+}
+
+export interface PackageInventory {
+  distro: { id: string; version_id: string; codename?: string; name?: string } | null;
+  managers: { type: string; database: string; count: number }[];
+  total: number;
+  items: PackageItem[];
 }
 
 export interface PlatformCandidate {
@@ -57,6 +88,8 @@ export interface Identification {
   platform_candidates: PlatformCandidate[];
   board_id: number | null;
   board_hint: string | null;
+  board_name?: string | null;
+  build?: BuildInfo | null;
   container_metadata: Record<string, unknown>;
   ardupilot_descriptor?: Record<string, string | number> | null;
   details: Record<string, unknown>;
@@ -86,6 +119,9 @@ export interface Component {
   version: string;
   sources: string[];
   method: string;
+  variant?: string | null;
+  vulnerabilities?: VulnRef[];
+  vulnerabilities_note?: string;
 }
 
 export interface ExtractionSummary {
@@ -116,6 +152,7 @@ export interface Scan {
   identification: Identification | null;
   extraction_summary: ExtractionSummary | null;
   components: Component[];
+  packages?: { distro: PackageInventory["distro"]; managers: PackageInventory["managers"]; count: number; vulnerable: number } | null;
   severity_counts: Record<Severity, number> | null;
   classification_counts: Record<Classification, number> | null;
   risk_score: number | null;
@@ -123,6 +160,32 @@ export interface Scan {
   events?: ScanEvent[];
   finding_count?: number;
   previous_scans_same_hash?: number;
+  can_modify?: boolean;
+}
+
+export interface BuildInfo {
+  version?: string;
+  board?: string;
+  revision?: string;
+  date?: string;
+  time?: string;
+}
+
+export interface ImageInfo {
+  flash_base?: string;
+  flash_base_source?: string;
+  derived_from_elf?: boolean;
+  symbol_count?: number;
+  symbols_from?: string;
+  identical_to?: number;
+  /** where a carved or trailing artifact starts in its parent */
+  carved_offset?: string;
+  /** data before an archive (e.g. a vendor header) */
+  prepended_bytes?: number;
+  /** 0xFF/0x00 padding after the data */
+  trailing_padding_bytes?: number;
+  /** a few bytes after the data (size field, checksum), not analysed */
+  trailing_bytes?: number;
 }
 
 export interface Artifact {
@@ -141,6 +204,7 @@ export interface Artifact {
   extraction: string | null;
   extraction_note: string | null;
   elf?: Record<string, unknown>;
+  image?: ImageInfo;
 }
 
 export interface ToolStatus {
@@ -161,7 +225,8 @@ export interface AppConfig {
   sandbox_mode: string;
   sandbox_detail: string;
   worker_mode: string;
-  auth_required: boolean;
+  auth_mode: string;
+  role: "admin" | "analyst" | "viewer";
 }
 
 export interface Stats {
@@ -172,28 +237,35 @@ export interface Stats {
   platforms: Record<string, number>;
 }
 
-const KEY_STORAGE = "dfa_api_key";
+export type ExportKind = "json" | "pdf" | "sarif" | "sbom";
+export const EXPORTS: Record<ExportKind, { path: string; suffix: string; label: string }> = {
+  pdf: { path: "report.pdf", suffix: "-report.pdf", label: "PDF report" },
+  json: { path: "report.json", suffix: "-report.json", label: "JSON" },
+  sarif: { path: "report.sarif", suffix: ".sarif", label: "SARIF" },
+  sbom: { path: "sbom.cdx.json", suffix: "-sbom.cdx.json", label: "SBOM (CycloneDX)" },
+};
 
-export function getApiKey(): string | null {
-  try {
-    return localStorage.getItem(KEY_STORAGE);
-  } catch {
-    return null;
-  }
+/** Session auth uses an HttpOnly cookie; state-changing requests carry this header (CSRF protection). */
+const CSRF = { "X-DFA-CSRF": "1" };
+
+function headers(method = "GET"): HeadersInit {
+  return method === "GET" || method === "HEAD" ? {} : CSRF;
 }
 
-export function setApiKey(key: string | null): void {
-  try {
-    if (key) localStorage.setItem(KEY_STORAGE, key);
-    else localStorage.removeItem(KEY_STORAGE);
-  } catch {
-    /* storage unavailable */
-  }
+export interface User {
+  id: number;
+  username: string;
+  role: "admin" | "analyst" | "viewer";
+  disabled: boolean;
+  created_at: string | null;
+  last_login_at: string | null;
 }
 
-function headers(): HeadersInit {
-  const key = getApiKey();
-  return key ? { "X-API-Key": key } : {};
+export interface Me {
+  user: User | null;
+  role: "admin" | "analyst" | "viewer";
+  via: string;
+  auth_mode: string;
 }
 
 export class ApiError extends Error {
@@ -203,7 +275,14 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(path, { ...init, headers: { ...headers(), ...(init.headers ?? {}) } });
+  const res = await fetch(path, {
+    credentials: "same-origin",
+    ...init,
+    headers: { ...headers(init.method ?? "GET"), ...(init.body && !(init.body instanceof FormData) ? { "Content-Type": "application/json" } : {}), ...(init.headers ?? {}) },
+  });
+  if (res.status === 401 && !path.startsWith("/api/auth/")) {
+    window.dispatchEvent(new Event("dfa:unauthorized"));
+  }
   if (!res.ok) {
     let detail = res.statusText;
     try {
@@ -230,6 +309,26 @@ export interface Comparison {
 }
 
 export const api = {
+  authStatus: () => request<{ auth_mode: string; setup_required: boolean }>("/api/auth/status"),
+  me: () => request<Me>("/api/auth/me"),
+  login: (username: string, password: string) =>
+    request<{ user: User }>("/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
+  logout: () => request<{ status: string }>("/api/auth/logout", { method: "POST" }),
+  users: () => request<{ items: User[] }>("/api/users"),
+  createUser: (username: string, password: string, role: string) =>
+    request<User>("/api/users", { method: "POST", body: JSON.stringify({ username, password, role }) }),
+  updateUser: (id: number, patch: Partial<{ role: string; disabled: boolean; password: string }>) =>
+    request<User>(`/api/users/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  tokens: () =>
+    request<{ items: { id: number; label: string; created_at: string; expires_at: string | null; last_used_at: string | null }[] }>(
+      "/api/auth/tokens",
+    ),
+  createToken: (label: string, days: number) =>
+    request<{ token: string; id: number; expires_at: string }>("/api/auth/tokens", {
+      method: "POST",
+      body: JSON.stringify({ label, days }),
+    }),
+  revokeToken: (id: number) => request<void>(`/api/auth/tokens/${id}`, { method: "DELETE" }),
   compare: (base: string, target: string) =>
     request<Comparison>(`/api/compare?base=${encodeURIComponent(base)}&target=${encodeURIComponent(target)}`),
   config: () => request<AppConfig>("/api/config"),
@@ -246,6 +345,12 @@ export const api = {
     request<{ total: number; items: Artifact[]; links: { path: string; kind: string; target: string | null }[]; link_count: number }>(
       `/api/scans/${encodeURIComponent(id)}/artifacts?limit=5000`,
     ),
+  packages: (id: string, params: { vulnerable?: boolean; q?: string } = {}) => {
+    const qs = new URLSearchParams({ limit: "20000" });
+    if (params.vulnerable) qs.set("vulnerable", "true");
+    if (params.q) qs.set("q", params.q);
+    return request<PackageInventory>(`/api/scans/${encodeURIComponent(id)}/packages?${qs}`);
+  },
   rescan: (id: string) => request<{ status: string }>(`/api/scans/${encodeURIComponent(id)}/rescan`, { method: "POST" }),
   remove: (id: string) => request<void>(`/api/scans/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
@@ -253,8 +358,8 @@ export const api = {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", "/api/scans");
-      const key = getApiKey();
-      if (key) xhr.setRequestHeader("X-API-Key", key);
+      xhr.withCredentials = true;
+      xhr.setRequestHeader("X-DFA-CSRF", "1");
       xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(Math.round((100 * e.loaded) / e.total));
       xhr.onload = () => {
         let body: { detail?: string } & Partial<Scan> = {};
@@ -273,14 +378,14 @@ export const api = {
     });
   },
 
-  async download(id: string, kind: "json" | "pdf"): Promise<void> {
-    const res = await fetch(`/api/scans/${encodeURIComponent(id)}/report.${kind}`, { headers: headers() });
+  async download(id: string, kind: ExportKind): Promise<void> {
+    const res = await fetch(`/api/scans/${encodeURIComponent(id)}/${EXPORTS[kind].path}`, { credentials: "same-origin" });
     if (!res.ok) throw new ApiError(res.status, `Report download failed (HTTP ${res.status})`);
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `dfa-report-${id.slice(0, 8)}.${kind}`;
+    a.download = `dfa-${id.slice(0, 8)}${EXPORTS[kind].suffix}`;
     document.body.appendChild(a);
     a.click();
     a.remove();

@@ -348,3 +348,20 @@ input[type="search"] { flex: 1; min-width: 180px; }
   .pipeline { grid-template-columns: 1fr 1fr; }
   .table-scroll, .panel-body { overflow-x: auto; }
 }
+
+/* ---------- auth ---------- */
+.login-wrap { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
+.login { width: min(400px, 100%); }
+.login .panel-body { display: flex; flex-direction: column; gap: 14px; }
+.login label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.06em; }
+.login input { width: 100%; }
+.login-brand { margin-bottom: 6px; }
+.login pre { white-space: pre-wrap; margin: 6px 0; }
+.user-chip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+
+/* packages / vulnerability lists */
+.stack { display: flex; flex-direction: column; gap: 16px; }
+.pill.pkg { color: var(--text-2); border-style: dashed; font-family: var(--mono, ui-monospace, monospace); font-weight: 500; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
+.pill.sev-critical, .pill.sev-high, .pill.sev-medium, .pill.sev-low { margin-left: 0; margin-right: 4px; }
+.table.compact td { padding: 3px 8px; }
+details > summary.small { cursor: pointer; }

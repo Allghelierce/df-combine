@@ -1,52 +1,125 @@
 # Drone Firmware Analyzer - single-node deployment.
 #
-#   make sandbox-image        # build the isolated analysis image first
-#   docker compose up --build
+#   mkdir -p var && sudo chown 10002:10002 var
+#   DFA_BOOTSTRAP_ADMIN_PASSWORD=... docker compose up --build
+#   (behind a TLS-intercepting proxy: copy its CA to ./var/proxy-ca.crt and build with
+#    DFA_EXTRA_CA_CERT=./var/proxy-ca.crt docker compose build)
 #
-# The worker needs the Docker socket to start network-less sandbox containers for
-# each scan. Because bind mounts are resolved by the host daemon, DFA_SANDBOX_HOST_DATA_DIR
-# must be the *host* path of the data directory (./var by default).
+# Only the "broker" service can reach the Docker daemon. The API and the worker - the processes
+# that parse requests and handle untrusted firmware results - get no Docker socket; they ask the
+# broker over a Unix socket to run one of a few fixed job profiles. See docs/SECURITY.md.
+#
+# Bind mounts for the per-scan sandbox containers are resolved by the host daemon, so
+# DFA_SANDBOX_HOST_DATA_DIR must be the *host* path of the data directory (./var by default).
 services:
   sandbox-image:
     image: dfa-sandbox:latest
     build:
       context: .
       dockerfile: docker/sandbox.Dockerfile
+      secrets: [extra_ca]
     command: ["true"]
     restart: "no"
     network_mode: none
 
-  api:
+  broker:
     build:
       context: .
       dockerfile: docker/app.Dockerfile
-    image: dfa-app:latest
-    ports:
-      - "127.0.0.1:8000:8000"
+      target: broker
+      secrets: [extra_ca]
+    image: dfa-broker:latest
+    network_mode: none
+    restart: unless-stopped
+    mem_limit: ${DFA_BROKER_MEMORY:-1g}
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]  # hand scan directories to the sandbox UIDs and back
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp"]
     environment:
-      DFA_WORKER_MODE: external
-      DFA_SANDBOX_MODE: docker
       DFA_SANDBOX_HOST_DATA_DIR: ${PWD}/var
-      DFA_API_KEY: ${DFA_API_KEY:-}
-      DFA_FACT_URL: ${DFA_FACT_URL:-}
+      DFA_GHIDRA_SCRIPTS_HOST_DIR: ${PWD}/backend/dfa/ghidra_scripts
+      DFA_BROKER_TOKEN: ${DFA_BROKER_TOKEN:-}
+      DOCKER_CONFIG: /tmp/.docker  # the CLI's config dir; the root filesystem is read-only
+      # Limits and images are decided here, not by the worker.
+      DFA_SANDBOX_MEMORY: ${DFA_SANDBOX_MEMORY:-2g}
+      DFA_SANDBOX_RUNTIME: ${DFA_SANDBOX_RUNTIME:-}   # e.g. runsc (gVisor) if installed on the host
+      DFA_SANDBOX_MAX_JOBS: ${DFA_SANDBOX_MAX_JOBS:-2}
+      DFA_MAX_WORK_DIR_MB: ${DFA_MAX_WORK_DIR_MB:-8192}
+      DFA_CWE_CHECKER_IMAGE: ${DFA_CWE_CHECKER_IMAGE:-fkiecad/cwe_checker:latest}
+      DFA_GHIDRA_IMAGE: ${DFA_GHIDRA_IMAGE:-fkiecad/cwe_checker:latest}
     volumes:
       - ./var:/data
+      - broker-socket:/run/dfa
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       sandbox-image:
         condition: service_completed_successfully
 
+  api:
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+      target: app
+      secrets: [extra_ca]
+    image: dfa-app:latest
+    ports:
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+    mem_limit: ${DFA_API_MEMORY:-2g}  # bounds what a hostile manifest/report can cost
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp"]
+    environment:
+      DFA_WORKER_MODE: external
+      DFA_SANDBOX_MODE: broker
+      DFA_BROKER_SOCKET: /run/dfa/broker.sock
+      DFA_BROKER_TOKEN: ${DFA_BROKER_TOKEN:-}
+      DFA_BOOTSTRAP_ADMIN: ${DFA_BOOTSTRAP_ADMIN:-admin}
+      DFA_BOOTSTRAP_ADMIN_PASSWORD: ${DFA_BOOTSTRAP_ADMIN_PASSWORD:-}
+      DFA_SESSION_COOKIE_SECURE: ${DFA_SESSION_COOKIE_SECURE:-false}  # true behind HTTPS
+      DFA_FACT_URL: ${DFA_FACT_URL:-}
+    extra_hosts: ["host.docker.internal:host-gateway"]  # e.g. DFA_FACT_URL=http://host.docker.internal:5000
+    volumes:
+      - ./var:/data
+      # separate mount: a mount point cannot be renamed, so the worker can never replace the work root
+      # (the bind-mount sources of sandbox jobs live below it)
+      - ./var/work:/data/work
+      - broker-socket:/run/dfa:ro
+    depends_on:
+      - broker
+
   worker:
     image: dfa-app:latest
     command: ["python", "-m", "dfa.worker"]
+    restart: unless-stopped  # interrupted scans are re-queued on start
+    mem_limit: ${DFA_WORKER_MEMORY:-4g}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp"]
     environment:
-      DFA_SANDBOX_MODE: docker
-      DFA_SANDBOX_HOST_DATA_DIR: ${PWD}/var
+      DFA_SANDBOX_MODE: broker
+      DFA_BROKER_SOCKET: /run/dfa/broker.sock
+      DFA_BROKER_TOKEN: ${DFA_BROKER_TOKEN:-}
       DFA_WORKER_THREADS: ${DFA_WORKER_THREADS:-2}
-      DFA_FACT_URL: ${DFA_FACT_URL:-}
-      DFA_CWE_CHECKER_IMAGE: ${DFA_CWE_CHECKER_IMAGE:-ghcr.io/fkie-cad/cwe_checker:stable}
+      DFA_FACT_URL: ${DFA_FACT_URL:-}  # FACT must listen on an address containers can reach
+      DFA_FACT_TIMEOUT_S: ${DFA_FACT_TIMEOUT_S:-3600}
+    extra_hosts: ["host.docker.internal:host-gateway"]
     volumes:
       - ./var:/data
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ./var/work:/data/work
+      - broker-socket:/run/dfa:ro
     depends_on:
       - api
+
+volumes:
+  broker-socket:
+
+secrets:
+  # Optional CA certificate of a TLS-intercepting proxy, used only while building images.
+  extra_ca:
+    # (must be inside the project directory, e.g. ./var/proxy-ca.crt; the default is an empty file)
+    file: ${DFA_EXTRA_CA_CERT:-./docker/no-extra-ca.pem}

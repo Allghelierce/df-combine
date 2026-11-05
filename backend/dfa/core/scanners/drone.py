@@ -32,6 +32,7 @@ ARDUPILOT_PARAMS = {
                          "BRD_SAFETY_DEFLT=0 disables the safety switch at boot."),
 }
 
+SIM_AIRFRAME = re.compile(r"(_sih\b|\.hil$|_hil\b|sitl|_sim\b|\bsih_)", re.I)
 PX4_PARAM_RE = re.compile(r"^\s*param\s+(?:set|set-default)\s+([A-Z0-9_]+)\s+(-?[\w.]+)")
 AP_PARAM_RE = re.compile(r"^\s*([A-Z][A-Z0-9_]{2,16})\s*[,= \t]\s*(-?[\d.]+)\s*$")
 
@@ -90,7 +91,16 @@ def _px4_params(ctx, art, text) -> list[Finding]:
                 is_magic = int(float(val)) == magic
             except ValueError:
                 is_magic = False
-            if is_magic:
+            simulated = bool(SIM_AIRFRAME.search(path.rsplit("/", 1)[-1]))
+            if is_magic and simulated:
+                out.append(_f(title + " (simulation airframe)", desc + " The file is a simulation/hardware-in-the-"
+                              "loop airframe (SIH/HIL/SITL), where disabling this check is expected; it does not "
+                              "affect real vehicles unless this airframe is selected on hardware.", S.info, C.info,
+                              K.high, f"px4-{name.lower()}-sim", ctx.where(art),
+                              "No action needed unless the simulation airframe can be selected on real hardware.",
+                              [Evidence("config", line.strip()[:200], f"{path}:{n}")], "CWE-1188",
+                              ["drone", "px4", "safety", "simulation"]))
+            elif is_magic:
                 out.append(_f(title, desc + " This is set in a startup script shipped with the firmware, so it "
                               "applies to every vehicle using this build/airframe.", sev, C.detected, K.high,
                               f"px4-{name.lower()}", ctx.where(art),

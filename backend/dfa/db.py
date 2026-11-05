@@ -34,7 +34,25 @@ def init_engine(url: str) -> Engine:
     _SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False, future=True)
     from . import models  # noqa: F401 - register tables
     Base.metadata.create_all(_engine)
+    _migrate(_engine)
     return _engine
+
+
+# Additive schema migrations for databases created by earlier versions (create_all never alters tables).
+MIGRATIONS: list[tuple[str, str, str]] = [
+    ("scans", "owner_id", "ALTER TABLE scans ADD COLUMN owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL"),
+    ("scans", "packages", "ALTER TABLE scans ADD COLUMN packages JSON"),
+    ("findings", "package", "ALTER TABLE findings ADD COLUMN package VARCHAR(256)"),
+]
+
+
+def _migrate(engine: Engine) -> None:
+    from sqlalchemy import inspect, text
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table, column, ddl in MIGRATIONS:
+            if table in insp.get_table_names() and column not in {c["name"] for c in insp.get_columns(table)}:
+                conn.execute(text(ddl))
 
 
 def get_engine() -> Engine:

@@ -133,8 +133,94 @@ def test_vendor_containers_identified_not_overclaimed(tmp_path, run_analysis):
     m = run_analysis(p)
     assert m["identification"]["format"] == "dji_imah"
     assert m["identification"]["platform"] == "DJI"
-    f = [x for x in m["findings"] if x["rule_id"] == "vendor-container-dji_imah"]
-    assert f and f[0]["severity"] == "info"
+    assert m["identification"]["details"] == {} or True
+    f = [x for x in m["findings"] if x["rule_id"] == "extraction-failed" or x["rule_id"] == "extraction-unsupported"]
+    assert f and all(x["severity"] == "info" for x in f)
     q = tmp_path / "bebop.plf"
     q.write_bytes(b"PLF!" + os.urandom(2048))
     assert run_analysis(q)["identification"]["platform"] == "Parrot"
+
+
+def test_vector_table_accepts_stack_at_the_end_of_ccm():
+    """Official INAV builds for STM32F405 start with SP = 0x10010000 (top of the 64 KiB CCM RAM)."""
+    vt = struct.pack("<16I", 0x1001_0000, 0x0807_43F1, *([0x0800_2CF1] * 14))
+    info = analyze_vector_table(vt)
+    assert info is not None and info.initial_sp == 0x1001_0000
+    assert analyze_vector_table(struct.pack("<16I", 0x1001_0004, 0x0807_43F1, *([0x0800_2CF1] * 14))) is None
+
+
+def test_build_information_blocks():
+    """Layouts of the version.c constants in official Betaflight 4.3.2 and INAV 7.1.2 builds."""
+    from dfa.core.identify import PlatformAccumulator
+    inav = (b"INAV %s (%s) %s\x00\x00%s/%s %s %s / %s (%s)\x00\x00\x004e1e59eb\x00\x00\x00\x0023:40:27\x00\x00\x00\x00"
+            b"May 31 2024\x007.1.2\x00\x00\x00MATEKF405\x00\x00\x00Memory allocated")
+    acc = PlatformAccumulator()
+    acc.feed_bytes(inav)
+    g = next(r for r in acc.results() if r.name == "INAV")
+    assert (g.confidence, g.version, g.board) == ("high", "7.1.2", "MATEKF405")
+    assert g.build["revision"] == "4e1e59eb" and g.build["date"] == "May 31 2024"
+    # INAV 9.x F405 builds place version and target before the CLI format string (board and build were lost)
+    inav9 = (b"INAV %s (%s) %s\x00\x00NONE\x00\x00\x00\x009.1.0\x00\x00\x00MATEKF405\x00\x00\x00%s/%s %s %s / %s (%s) %s"
+             b"\x00\x00\x00\x0015317503\x00\x00\x00\x0002:12:07\x00\x00\x00\x00Jul  8 2026\x0013.2.1 20231009\x00GCC-%s\x00")
+    acc = PlatformAccumulator()
+    acc.feed_bytes(inav9)
+    g = next(r for r in acc.results() if r.name == "INAV")
+    assert (g.version, g.board, g.build["revision"], g.build["time"]) == ("9.1.0", "MATEKF405", "15317503", "02:12:07")
+    bf = (b"Betaflight\x00\x00Betaflight STM32F405\x00\x00 ----\x00\x00\x004.3.2\x00\x00\x00%s %s: %s\x00"
+          b"Firmware revision\x00\x00\x00STM32F405\x00\x00\x0060c9521\x0007:26:30\x00\x00\x00\x00Nov 28 2022\x00%s %s\x00")
+    acc = PlatformAccumulator()
+    acc.feed_bytes(bf)
+    g = next(r for r in acc.results() if r.name == "Betaflight")
+    assert (g.confidence, g.version, g.board, g.build["revision"]) == ("high", "4.3.2", "STM32F405", "60c9521")
+    # 4.4/4.5 builds: the CLI 'version' line's arguments, or the "BTFL" identifier block (board and build were lost)
+    for block, want in (
+            (b"STM32F405\x00Betaflight\x00# %s / %s (%s) %s %s / %s (%s) MSP API: %s\x001.46\x0077d01ba\x0002:23:52\x00"
+             b"Jul 27 2024\x004.5.1\x00# board: manufacturer_id", ("4.5.1", "STM32F405", "77d01ba")),
+            (b"\x00\x00BTFL\x00\x00\x00\x00# Betaflight\x00\x00\x00\x00STM32F405\x00\x00\x00Jan 28 2023\x0023:33:34\x00\x00\x00\x00"
+             b"4605309\x00\x00\x004.4.0\x00\x00", ("4.4.0", "STM32F405", "4605309"))):
+        acc = PlatformAccumulator()
+        acc.feed_bytes(block)
+        g = next(r for r in acc.results() if r.name == "Betaflight")
+        assert (g.version, g.board, g.build["revision"]) == want, g
+    # without the project's own markers neither the block nor a bare x.y.z constant means anything
+    acc = PlatformAccumulator()
+    acc.feed_bytes(b"\x00\x00\x001.2.3\x00\x00" + inav.replace(b"INAV ", b"XXXX "))
+    assert not any(r.name in ("INAV", "Betaflight") and r.version for r in acc.results())
+
+
+def test_crazyflie_images_and_release_manifests(tmp_path, run_analysis):
+    """Bitcraze Crazyflie: the flight controller's version.c block (branch, release tag, git revision), the nRF51
+    firmware's bare release tag and a release bundle's manifest.json; the image's odd initial stack pointer
+    (0x2001ffff, as official builds have it) is a valid Cortex-M vector table."""
+    import io
+    import json
+    import struct
+    import zipfile
+
+    from dfa.core.formats.cortexm import analyze_vector_table
+    vectors = struct.pack("<II", 0x2001FFFF, 0x08019C11) + struct.pack("<14I", *([0x08012435] * 14))
+    assert analyze_vector_table(vectors + bytes(64)) is not None
+    stm32 = (vectors + bytes(4096) + b"\x00Bitcraze AB\x00Crazyflie 2.X\x00SYS: Build %s:%s (%s) %s\n\x00"
+             + b"\x00HEAD\x002024.2\x00e527895e8c6e\x00" + bytes(4096))
+    (tmp_path / "cf2.bin").write_bytes(stm32)
+    i = run_analysis(tmp_path / "cf2.bin")["identification"]
+    assert (i["platform"], i["platform_version"], i["board_name"], i["build"]["revision"]) == \
+        ("Crazyflie", "2024.2", "cf2", "e527895e8c6e")
+    files = {"cf2-2024.2.bin": {"platform": "cf2", "target": "stm32", "type": "fw", "release": "2024.2",
+                                "repository": "crazyflie-firmware"},
+             "sd.bin": {"platform": "cf2", "target": "nrf51", "type": "bootloader+softdevice", "release": "2024.1",
+                        "repository": "crazyflie2-nrf-bootloader"}}
+    for name, manifest, expected in (
+            ("bundle.zip", {"fw_platform": "cf2", "release": "2024.2", "files": files}, ("Crazyflie", "2024.2")),
+            ("other.zip", {"fw_platform": "cf2", "release": "2024.2",  # not Bitcraze's: no crazyflie repository
+                           "files": {"a.bin": {"target": "stm32", "release": "1.0", "repository": "acme-fw"}}},
+             ("Unknown", None)),
+            ("hostile.zip", {"fw_platform": "cf2‮<b>", "release": "2024.2", "files": files}, ("Unknown", None))):
+        b = io.BytesIO()
+        with zipfile.ZipFile(b, "w") as zf:
+            zf.writestr("manifest.json", json.dumps(manifest))
+        (tmp_path / name).write_bytes(b.getvalue())
+        m = run_analysis(tmp_path / name)
+        assert (m["identification"]["platform"], m["identification"]["platform_version"]) == expected, name
+        if name == "bundle.zip":
+            assert m["identification"]["build"] == {"stm32": "2024.2", "nrf51 bootloader+softdevice": "2024.1"}

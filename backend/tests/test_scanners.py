@@ -128,3 +128,83 @@ def test_more_credentials(tmp_path, run_analysis):
     }, run_analysis)
     assert {"wpa-supplicant-psk", "wireguard-private-key", "credential-file"} <= set(r)
     assert "supersecret99" not in str(r) and "yAnz5TF+lXXJte14tji3zlMNq" not in str(r)
+
+
+def test_aggregate_repeated_findings():
+    from dfa.core.findings import Classification, Confidence, Evidence, Finding, Severity, aggregate
+    fs = [Finding("Power supply check disabled", "d", Severity.low, Classification.detected, Confidence.high,
+                  "builtin:drone", "px4-cbrk_supply_chk", f"fw.px4 > image.bin > etc.cromfs > /init.d/airframes/{n}",
+                  "r", [Evidence("config", "param set CBRK_SUPPLY_CHK 894281", f"/init.d/airframes/{n}:3")])
+          for n in ("a", "b", "c", "d")]
+    other = Finding("x", "d", Severity.high, Classification.detected, Confidence.high, "builtin:secrets", "r2", "y", "r")
+    out = aggregate(fs + [other])
+    assert len(out) == 2
+    agg = next(f for f in out if f.rule_id == "px4-cbrk_supply_chk")
+    assert agg.title.endswith("(4 files)") and len(agg.evidence) == 4
+    assert agg.affected_component.startswith("fw.px4 > image.bin > etc.cromfs")
+
+
+def test_simulation_airframe_is_informational(tmp_path, run_analysis):
+    r = _scan_tree(tmp_path, {"etc/init.d/airframes/1100_rc_quad_x_sih.hil": "param set-default CBRK_SUPPLY_CHK 894281\n",
+                              "etc/init.d/rc.uuv_defaults": "param set-default CBRK_SUPPLY_CHK 894281\n"}, run_analysis)
+    assert r["px4-cbrk_supply_chk-sim"]["severity"] == "info"
+    assert r["px4-cbrk_supply_chk"]["severity"] == "low"
+
+
+def test_pem_marker_constants_in_libraries_are_not_keys(tmp_path, run_analysis):
+    """Real libraries (e.g. libgnutls) contain the PEM BEGIN/END literals with other strings between
+    them. That must not be reported as an embedded key; a genuine key inside a binary still is."""
+    from tests.factory import fake_pem
+    consts = (b"\x7fELF" + bytes(60) + b"-----BEGIN RSA PRIVATE KEY-----\x00Proc-Type: \x00%s: %d\x00"
+              b"unsupported format\x00-----END RSA PRIVATE KEY-----\x00" + bytes(64))
+    lib = tmp_path / "libtls.so"
+    lib.write_bytes(consts)
+    assert not [f for f in run_analysis(lib)["findings"] if f["rule_id"].startswith("pem-private-key")]
+    blob = tmp_path / "fw.bin"
+    blob.write_bytes(bytes(256) + fake_pem().encode() + bytes(256))
+    found = [f for f in run_analysis(blob)["findings"] if f["rule_id"] == "pem-private-key"]
+    assert found and found[0]["classification"] == "detected"
+
+
+def test_pem_body_validation():
+    from dfa.core.scanners.secrets import pem_body
+    from tests.factory import fake_pem
+    inner = fake_pem().split("-----\n", 1)[1].rsplit("\n-----END", 1)[0]
+    assert pem_body(inner) and len(pem_body(inner)) > 500
+    enc = "Proc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123456789ABCDEF0123456789ABCDEF\n\n" + inner
+    assert pem_body(enc) == pem_body(inner)
+    assert pem_body("\x00Proc-Type: \x00%s: %d\x00unsupported format\x00") is None
+    assert pem_body("Version: GnuPG v2\n\n" + inner + "\n=Qx1Z") == pem_body(inner)  # PGP armor checksum
+
+
+def test_config_vocabulary_is_not_a_credential(tmp_path, run_analysis):
+    import tarfile
+    files = {
+        "etc/nsswitch.conf": "passwd:         files\ngroup:          files\nshadow:         files\n",
+        "usr/lib/arm-linux-gnueabihf/perl-base/Config_heavy.pl": "d_pwpasswd='define'\ni_pwd='define'\n",
+        "usr/share/pam-configs/unix": "Name: Unix authentication\nPassword-Type: Primary\n",
+        "etc/app/service.conf": "db_password = Sup3rS3cret-2026\n",
+    }
+    root = tmp_path / "tree"
+    for rel, content in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(content)
+    out = tmp_path / "t.tar"
+    with tarfile.open(out, "w") as tf:
+        tf.add(root, arcname=".")
+    found = [f for f in run_analysis(out)["findings"] if f["rule_id"] == "hardcoded-credential-assignment"]
+    assert [f["affected_component"].rsplit(" > ", 1)[-1] for f in found] == ["/etc/app/service.conf"]
+
+
+def test_crypto_library_self_test_keys_are_informational(tmp_path, run_analysis):
+    """GnuTLS embeds complete public self-test keys; in a crypto library that is context, not a leak."""
+    from tests.factory import fake_pem
+    blob = b"\x7fELF" + bytes(60) + fake_pem().encode() + bytes(64)
+    lib = tmp_path / "libgnutls.so.30.29.1"
+    lib.write_bytes(blob)
+    fs = run_analysis(lib)["findings"]
+    assert [(f["rule_id"], f["severity"], f["classification"]) for f in fs if "key" in f["rule_id"]] == \
+        [("crypto-library-test-key", "info", "info")]
+    app = tmp_path / "telemetryd"
+    app.write_bytes(blob)
+    assert any(f["rule_id"] == "pem-private-key" and f["severity"] == "high" for f in run_analysis(app)["findings"])

@@ -38,6 +38,12 @@ dev-ui:
 build:
 	cd frontend && npm run build
 
+# Sandbox broker: the only process that talks to Docker (run it as a user in the docker group).
+BROKER_SOCKET ?= $(CURDIR)/backend/var/broker.sock
+broker:
+	mkdir -p backend/var && cd backend && ../$(VENV)/bin/python -m dfa.broker --socket $(BROKER_SOCKET)
+
 # Production-like single process: API + in-process worker + built UI on :8000
+# (with the broker: DFA_SANDBOX_MODE=broker DFA_BROKER_SOCKET=backend/var/broker.sock make run)
 run: build
 	cd backend && ../$(VENV)/bin/uvicorn dfa.main:app_factory --factory --host 127.0.0.1 --port 8000

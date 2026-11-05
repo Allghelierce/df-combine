@@ -1,0 +1,1215 @@
+{
+ "alpine3.15.0-arm64-rootfs.tar.gz": {
+  "components": [
+   "busybox 1.34.1",
+   "openssl 1.1.1l",
+   "zlib 1.2.11"
+  ],
+  "extraction": {
+   "artifacts": 95,
+   "failed": [],
+   "formats": {
+    "elf": 17,
+    "empty": 6,
+    "gzip": 1,
+    "tar": 2,
+    "text": 69
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:binary:elf-dangerous-imports": 1,
+   "builtin:binary:elf-debug-info": 1,
+   "builtin:binary:elf-no-canary": 1,
+   "builtin:components:outdated-busybox": 1,
+   "builtin:components:outdated-openssl": 1,
+   "builtin:components:outdated-zlib": 1
+  },
+  "identification": {
+   "architecture": "AArch64",
+   "bits": 64,
+   "board_id": null,
+   "board_name": null,
+   "endianness": "little",
+   "format": "gzip",
+   "os_hint": "linux",
+   "platform": "Unknown",
+   "platform_version": null,
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 14,
+   "distro": "alpine",
+   "owned_files": 73
+  }
+ },
+ "ardupilot/CubeOrange_bl.bin": {
+  "components": [],
+  "extraction": {
+   "artifacts": 1,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": null,
+   "endianness": "little",
+   "format": "cortexm_raw",
+   "os_hint": "bare-metal",
+   "platform": "ArduPilot",
+   "platform_version": null,
+   "vehicle_type": "AP_Bootloader"
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "ardupilot/CubeOrange_bl.hex": {
+  "components": [],
+  "extraction": {
+   "artifacts": 2,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1,
+    "ihex": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": null,
+   "endianness": "little",
+   "format": "ihex",
+   "os_hint": "bare-metal",
+   "platform": "ArduPilot",
+   "platform_version": null,
+   "vehicle_type": "AP_Bootloader"
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "ardupilot/MatekH743_bl.bin": {
+  "components": [],
+  "extraction": {
+   "artifacts": 1,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": null,
+   "endianness": "little",
+   "format": "cortexm_raw",
+   "os_hint": "bare-metal",
+   "platform": "ArduPilot",
+   "platform_version": null,
+   "vehicle_type": "AP_Bootloader"
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "ardupilot/Pixhawk6X_bl.bin": {
+  "components": [],
+  "extraction": {
+   "artifacts": 1,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": null,
+   "endianness": "little",
+   "format": "cortexm_raw",
+   "os_hint": "bare-metal",
+   "platform": "ArduPilot",
+   "platform_version": null,
+   "vehicle_type": "AP_Bootloader"
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "ardupilot/fmuv3_bl.bin": {
+  "components": [],
+  "extraction": {
+   "artifacts": 1,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": null,
+   "endianness": "little",
+   "format": "cortexm_raw",
+   "os_hint": "bare-metal",
+   "platform": "ArduPilot",
+   "platform_version": null,
+   "vehicle_type": "AP_Bootloader"
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "ardupilot/sitl-linux-copter-3.2.1.tar.gz": {
+  "components": [
+   "ardupilot 3.2.1"
+  ],
+  "extraction": {
+   "artifacts": 4,
+   "failed": [],
+   "formats": {
+    "elf": 1,
+    "raw": 1,
+    "tar": 1,
+    "text": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:binary:elf-no-pie": 1
+  },
+  "identification": {
+   "architecture": "x86-64",
+   "bits": 64,
+   "board_id": null,
+   "board_name": null,
+   "endianness": "little",
+   "format": "tar",
+   "os_hint": "linux",
+   "platform": "ArduPilot",
+   "platform_version": "3.2.1",
+   "vehicle_type": "ArduCopter"
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "ardupilot/sitl-linux-copter-3.3.tar.gz": {
+  "components": [
+   "ardupilot 3.3"
+  ],
+  "extraction": {
+   "artifacts": 4,
+   "failed": [],
+   "formats": {
+    "elf": 1,
+    "raw": 1,
+    "tar": 1,
+    "text": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:binary:cleartext-url": 1,
+   "builtin:binary:elf-no-pie": 1
+  },
+  "identification": {
+   "architecture": "x86-64",
+   "bits": 64,
+   "board_id": null,
+   "board_name": null,
+   "endianness": "little",
+   "format": "tar",
+   "os_hint": "linux",
+   "platform": "ArduPilot",
+   "platform_version": "3.3",
+   "vehicle_type": "ArduCopter"
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "ardupilot/sitl-linux-plane-3.3.0.tar.gz": {
+  "components": [
+   "ardupilot 3.3.0"
+  ],
+  "extraction": {
+   "artifacts": 4,
+   "failed": [],
+   "formats": {
+    "elf": 1,
+    "raw": 1,
+    "tar": 1,
+    "text": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:binary:cleartext-url": 1,
+   "builtin:binary:elf-no-pie": 1
+  },
+  "identification": {
+   "architecture": "x86-64",
+   "bits": 64,
+   "board_id": null,
+   "board_name": null,
+   "endianness": "little",
+   "format": "tar",
+   "os_hint": "linux",
+   "platform": "ArduPilot",
+   "platform_version": "3.3.0",
+   "vehicle_type": "ArduPlane"
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "ardupilot/sitl-linux-rover-2.50.tar.gz": {
+  "components": [
+   "ardupilot 2.50"
+  ],
+  "extraction": {
+   "artifacts": 4,
+   "failed": [],
+   "formats": {
+    "elf": 1,
+    "raw": 1,
+    "tar": 1,
+    "text": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:binary:cleartext-url": 1,
+   "builtin:binary:elf-no-pie": 1
+  },
+  "identification": {
+   "architecture": "x86-64",
+   "bits": 64,
+   "board_id": null,
+   "board_name": null,
+   "endianness": "little",
+   "format": "tar",
+   "os_hint": "linux",
+   "platform": "ArduPilot",
+   "platform_version": "2.50",
+   "vehicle_type": "ArduRover"
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "ark_can-flow_canbootloader.px4": {
+  "components": [],
+  "extraction": {
+   "artifacts": 2,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1,
+    "px4": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": 80,
+   "board_name": "ARKFLOW",
+   "endianness": "little",
+   "format": "px4",
+   "os_hint": "bare-metal",
+   "platform": "PX4",
+   "platform_version": "1.17.0",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "betaflight/betaflight_4.3.2_STM32F405.hex": {
+  "components": [
+   "betaflight 4.3.2"
+  ],
+  "extraction": {
+   "artifacts": 2,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1,
+    "ihex": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": "STM32F405",
+   "endianness": "little",
+   "format": "ihex",
+   "os_hint": "bare-metal",
+   "platform": "Betaflight",
+   "platform_version": "4.3.2",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "betaflight/betaflight_4.3.2_STM32H743.hex": {
+  "components": [
+   "betaflight 4.3.2"
+  ],
+  "extraction": {
+   "artifacts": 2,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1,
+    "ihex": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": "STM32H743",
+   "endianness": "little",
+   "format": "ihex",
+   "os_hint": "bare-metal",
+   "platform": "Betaflight",
+   "platform_version": "4.3.2",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "betaflight/betaflight_4.5.1_STM32F405.hex": {
+  "components": [
+   "betaflight 4.5.1"
+  ],
+  "extraction": {
+   "artifacts": 2,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1,
+    "ihex": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": "STM32F405",
+   "endianness": "little",
+   "format": "ihex",
+   "os_hint": "bare-metal",
+   "platform": "Betaflight",
+   "platform_version": "4.5.1",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "crazyflie/firmware-cf2-2023.11.zip": {
+  "components": [
+   "aideck_esp 2023.06",
+   "crazyflie 2023.11",
+   "esp-idf 4.3.1-dirty"
+  ],
+  "extraction": {
+   "artifacts": 12,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 2,
+    "esp_image": 1,
+    "raw": 7,
+    "text": 1,
+    "zip": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": "cf2",
+   "endianness": "little",
+   "format": "zip",
+   "os_hint": "bare-metal",
+   "platform": "Crazyflie",
+   "platform_version": "2023.11",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "crazyflie/firmware-cf2-2024.2.zip": {
+  "components": [
+   "aideck_esp 2023.06",
+   "crazyflie 2024.2",
+   "esp-idf 4.3.1-dirty"
+  ],
+  "extraction": {
+   "artifacts": 13,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 3,
+    "esp_image": 1,
+    "raw": 7,
+    "text": 1,
+    "zip": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": "cf2",
+   "endianness": "little",
+   "format": "zip",
+   "os_hint": "bare-metal",
+   "platform": "Crazyflie",
+   "platform_version": "2024.2",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "cubepilot_cubeorange_default.px4": {
+  "components": [
+   "nuttx 11.0.0",
+   "px4 1.17.0"
+  ],
+  "extraction": {
+   "artifacts": 77,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 3,
+    "cromfs": 1,
+    "empty": 2,
+    "px4": 1,
+    "text": 66,
+    "xz": 4
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:drone:px4-cbrk_supply_chk": 3
+  },
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": 140,
+   "board_name": "CubeOrange",
+   "endianness": "little",
+   "format": "px4",
+   "os_hint": "bare-metal",
+   "platform": "PX4",
+   "platform_version": "1.17.0",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "debian11-armhf-rootfs-20210816.tar.gz": {
+  "components": [
+   "glibc 2.31",
+   "openssl 1.1.1k",
+   "zlib 1.2.11"
+  ],
+  "extraction": {
+   "artifacts": 3575,
+   "failed": [],
+   "formats": {
+    "elf": 701,
+    "empty": 23,
+    "gzip": 1,
+    "raw": 1255,
+    "tar": 1,
+    "text": 1593,
+    "xz": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:binary:cleartext-url": 29,
+   "builtin:binary:elf-dangerous-imports": 1,
+   "builtin:binary:elf-no-canary": 1,
+   "builtin:components:outdated-openssl": 1,
+   "builtin:components:outdated-zlib": 1,
+   "builtin:config:setuid-files": 1,
+   "builtin:secrets:crypto-library-test-key": 10
+  },
+  "identification": {
+   "architecture": "ARM (32-bit)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": null,
+   "endianness": "little",
+   "format": "gzip",
+   "os_hint": "linux",
+   "platform": "Unknown",
+   "platform_version": null,
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 96,
+   "distro": "debian",
+   "owned_files": 3033
+  }
+ },
+ "esp/bootloader_esp32.bin": {
+  "components": [],
+  "extraction": {
+   "artifacts": 4,
+   "failed": [],
+   "formats": {
+    "esp_image": 1,
+    "raw": 3
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "Xtensa (ESP32)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": null,
+   "endianness": "little",
+   "format": "esp_image",
+   "os_hint": "bare-metal",
+   "platform": "Espressif",
+   "platform_version": null,
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "esp/bootloader_esp32c3.bin": {
+  "components": [],
+  "extraction": {
+   "artifacts": 5,
+   "failed": [],
+   "formats": {
+    "esp_image": 1,
+    "raw": 4
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "RISC-V (ESP32-C3)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": null,
+   "endianness": "little",
+   "format": "esp_image",
+   "os_hint": "bare-metal",
+   "platform": "Espressif",
+   "platform_version": null,
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "esp/esp8266_deepsleep.bin": {
+  "components": [],
+  "extraction": {
+   "artifacts": 7,
+   "failed": [],
+   "formats": {
+    "esp_image": 2,
+    "raw": 5
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "Xtensa (ESP8266)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": null,
+   "endianness": "little",
+   "format": "esp_image",
+   "os_hint": "bare-metal",
+   "platform": "Espressif",
+   "platform_version": null,
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "esp/esp_idf_blink_esp32s2.bin": {
+  "components": [
+   "blink qa-test-v5.0-20220830-4-g4532e6",
+   "esp-idf 5.0-beta1-427-g4532e6e0b2-dirt"
+  ],
+  "extraction": {
+   "artifacts": 7,
+   "failed": [],
+   "formats": {
+    "esp_image": 1,
+    "raw": 6
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "Xtensa (ESP32-S2)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": null,
+   "endianness": "little",
+   "format": "esp_image",
+   "os_hint": "bare-metal",
+   "platform": "Espressif",
+   "platform_version": null,
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "esp/partitions_singleapp.bin": {
+  "components": [],
+  "extraction": {
+   "artifacts": 1,
+   "failed": [],
+   "formats": {
+    "esp_partition_table": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": null,
+   "bits": null,
+   "board_id": null,
+   "board_name": null,
+   "endianness": null,
+   "format": "esp_partition_table",
+   "os_hint": null,
+   "platform": "Unknown",
+   "platform_version": null,
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "holybro_kakuteh7_default.px4": {
+  "components": [
+   "nuttx 11.0.0",
+   "px4 1.17.0"
+  ],
+  "extraction": {
+   "artifacts": 80,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1,
+    "cromfs": 1,
+    "empty": 2,
+    "px4": 1,
+    "text": 71,
+    "xz": 4
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:drone:px4-cbrk_supply_chk": 4,
+   "builtin:drone:px4-cbrk_supply_chk-sim": 6
+  },
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": 1048,
+   "board_name": "KAKUTEH7",
+   "endianness": "little",
+   "format": "px4",
+   "os_hint": "bare-metal",
+   "platform": "PX4",
+   "platform_version": "1.17.0",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "inav/inav_6.1.1_MATEKF405.hex": {
+  "components": [
+   "inav 6.1.1"
+  ],
+  "extraction": {
+   "artifacts": 2,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1,
+    "ihex": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": "MATEKF405",
+   "endianness": "little",
+   "format": "ihex",
+   "os_hint": "bare-metal",
+   "platform": "INAV",
+   "platform_version": "6.1.1",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "inav/inav_7.1.2_MATEKF405.hex": {
+  "components": [
+   "inav 7.1.2"
+  ],
+  "extraction": {
+   "artifacts": 2,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1,
+    "ihex": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": "MATEKF405",
+   "endianness": "little",
+   "format": "ihex",
+   "os_hint": "bare-metal",
+   "platform": "INAV",
+   "platform_version": "7.1.2",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "inav/inav_7.1.2_MATEKH743.hex": {
+  "components": [
+   "inav 7.1.2"
+  ],
+  "extraction": {
+   "artifacts": 2,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1,
+    "ihex": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": "MATEKH743",
+   "endianness": "little",
+   "format": "ihex",
+   "os_hint": "bare-metal",
+   "platform": "INAV",
+   "platform_version": "7.1.2",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "inav/inav_9.1.0_MATEKF405.hex": {
+  "components": [
+   "inav 9.1.0"
+  ],
+  "extraction": {
+   "artifacts": 2,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1,
+    "ihex": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": "MATEKF405",
+   "endianness": "little",
+   "format": "ihex",
+   "os_hint": "bare-metal",
+   "platform": "INAV",
+   "platform_version": "9.1.0",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "px4_fmu-v2_default.elf": {
+  "components": [
+   "nuttx 11.0.0",
+   "px4 1.17.0"
+  ],
+  "extraction": {
+   "artifacts": 34,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 3,
+    "cromfs": 1,
+    "elf": 1,
+    "empty": 2,
+    "text": 26,
+    "xz": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "board_name": null,
+   "endianness": "little",
+   "format": "elf",
+   "os_hint": "bare-metal",
+   "platform": "PX4",
+   "platform_version": "1.17.0",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "px4_fmu-v2_default.px4": {
+  "components": [
+   "nuttx 11.0.0",
+   "px4 1.17.0"
+  ],
+  "extraction": {
+   "artifacts": 34,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 3,
+    "cromfs": 1,
+    "empty": 2,
+    "px4": 1,
+    "text": 26,
+    "xz": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": 9,
+   "board_name": "PX4FMUv2",
+   "endianness": "little",
+   "format": "px4",
+   "os_hint": "bare-metal",
+   "platform": "PX4",
+   "platform_version": "1.17.0",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "px4_fmu-v5_default.px4": {
+  "components": [
+   "nuttx 11.0.0",
+   "px4 1.17.0"
+  ],
+  "extraction": {
+   "artifacts": 81,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 3,
+    "cromfs": 1,
+    "empty": 2,
+    "px4": 1,
+    "text": 70,
+    "xz": 4
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:drone:px4-cbrk_supply_chk": 2,
+   "builtin:drone:px4-cbrk_supply_chk-sim": 6
+  },
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": 50,
+   "board_name": "PX4FMUv5",
+   "endianness": "little",
+   "format": "px4",
+   "os_hint": "bare-metal",
+   "platform": "PX4",
+   "platform_version": "1.17.0",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "px4_fmu-v6x_default.px4": {
+  "components": [
+   "nuttx 11.0.0",
+   "px4 1.17.0"
+  ],
+  "extraction": {
+   "artifacts": 66,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 2,
+    "cromfs": 1,
+    "empty": 2,
+    "px4": 1,
+    "text": 56,
+    "xz": 4
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": 53,
+   "board_name": "PX4FMUv6X",
+   "endianness": "little",
+   "format": "px4",
+   "os_hint": "bare-metal",
+   "platform": "PX4",
+   "platform_version": "1.17.0",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "px4_v1.15.0_fmu-v5_default.px4": {
+  "components": [
+   "nuttx 11.0.0",
+   "px4 1.15.0"
+  ],
+  "extraction": {
+   "artifacts": 84,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 3,
+    "cromfs": 1,
+    "empty": 1,
+    "px4": 1,
+    "text": 74,
+    "xz": 4
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:drone:px4-cbrk_io_safety": 5,
+   "builtin:drone:px4-cbrk_io_safety-sim": 5,
+   "builtin:drone:px4-cbrk_supply_chk": 1,
+   "builtin:drone:px4-cbrk_supply_chk-sim": 5
+  },
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": 50,
+   "board_name": "PX4FMUv5",
+   "endianness": "little",
+   "format": "px4",
+   "os_hint": "bare-metal",
+   "platform": "PX4",
+   "platform_version": "1.15.0",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "px4_v1.16.2_fmu-v5_default.px4": {
+  "components": [
+   "nuttx 11.0.0",
+   "px4 1.16.2"
+  ],
+  "extraction": {
+   "artifacts": 85,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 3,
+    "cromfs": 1,
+    "empty": 2,
+    "px4": 1,
+    "text": 74,
+    "xz": 4
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:drone:px4-cbrk_supply_chk": 1,
+   "builtin:drone:px4-cbrk_supply_chk-sim": 6
+  },
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": 50,
+   "board_name": "PX4FMUv5",
+   "endianness": "little",
+   "format": "px4",
+   "os_hint": "bare-metal",
+   "platform": "PX4",
+   "platform_version": "1.16.2",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "px4_v1.18.0-rc1_fmu-v6x_default.px4": {
+  "components": [
+   "nuttx 12.12.0",
+   "px4 1.18.0-rc1"
+  ],
+  "extraction": {
+   "artifacts": 59,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 2,
+    "cromfs": 1,
+    "empty": 2,
+    "px4": 1,
+    "text": 49,
+    "xz": 4
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": 53,
+   "board_name": "PX4FMUv6X",
+   "endianness": "little",
+   "format": "px4",
+   "os_hint": "bare-metal",
+   "platform": "PX4",
+   "platform_version": "1.18.0-rc1",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ }
+}
