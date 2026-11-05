@@ -29,7 +29,7 @@ Debian/Alpine images, or esptool's published ESP images — never synthetic data
 | ESP32/ESP8266 | Real esptool images: chip, checksum, SHA-256, ESP-IDF app descriptor; flash layouts with partition tables. |
 | Reports | PDF (components, vulnerable packages, Ghidra summary), JSON, SARIF 2.1.0, CycloneDX 1.5 SBOM with purls/CPEs. |
 | Authentication and authorisation | Users/roles, scrypt, hashed session and API tokens, CSRF header, login throttling, per-user visibility, upload rate/size/disk limits (`tests/test_auth.py`, `tests/test_api.py`). |
-| Regression suite | 26 pinned real samples with committed signatures (`tests/test_regression_real.py`); CI job fetches the samples. A CI-equivalent run (Python 3.12, unprivileged user, no samples) passes. |
+| Regression suite and CI | 26 pinned real samples with committed signatures (`tests/test_regression_real.py`). All four CI jobs pass on GitHub's runners (PR #2), including `real-samples`, which fetches the pinned samples (SHA-256 checked), exports the Debian/Alpine root filesystems and runs the real-sample regression and format tests (46 passed, 1 skipped). |
 
 ## Partially working
 
@@ -51,4 +51,3 @@ Debian/Alpine images, or esptool's published ESP images — never synthetic data
 | gVisor (`DFA_SANDBOX_RUNTIME=runsc`) | Configuration support exists, and the broker refuses jobs if the runtime is not registered with the daemon; installing runsc in the development environment was not permitted. |
 | Rootless Docker / Podman for the broker | Documented (`docs/SECURITY.md`), not tested: the development host uses cgroup v1, where rootless Docker cannot enforce the memory/CPU/PID limits. The broker now refuses jobs on any daemon that reports it cannot enforce them (`tests/test_sandbox.py`). |
 | FACT reached from the compose network | Compose maps `host.docker.internal` for `DFA_FACT_URL`; the development FACT listens on loopback only, and exposing it to the container network was not permitted. The adapter itself is verified against that FACT instance. |
-| New CI job `real-samples` | Defined; CI only runs on pull requests and no PR has been opened for this work yet. |

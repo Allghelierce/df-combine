@@ -94,6 +94,10 @@ parsing and error handling.
   symbols next to it; cwe_checker analyses the image bare-metal with the ELF's load address, and every
   reported address is shown with its function (`0x8079b38 (_ZN12MissionBlock30get_absolute_altitude_for_itemERK14mission_item_sf)`).
   Ghidra analyses the ELF itself, so symbols and DWARF are used there.
+* **`.px4` + `.elf` of the same build** (e.g. a PX4 build directory uploaded as one archive): the image
+  decoded from the `.px4` is byte-identical to the one derived from the ELF (same SHA-256 and load
+  address), so it is linked to the ELF's symbols, and identical binaries are analysed once - for the
+  official FMUv2 pair, cwe_checker runs 3 analyses instead of 6 and Ghidra 3 instead of 5.
 * **Selection:** up to `DFA_CWE_CHECKER_MAX_BINARIES` binaries, prioritising network-facing and
   drone-related names; kernel modules are skipped.
 * **Results** are grouped per (binary, CWE) and always `unverified` (upstream documents false

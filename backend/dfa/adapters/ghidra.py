@@ -23,7 +23,7 @@ from ..core.findings import Classification as C
 from ..core.findings import Confidence as K
 from ..core.findings import Evidence, Finding
 from ..core.findings import Severity as S
-from .base import AdapterContext, AdapterResult, ToolAdapter, unique_targets
+from .base import AdapterContext, AdapterResult, ToolAdapter, note_identical_copies, unique_targets
 
 ELF_MACHINES = {"EM_ARM", "EM_AARCH64", "EM_X86_64", "EM_386", "EM_MIPS", "EM_PPC", "EM_PPC64", "EM_RISCV"}
 RISK_RULES = {
@@ -131,7 +131,8 @@ class GhidraAdapter(ToolAdapter):
                 failures += 1
                 summaries.append({"binary": a["display_path"], "status": "failed", "error": f"bad JSON: {exc}"})
                 continue
-            findings += normalize(data, a["display_path"], raw=bool(t["raw"]))
+            findings += note_identical_copies(normalize(data, a["display_path"], raw=bool(t["raw"])),
+                                              t.get("duplicates"))
             summaries.append(summarize(data, a, t["raw"], res.duration_s))
         ok = len(targets) - failures
         msg = f"analysed {ok}/{len(targets)} binaries: " + "; ".join(

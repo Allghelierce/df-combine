@@ -117,6 +117,15 @@ def unique_targets(cands: list[tuple[int, int, dict]]) -> list[dict]:
     return out
 
 
+def note_identical_copies(findings: list[Finding], duplicates: list[str] | None) -> list[Finding]:
+    """Say where else an identical binary (analysed once) occurs, e.g. the .px4 image of the same build."""
+    if duplicates:
+        listed = "; ".join(duplicates[:5]) + (f" (+{len(duplicates) - 5} more)" if len(duplicates) > 5 else "")
+        for f in findings:
+            f.description += f" The same binary (identical SHA-256, analysed once) is also present as: {listed}."
+    return findings
+
+
 @dataclass
 class AdapterResult:
     status: str

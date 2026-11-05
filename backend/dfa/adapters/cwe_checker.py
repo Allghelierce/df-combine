@@ -23,7 +23,7 @@ from ..core.findings import Classification as C
 from ..core.findings import Confidence as K
 from ..core.findings import Evidence, Finding
 from ..core.findings import Severity as S
-from .base import AdapterContext, AdapterResult, ToolAdapter, run_cmd, unique_targets
+from .base import AdapterContext, AdapterResult, ToolAdapter, note_identical_copies, run_cmd, unique_targets
 
 SUPPORTED_ELF_ARCH = {"EM_ARM", "EM_AARCH64", "EM_X86_64", "EM_386", "EM_MIPS", "EM_PPC", "EM_PPC64", "EM_RISCV"}
 CWE_SEVERITY = {
@@ -179,8 +179,8 @@ class CweCheckerAdapter(ToolAdapter):
                 failures += 1
                 per_target.append({"binary": a["display_path"], "status": "failed", "error": str(exc)})
                 continue
-            fs = normalize(warnings, a["display_path"], bare_metal=bool(t["bare_metal"]),
-                           symbols=_load_symbols(ctx, a))
+            fs = note_identical_copies(normalize(warnings, a["display_path"], bare_metal=bool(t["bare_metal"]),
+                                                 symbols=_load_symbols(ctx, a)), t.get("duplicates"))
             findings += fs
             per_target.append({"binary": a["display_path"], "status": "completed", "warnings": len(warnings),
                                "duration_s": dur, "mode": "bare-metal" if t["bare_metal"] else "elf",

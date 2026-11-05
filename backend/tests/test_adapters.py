@@ -474,3 +474,7 @@ def test_identical_binaries_are_analysed_once(settings, tmp_path):
     b = {"artifact": {"sha256": "x", "display_path": "second"}}
     assert [t["artifact"]["display_path"] for t in unique_targets([(9, 1, a), (1, 1, b)])] == ["first"]
     assert a["duplicates"] == ["second"]
+    from dfa.adapters.base import note_identical_copies
+    f = cwe_checker.normalize(json.loads(CWE_SAMPLE), "b.tar > fw.elf > flash.bin")[0]
+    note_identical_copies([f], ["b.tar > fw.px4 > image.bin"])
+    assert f.description.endswith("also present as: b.tar > fw.px4 > image.bin.")
