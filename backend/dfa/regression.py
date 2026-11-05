@@ -21,6 +21,8 @@ SAMPLES = [
     "ardupilot/CubeOrange_bl.bin", "ardupilot/CubeOrange_bl.hex",
     "ardupilot/sitl-linux-copter-3.2.1.tar.gz", "ardupilot/sitl-linux-copter-3.3.tar.gz",
     "ardupilot/sitl-linux-plane-3.3.0.tar.gz", "ardupilot/sitl-linux-rover-2.50.tar.gz",
+    "betaflight/betaflight_4.3.2_STM32F405.hex", "betaflight/betaflight_4.3.2_STM32H743.hex",
+    "inav/inav_7.1.2_MATEKF405.hex", "inav/inav_7.1.2_MATEKH743.hex", "inav/inav_6.1.1_MATEKF405.hex",
 ]
 
 
@@ -30,7 +32,8 @@ def signature(manifest: dict) -> dict:
     inv = manifest.get("packages") or {}
     return {
         "identification": {k: ident.get(k) for k in ("format", "platform", "platform_version", "vehicle_type",
-                                                      "architecture", "bits", "endianness", "os_hint", "board_id")},
+                                                      "architecture", "bits", "endianness", "os_hint", "board_id",
+                                                      "board_name")},
         "extraction": {
             "artifacts": len(arts),
             "formats": dict(sorted(Counter(a["format"] for a in arts).items())),

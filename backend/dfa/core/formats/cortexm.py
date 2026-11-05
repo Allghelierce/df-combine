@@ -36,12 +36,18 @@ def _in(ranges: list[tuple[int, int]], v: int) -> bool:
     return any(lo <= v < hi for lo, hi in ranges)
 
 
+def _sp_in(v: int) -> bool:
+    # the initial stack pointer is normally the region's end address (stack grows down from there), e.g.
+    # 0x10010000 = top of the STM32F4 CCM RAM in official INAV builds
+    return any(lo <= v <= hi for lo, hi in SRAM_RANGES)
+
+
 def analyze_vector_table(data: bytes, base_address: int | None = None) -> VectorTableInfo | None:
     if len(data) < 64:
         return None
     sp, reset = struct.unpack_from("<II", data, 0)
     # Cortex-M ignores SP[1:0] on reset; real PX4 builds store e.g. 0x2002b962, so only require an even value.
-    if not _in(SRAM_RANGES, sp) or sp % 2 != 0:
+    if not _sp_in(sp) or sp % 2 != 0:
         return None
     if reset & 1 == 0 or not _in(FLASH_RANGES, reset & ~1):
         return None

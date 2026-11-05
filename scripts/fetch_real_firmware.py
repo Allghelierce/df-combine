@@ -5,9 +5,10 @@ Only official open-source builds are listed: PX4 Autopilot (BSD-3-Clause, publis
 the public firmware bucket that QGroundControl downloads from), ArduPilot's prebuilt bootloaders that are
 committed in the ArduPilot repository (GPL-3.0, tag Copter-4.5.7), ArduPilot vehicle builds for SITL
 (software-in-the-loop) that DroneKit publishes in its public asset bucket for `dronekit-sitl` (GPL-3.0;
-x86-64 Linux ELF programs - analysed statically, never run), and the Espressif image fixtures that ship with
-esptool's own test suite (GPL-2.0, tag v4.8.1). Files are verified against pinned SHA-256 hashes; nothing is
-committed to the repository.
+x86-64 Linux ELF programs - analysed statically, never run), official Betaflight and INAV release builds
+from the projects' GitHub releases (GPL-3.0), and the Espressif image fixtures that ship with esptool's own
+test suite (GPL-2.0, tag v4.8.1). Files are verified against pinned SHA-256 hashes; nothing is committed to
+the repository.
 
 Usage: python scripts/fetch_real_firmware.py [dest]   (default: fixtures/real)
 """
@@ -22,6 +23,8 @@ BASE = "https://px4-travis.s3.amazonaws.com/Firmware/stable/"
 ESPTOOL = "https://raw.githubusercontent.com/espressif/esptool/v4.8.1/test/images/"
 APBL = "https://raw.githubusercontent.com/ArduPilot/ardupilot/Copter-4.5.7/Tools/bootloaders/"
 APSITL = "https://dronekit-assets.s3.amazonaws.com/sitl/"
+BETAFLIGHT = "https://github.com/betaflight/betaflight/releases/download/"
+INAV = "https://github.com/iNavFlight/inav/releases/download/"
 SAMPLES = {
     # name: (sha256, size, description[, url])
     "px4_fmu-v5_default.px4": ("b50b275507da4cb0e218c943c2aff5359e3f0914c18f6b563494b925c0a0e403", 1881838,
@@ -71,6 +74,22 @@ SAMPLES = {
     "ardupilot/sitl-linux-rover-2.50.tar.gz": (
         "3b00c6dc0c3cbaccb812dbd99220544b3bcf6c19cfafb284c88fd674c147c869", 655360,
         "ArduRover 2.50 SITL build ('ArduRover v2.50')", APSITL + "rover/"),
+    # Official Betaflight (unified-target MCU builds) and INAV (per-board) release builds, Intel HEX
+    "betaflight/betaflight_4.3.2_STM32F405.hex": (
+        "d5020c655f6d722ee085490dcfd96a799d5c45a9842754fe167ad9ddcc683812", 1501011,
+        "Betaflight 4.3.2 for STM32F405 (official release)", BETAFLIGHT + "4.3.2/"),
+    "betaflight/betaflight_4.3.2_STM32H743.hex": (
+        "4e7dc985e26acd7b1e4a15f36a7c6b4c91c00ea44dbea473cd5c7c35e53572c8", 1601416,
+        "Betaflight 4.3.2 for STM32H743 (official release)", BETAFLIGHT + "4.3.2/"),
+    "inav/inav_7.1.2_MATEKF405.hex": (
+        "b7e6be9d846817474417992d3429ab1cfda1cc6b22fda99a6be51209045fae16", 1660770,
+        "INAV 7.1.2 for Matek F405 (official release; initial SP in CCM RAM)", INAV + "7.1.2/"),
+    "inav/inav_7.1.2_MATEKH743.hex": (
+        "43b8aa7d10bf8eae5ca7454102e08c06d80890492bfdc56600a7d610ccc7b24c", 1722249,
+        "INAV 7.1.2 for Matek H743 (official release)", INAV + "7.1.2/"),
+    "inav/inav_6.1.1_MATEKF405.hex": (
+        "e32ccea58504e183de505c92c24dd1ebff8b6f2c9c49173a6e719e22ae78ef1c", 1530180,
+        "INAV 6.1.1 for Matek F405 (official release)", INAV + "6.1.1/"),
 }
 
 

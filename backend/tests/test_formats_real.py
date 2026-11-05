@@ -369,3 +369,27 @@ def test_real_ardupilot_vehicle_builds_identified(run_analysis):
     assert "APMrover2-2.50" in _ardupilot_tags("2.50", "ArduRover")
     assert "ArduCopter-3.2.1" in _ardupilot_tags("3.2.1", "ArduCopter")
     assert "Copter-3.3" in _ardupilot_tags("3.3", "ArduCopter")
+
+
+FC = {  # official Betaflight / INAV release builds: (platform, version, board/target)
+    "betaflight/betaflight_4.3.2_STM32F405.hex": ("Betaflight", "4.3.2", "STM32F405"),
+    "betaflight/betaflight_4.3.2_STM32H743.hex": ("Betaflight", "4.3.2", "STM32H743"),
+    "inav/inav_7.1.2_MATEKF405.hex": ("INAV", "7.1.2", "MATEKF405"),  # initial SP 0x10010000 (CCM)
+    "inav/inav_7.1.2_MATEKH743.hex": ("INAV", "7.1.2", "MATEKH743"),
+    "inav/inav_6.1.1_MATEKF405.hex": ("INAV", "6.1.1", "MATEKF405"),
+}
+
+
+@pytest.mark.skipif(not (REAL / "inav" / "inav_7.1.2_MATEKF405.hex").exists(),
+                    reason="Betaflight/INAV builds not fetched (scripts/fetch_real_firmware.py)")
+def test_real_betaflight_and_inav_builds_identified(run_analysis):
+    for name, (platform, version, board) in FC.items():
+        m = run_analysis(REAL / name)
+        i = m["identification"]
+        assert (i["platform"], i["platform_confidence"], i["platform_version"], i["board_name"]) == \
+            (platform, "high", version, board), (name, i["platform_candidates"])
+        assert i["architecture"] == "ARM Cortex-M (Thumb-2)", name
+        image = next(a for a in m["extraction"]["artifacts"] if a["name"] == "image.bin")
+        assert image["format"] == "cortexm_raw" and image["details"]["flash_base"] == "0x8000000"
+        assert [(c["name"], c["version"]) for c in m["components"]] == [(platform.lower(), version)]
+        assert i["build"]["revision"] and i["build"]["date"]

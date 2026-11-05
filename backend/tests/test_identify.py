@@ -139,3 +139,33 @@ def test_vendor_containers_identified_not_overclaimed(tmp_path, run_analysis):
     q = tmp_path / "bebop.plf"
     q.write_bytes(b"PLF!" + os.urandom(2048))
     assert run_analysis(q)["identification"]["platform"] == "Parrot"
+
+
+def test_vector_table_accepts_stack_at_the_end_of_ccm():
+    """Official INAV builds for STM32F405 start with SP = 0x10010000 (top of the 64 KiB CCM RAM)."""
+    vt = struct.pack("<16I", 0x1001_0000, 0x0807_43F1, *([0x0800_2CF1] * 14))
+    info = analyze_vector_table(vt)
+    assert info is not None and info.initial_sp == 0x1001_0000
+    assert analyze_vector_table(struct.pack("<16I", 0x1001_0004, 0x0807_43F1, *([0x0800_2CF1] * 14))) is None
+
+
+def test_build_information_blocks():
+    """Layouts of the version.c constants in official Betaflight 4.3.2 and INAV 7.1.2 builds."""
+    from dfa.core.identify import PlatformAccumulator
+    inav = (b"INAV %s (%s) %s\x00\x00%s/%s %s %s / %s (%s)\x00\x00\x004e1e59eb\x00\x00\x00\x0023:40:27\x00\x00\x00\x00"
+            b"May 31 2024\x007.1.2\x00\x00\x00MATEKF405\x00\x00\x00Memory allocated")
+    acc = PlatformAccumulator()
+    acc.feed_bytes(inav)
+    g = next(r for r in acc.results() if r.name == "INAV")
+    assert (g.confidence, g.version, g.board) == ("high", "7.1.2", "MATEKF405")
+    assert g.build["revision"] == "4e1e59eb" and g.build["date"] == "May 31 2024"
+    bf = (b"Betaflight\x00\x00Betaflight STM32F405\x00\x00 ----\x00\x00\x004.3.2\x00\x00\x00%s %s: %s\x00"
+          b"Firmware revision\x00\x00\x00STM32F405\x00\x00\x0060c9521\x0007:26:30\x00\x00\x00\x00Nov 28 2022\x00%s %s\x00")
+    acc = PlatformAccumulator()
+    acc.feed_bytes(bf)
+    g = next(r for r in acc.results() if r.name == "Betaflight")
+    assert (g.confidence, g.version, g.board, g.build["revision"]) == ("high", "4.3.2", "STM32F405", "60c9521")
+    # without the project's own markers neither the block nor a bare x.y.z constant means anything
+    acc = PlatformAccumulator()
+    acc.feed_bytes(b"\x00\x00\x001.2.3\x00\x00" + inav.replace(b"INAV ", b"XXXX "))
+    assert not any(r.name in ("INAV", "Betaflight") and r.version for r in acc.results())

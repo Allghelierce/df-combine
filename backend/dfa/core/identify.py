@@ -287,6 +287,13 @@ class PlatformSignature:
     weak: list[bytes]  # contribute partial evidence
     version_patterns: list[re.Pattern]
     vehicle_patterns: list[re.Pattern] = field(default_factory=list)
+    # byte patterns for a build-information block (named groups: version, board, revision, date, time)
+    build_info: list[re.Pattern[bytes]] = field(default_factory=list)
+    # the version is stored as a standalone NUL-terminated "x.y.z" constant (too short for string scans)
+    version_constant: bool = False
+
+
+VERSION_CONSTANT = re.compile(rb"(?<=\x00)(\d{1,2}\.\d{1,2}\.\d{1,2})\x00")
 
 
 PLATFORMS: list[PlatformSignature] = [
@@ -331,13 +338,24 @@ PLATFORMS: list[PlatformSignature] = [
         strong=[b"Betaflight", b"BTFL"],
         weak=[b"betaflight", b"CLI", b"MSP"],
         version_patterns=[re.compile(r"Betaflight\s*/?\s*\w*\s*(\d+\.\d+\.\d+)")],
+        # official builds carry the version only as a standalone constant (FC_VERSION_STRING, e.g. "4.3.2";
+        # the only NUL-delimited x.y.z string in the 4.3.2 STM32F405/H743 builds)
+        version_constant=True,
+        # version.c in official 4.3 builds: target, git revision, build time, build date
+        build_info=[re.compile(rb"(?P<board>[A-Z0-9][A-Z0-9_]{2,31})\x00+(?P<revision>[0-9a-f]{7,8})\x00+"
+                               rb"(?P<time>\d\d:\d\d:\d\d)\x00+(?P<date>[A-Z][a-z]{2} [ \d]\d \d{4})\x00")],
     ),
     PlatformSignature(
         name="INAV",
         family="flight-controller",
-        strong=[b"INAV/", b"INAV "],
+        strong=[b"INAV/", b"INAV ", b"INAV_ALL.BBL", b"INAV VERSION"],
         weak=[b"inav"],
         version_patterns=[re.compile(r"INAV/?\s*\w*\s*(\d+\.\d+\.\d+)")],
+        version_constant=True,
+        # official 6.x/7.x builds: git revision, build time, build date, version, target
+        build_info=[re.compile(rb"(?P<revision>[0-9a-f]{7,8})\x00+(?P<time>\d\d:\d\d:\d\d)\x00+"
+                               rb"(?P<date>[A-Z][a-z]{2} [ \d]\d \d{4})\x00+(?P<version>\d{1,2}\.\d{1,2}\.\d{1,2})"
+                               rb"\x00+(?P<board>[A-Z0-9][A-Z0-9_]{2,31})\x00")],
     ),
     PlatformSignature(
         name="DJI",
@@ -379,6 +397,8 @@ class PlatformGuess:
     evidence: list[str]
     version: str | None = None
     vehicle: str | None = None
+    board: str | None = None
+    build: dict | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -392,12 +412,23 @@ class PlatformAccumulator:
         self.versions: dict[str, Counter] = {p.name: Counter() for p in PLATFORMS}
         self.vehicles: dict[str, Counter] = {p.name: Counter() for p in PLATFORMS}
         self.hints: dict[str, list[str]] = {p.name: [] for p in PLATFORMS}
+        self.build: dict[str, dict] = {}
+        self.constants: dict[str, Counter] = {}
 
     def feed_bytes(self, block: bytes) -> None:
         for p in PLATFORMS:
             for sig in p.strong + p.weak:
                 if sig not in self.hits[p.name] and sig in block:
                     self.hits[p.name][sig] = 1
+            if p.version_constant and any(s in block for s in p.strong):
+                for m in VERSION_CONSTANT.finditer(block):
+                    self.constants.setdefault(p.name, Counter())[m.group(1).decode("ascii")] += 1
+            if p.build_info and p.name not in self.build and any(s in block for s in p.strong):
+                for pat in p.build_info:
+                    m = pat.search(block)
+                    if m:
+                        self.build[p.name] = {k: v.decode("ascii") for k, v in m.groupdict().items() if v}
+                        break
 
     def feed_string(self, s: str) -> None:
         for p in PLATFORMS:
@@ -419,7 +450,10 @@ class PlatformAccumulator:
         for p in PLATFORMS:
             strong = [s for s in p.strong if s in self.hits[p.name]]
             weak = [s for s in p.weak if s in self.hits[p.name]]
-            hints = self.hints.get(p.name, [])
+            hints = list(self.hints.get(p.name, []))
+            build = self.build.get(p.name) if strong else None
+            if build:  # the block layout is specific to this project's version.c
+                hints.append("build information block (" + ", ".join(f"{k} {v}" for k, v in build.items()) + ")")
             score = 10 * len(hints) + 4 * len(strong) + len(weak)
             if score < 3:
                 continue
@@ -430,13 +464,16 @@ class PlatformAccumulator:
             else:
                 conf = "low"
             ev = hints + [f"signature '{_show(s)}'" for s in strong] + [f"string '{_show(s)}'" for s in weak]
-            version = None
-            if self.versions[p.name] and (strong or hints):
+            version = (build or {}).get("version")
+            if version is None and self.versions[p.name] and (strong or hints):
                 version = self.versions[p.name].most_common(1)[0][0]
+            if version is None and strong and self.constants.get(p.name):
+                version = self.constants[p.name].most_common(1)[0][0]
             vehicle = self.vehicles[p.name].most_common(1)[0][0] if self.vehicles[p.name] else None
             vehicle = VEHICLE_ALIASES.get(vehicle, vehicle)
             out.append(PlatformGuess(name=p.name, family=p.family, confidence=conf, score=score,
-                                     evidence=ev[:12], version=version, vehicle=vehicle))
+                                     evidence=ev[:12], version=version, vehicle=vehicle,
+                                     board=(build or {}).get("board"), build=build or None))
         out.sort(key=lambda g: -g.score)
         return out
 
