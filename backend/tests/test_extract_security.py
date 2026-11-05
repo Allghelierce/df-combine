@@ -986,3 +986,43 @@ def test_data_appended_to_an_executable_is_analysed(tmp_path):
             assert "/etc/passwd" in {a.name for a in res.artifacts if a.origin == "extracted"}
     mod = Extractor(tmp_path / "w_mod2", Limits()).run(tmp_path / "module.ko", "module.ko").artifacts[0]
     assert mod.details["module_signature_bytes"] == len(cases["module.ko"][0]) - len(base)
+
+
+def test_data_after_a_filesystem_image_that_declares_its_size(tmp_path):
+    """ext, FAT, ROMFS and CramFS images declare their size; whatever followed them in the file (another
+    partition, an overlay) was ignored. It now goes through the trailing-data check."""
+    import gzip
+    import subprocess
+    b = io.BytesIO()
+    with tarfile.open(fileobj=b, mode="w") as tf:
+        ti = tarfile.TarInfo("etc/passwd")
+        ti.size = 26
+        tf.addfile(ti, io.BytesIO(b"root::0:0::/root:/bin/sh\n\n"))
+    appended = gzip.compress(b.getvalue(), mtime=0)
+    images: dict[str, bytes] = {"romfs": factory.romfs({"rcS": b"echo hello\n"})}
+    tree = tmp_path / "tree"
+    (tree / "etc").mkdir(parents=True)
+    (tree / "etc" / "hostname").write_text("drone\n")
+    if shutil.which("mkfs.ext4"):
+        subprocess.run(["mkfs.ext4", "-q", "-F", "-d", str(tree), "-b", "1024", str(tmp_path / "e.img"), "1M"],
+                       check=True, capture_output=True)
+        images["ext"] = (tmp_path / "e.img").read_bytes()
+    if shutil.which("mkfs.cramfs"):
+        subprocess.run(["mkfs.cramfs", str(tree), str(tmp_path / "c.img")], check=True, capture_output=True)
+        images["cramfs"] = (tmp_path / "c.img").read_bytes()
+    if shutil.which("mformat"):
+        (tmp_path / "f.img").write_bytes(b"\0" * 1440 * 1024)
+        subprocess.run(["mformat", "-i", str(tmp_path / "f.img"), "-f", "1440", "::"], check=True, capture_output=True)
+        images["fat"] = (tmp_path / "f.img").read_bytes()
+    for fmt, image in images.items():
+        src = tmp_path / f"{fmt}-plus.bin"
+        src.write_bytes(image + appended)
+        res = Extractor(tmp_path / f"w_{fmt}", Limits()).run(src, src.name)
+        assert res.artifacts[0].format == fmt, (fmt, res.artifacts[0].format)
+        carved = [a for a in res.artifacts if a.name.startswith("trailing_") and a.origin == "carved"]
+        assert carved and carved[0].details["carved_offset"] == hex(len(image)), (fmt, res.warnings)
+        assert "/etc/passwd" in {a.name for a in res.artifacts if a.origin == "extracted"}, fmt
+        plain = tmp_path / f"{fmt}.bin"
+        plain.write_bytes(image)
+        res = Extractor(tmp_path / f"w3_{fmt}", Limits()).run(plain, plain.name)
+        assert not any(a.name.startswith("trailing_") for a in res.artifacts), fmt

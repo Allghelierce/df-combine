@@ -389,6 +389,8 @@ class Extractor:
         try:
             if handler is not None:
                 children = handler(self, art)
+                if art.format in DECLARED_SIZE_FORMATS:  # data after the image: an overlay, another partition
+                    children += self._after_declared_size(art)
             else:
                 children = self._carve(art)
                 if not children:
@@ -414,6 +416,14 @@ class Extractor:
             if self.budget.files_created > self.limits.max_files:
                 break
             self._process(child)
+
+    def _after_declared_size(self, art: Artifact) -> list[Artifact]:
+        path = self.path_of(art.id)
+        with path.open("rb") as fp:
+            end = _declared_image_size(art.format, fp.read(4096))
+        if not end or end >= art.size:
+            return []
+        return self._trailing_data(art, path, end, f"the {art.format_description} ({end:,} bytes declared)")
 
     def _elf_overlay(self, art: Artifact) -> list[Artifact]:
         """Data appended after an executable's own data: self-extracting and packed programs (PyInstaller, pkg)
@@ -1734,6 +1744,33 @@ def demangle(names: list[str], timeout: int = 60) -> dict[str, str]:
     if p.returncode != 0 or len(out) < len(todo):
         return {}
     return {m: d[:300] for m, d in zip(todo, out[:len(todo)], strict=True) if d and d != m}
+
+
+DECLARED_SIZE_FORMATS = {"ext", "fat", "romfs", "cromfs", "cramfs"}
+
+
+def _declared_image_size(fmt: str, head: bytes) -> int | None:
+    """Size a filesystem image declares for itself (anything after it is not part of the image)."""
+    try:
+        if fmt == "ext":
+            blocks, log = struct.unpack_from("<I", head, 1028)[0], struct.unpack_from("<I", head, 1048)[0]
+            if struct.unpack_from("<I", head, 1024 + 0x60)[0] & 0x80:  # 64bit feature: high half of the count
+                blocks |= struct.unpack_from("<I", head, 1024 + 0x150)[0] << 32
+            return blocks * (1024 << log) if log <= 6 else None
+        if fmt == "fat":
+            bps, ts16 = struct.unpack_from("<HH", head, 11)[0], struct.unpack_from("<H", head, 19)[0]
+            return bps * (ts16 or struct.unpack_from("<I", head, 32)[0]) if bps in (512, 1024, 2048, 4096) else None
+        if fmt == "romfs":
+            return romfs_size(head)
+        if fmt == "cromfs":
+            hdr = cromfs_header(head[:20], 1 << 40)
+            return hdr["fsize"] if hdr else None
+        if fmt == "cramfs":
+            off = more.cramfs_offset(head)
+            return struct.unpack_from("<I", head, off + 4)[0] if off is not None else None  # includes the pad
+    except struct.error:
+        return None
+    return None
 
 
 MODULE_SIG_MARKER = b"~Module signature appended~\n"

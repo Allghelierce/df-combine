@@ -201,7 +201,8 @@ boundary for hostile samples.
 * content cannot be hidden from analysis behind a tar end-of-archive marker or a damaged tar header
   (reading continues, with a warning giving the bytes skipped), behind padding after a gzip, xz or
   zstd stream (0xFF padding used to fail the whole stream), in the later archives of an initramfs,
-  after a uImage payload, a SquashFS image, a tar archive's end marker, any compressed stream or an
+  after a uImage payload, a SquashFS or other filesystem image that declares its size, a tar archive's
+  end marker, any compressed stream or an
   executable's own data (ELF overlays; signed kernel modules are recognised),
   or under ext names that debugfs commands could not
   quote (listing and dumping go by inode number); data after a stream or image that is not padding
