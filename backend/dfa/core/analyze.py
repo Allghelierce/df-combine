@@ -237,6 +237,7 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
         manifest["scanner_runs"].append({"name": "builtin:components", "status": "failed", "findings": 0,
                                          "error": f"{type(exc).__name__}: {exc}"})
     findings += _identification_findings(ctx, arts, platforms)
+    findings += _appended_data_findings(ctx, arts)
     findings += _archive_anomaly_findings(ctx, result)
 
     # ---- identification summary --------------------------------------------
@@ -399,6 +400,44 @@ def _identification_findings(ctx: ScanContext, arts: list[Artifact], platforms) 
                 rule_id=f"extraction-{a.extraction}", affected_component=ctx.where(a),
                 remediation="Review the artifact manually or install the missing unpacker.",
                 evidence=[Evidence("string", a.extraction_note or "")]))
+    return out
+
+
+def _appended_data_findings(ctx: ScanContext, arts: list[Artifact]) -> list[Finding]:
+    """Data found after an executable's or an image's own data (analysed as an artifact of its own) is worth a
+    look in itself: appended to an executable it is a pattern of packed and self-extracting programs and of
+    droppers (suspicious); after an image or archive it may be a normal layout, such as an overlay (info)."""
+    from .findings import Classification as C
+    from .findings import Confidence as K
+    from .findings import Evidence
+    from .findings import Severity as S
+    by_id = {a.id: a for a in arts}
+    out = []
+    for a in arts:
+        parent = by_id.get(a.parent_id) if a.parent_id is not None else None
+        if parent is None or a.origin != "carved" or not a.name.startswith("trailing_"):
+            continue
+        ev = Evidence("offset", f"{a.details.get('carved_offset', '?')}: {a.size:,} bytes ({a.format_description})",
+                      ctx.where(a))
+        if parent.format == "elf":
+            out.append(Finding(
+                title="Executable carries appended data (overlay)",
+                description=f"'{parent.name}' has {a.size:,} bytes after its own segments and sections. Self-extracting "
+                            "and packed programs keep their payload there, and so can a dropper; the appended data was "
+                            "analysed separately. This is a pattern, not a confirmed problem.",
+                severity=S.low, classification=C.suspicious, confidence=K.medium, source_tool="builtin:extract",
+                rule_id="appended-to-executable", affected_component=ctx.where(parent),
+                remediation="Check what the appended data is and whether the vendor ships the program packed.",
+                evidence=[ev], tags=["extraction"]))
+        else:
+            out.append(Finding(
+                title=f"Data after the end of a {parent.format_description}",
+                description=f"{a.size:,} bytes follow the end of '{parent.name}' and were analysed separately (an "
+                            "overlay or another image may sit there, or something added later).",
+                severity=S.info, classification=C.info, confidence=K.high, source_tool="builtin:extract",
+                rule_id="data-after-image", affected_component=ctx.where(parent),
+                remediation="Check that the data after the image belongs to the firmware layout.",
+                evidence=[ev], tags=["extraction"]))
     return out
 
 

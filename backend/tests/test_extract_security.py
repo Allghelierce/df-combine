@@ -1062,3 +1062,32 @@ def test_zip_inside_a_raw_image_is_carved(tmp_path):
                      + noise(4096))
     res = Extractor(tmp_path / "w_lone", Limits()).run(lone, "lone.bin")
     assert not [a for a in res.artifacts if a.origin == "carved"]
+
+
+def test_appended_data_is_reported_as_a_finding(tmp_path, run_analysis):
+    """Appended data is analysed on its own, and its presence is reported too: appended to an executable as a
+    suspicious pattern (packers, self-extracting programs, droppers), after an image or archive as information."""
+    import gzip
+    elf = Path("/usr/bin/true")
+    if not elf.is_file() or elf.read_bytes()[:4] != b"\x7fELF":
+        pytest.skip("no ELF executable to build the sample from")
+    b = io.BytesIO()
+    with tarfile.open(fileobj=b, mode="w") as tf:
+        ti = tarfile.TarInfo("etc/passwd")
+        ti.size = 26
+        tf.addfile(ti, io.BytesIO(b"root::0:0::/root:/bin/sh\n\n"))
+    payload = gzip.compress(b.getvalue(), mtime=0)
+    dropper = tmp_path / "updater"
+    dropper.write_bytes(elf.read_bytes() + payload)
+    found = {f["rule_id"]: f for f in run_analysis(dropper)["findings"]}
+    f = found["appended-to-executable"]
+    assert (f["classification"], f["severity"]) == ("suspicious", "low")
+    assert f["evidence"][0]["value"].startswith(hex(len(elf.read_bytes())) + ":")
+    archive = tmp_path / "rootfs.tar"
+    archive.write_bytes(b.getvalue() + b"appended blob, not padding " * 20)
+    found = {f["rule_id"]: f for f in run_analysis(archive)["findings"]}
+    assert found["data-after-image"]["classification"] == "info"
+    assert "appended-to-executable" not in found
+    plain = tmp_path / "plain"
+    plain.write_bytes(elf.read_bytes())
+    assert not {"appended-to-executable", "data-after-image"} & {f["rule_id"] for f in run_analysis(plain)["findings"]}
