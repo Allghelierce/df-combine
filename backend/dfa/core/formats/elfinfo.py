@@ -116,6 +116,14 @@ def inspect_elf(fp: BinaryIO) -> ElfInfo:
             info.has_debug_info = True
         if name == ".modinfo" or name == ".gnu.linkonce.this_module":
             info.is_kernel_module = True
+        if name == ".ARM.attributes" and str(machine) == "EM_ARM":
+            try:
+                attrs = sec.data()[:4096]
+            except Exception:  # noqa: BLE001
+                attrs = b""
+            # EABI build attributes: Tag_CPU_arch_profile (7) = 'M', or a "cortex-m*" Tag_CPU_name
+            if b"\x07M" in attrs or b"cortex-m" in attrs.lower():
+                info.arch = "ARM Cortex-M (Thumb-2)"
         if isinstance(sec, DynamicSection):
             for tag in _safe_iter(sec.iter_tags):
                 t = tag.entry.d_tag

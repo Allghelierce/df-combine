@@ -49,6 +49,23 @@ def test_cromfs_rejects_loops():
         list(iter_cromfs(io.BytesIO(bytes(vol)), 0, len(vol), 100, 1 << 20))
 
 
+def test_cromfs_offset_at_or_past_fsize_ends_the_list():
+    """NuttX (cromfs_offset2addr) treats offsets >= cv_fsize as NULL. Real PX4 FMUv2 builds end a directory's
+    peer chain with peer == cv_fsize, followed by unrelated flash contents."""
+    import struct
+    vol = bytearray(factory.cromfs({"a": b"x", "b": b"y"}))
+    fsize = struct.unpack_from("<I", vol, 12)[0]
+    entries = list(iter_cromfs(io.BytesIO(bytes(vol)), 0, len(vol), 100, 1 << 20))
+    last = None
+    off = struct.unpack_from("<I", vol, 8)[0]  # root node; walk its peer chain to the last node
+    while off:
+        last, off = off, struct.unpack_from("<I", vol, off + 12)[0]
+    struct.pack_into("<I", vol, last + 12, fsize)
+    tail = bytes(vol) + b"\xff\xec\xc2\x0f" * 8  # what follows the volume in flash
+    again = list(iter_cromfs(io.BytesIO(tail), 0, len(tail), 100, 1 << 20))
+    assert [e.name for e, _ in again] == [e.name for e, _ in entries]
+
+
 DPKG = """Package: libssl1.1
 Status: install ok installed
 Architecture: armhf

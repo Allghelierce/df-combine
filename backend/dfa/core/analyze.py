@@ -256,7 +256,7 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
         "platform": primary.name if primary else "Unknown",
         "platform_family": primary.family if primary else None,
         "platform_confidence": primary.confidence if primary else None,
-        "platform_version": (primary.version if primary else None) or container_meta.get("git_identity"),
+        "platform_version": _plain_version((primary.version if primary else None) or container_meta.get("git_identity")),
         "vehicle_type": primary.vehicle if primary else None,
         "platform_candidates": [p.to_dict() for p in platforms],
         "board_id": board_id,
@@ -296,6 +296,11 @@ def _art_dict(a: Artifact, ctx: ScanContext) -> dict:
         e.pop("imports", None)
         d["elf"] = e
     return d
+
+
+def _plain_version(v: str | None) -> str | None:
+    """'v1.17.0' (git tag style, e.g. PX4's git_identity) -> '1.17.0'."""
+    return v[1:] if v and len(v) > 1 and v[0] in "vV" and v[1].isdigit() else v
 
 
 def _primary_arch(arts: list[Artifact], ctx: ScanContext) -> tuple[str | None, int | None, str | None, str | None]:

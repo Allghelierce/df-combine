@@ -395,8 +395,10 @@ def iter_cromfs(fp: BinaryIO, base: int, total_size: int, max_entries: int,
     while stack:
         off, prefix, depth = stack.pop()
         while off:
-            if off in seen or not 20 <= off < hdr["fsize"]:
-                raise FormatError("CROMFS node loop or out-of-range offset")
+            if off >= hdr["fsize"]:
+                break  # NuttX's cromfs_offset2addr() maps offsets >= cv_fsize to NULL: end of the list
+            if off in seen or off < 20:
+                raise FormatError("CROMFS node loop or offset inside the volume header")
             seen.add(off)
             fp.seek(base + off)
             raw = fp.read(20)

@@ -91,7 +91,9 @@ def test_fwanalyzer_on_real_alpine_rootfs(real_settings):
     reports = list((ctx.work_dir / "tools" / "fwanalyzer").glob("report_*.json"))
     assert reports, "FwAnalyzer wrote no report"
     report = json.loads(reports[0].read_text())
-    assert "offenders" in report or "informational" in report or "data" in report
+    # FwAnalyzer's report always names the analysed image; offenders/informational/data are omitted when empty
+    assert report.get("fs_type") == "dirfs" and report.get("image_name")
+    assert set(report) <= {"fs_type", "image_name", "image_digest", "offenders", "informational", "data"}
     assert all(f.source_tool == "fwanalyzer" for f in r.findings)
 
 

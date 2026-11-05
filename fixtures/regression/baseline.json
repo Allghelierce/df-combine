@@ -1,0 +1,410 @@
+{
+ "alpine3.15.0-arm64-rootfs.tar.gz": {
+  "components": [
+   "busybox 1.34.1",
+   "openssl 1.1.1l",
+   "zlib 1.2.11"
+  ],
+  "extraction": {
+   "artifacts": 95,
+   "failed": [],
+   "formats": {
+    "elf": 17,
+    "empty": 6,
+    "gzip": 1,
+    "tar": 2,
+    "text": 69
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:binary:elf-dangerous-imports": 1,
+   "builtin:binary:elf-debug-info": 1,
+   "builtin:binary:elf-no-canary": 1,
+   "builtin:components:outdated-busybox": 1,
+   "builtin:components:outdated-openssl": 1,
+   "builtin:components:outdated-zlib": 1
+  },
+  "identification": {
+   "architecture": "AArch64",
+   "bits": 64,
+   "board_id": null,
+   "endianness": "little",
+   "format": "gzip",
+   "os_hint": "linux",
+   "platform": "Unknown",
+   "platform_version": null,
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 14,
+   "distro": "alpine",
+   "owned_files": 73
+  }
+ },
+ "ark_can-flow_canbootloader.px4": {
+  "components": [],
+  "extraction": {
+   "artifacts": 2,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 1,
+    "px4": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": 80,
+   "endianness": "little",
+   "format": "px4",
+   "os_hint": "bare-metal",
+   "platform": "PX4",
+   "platform_version": "1.17.0",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "debian11-armhf-rootfs-20210816.tar.gz": {
+  "components": [
+   "glibc 2.31",
+   "openssl 1.1.1k",
+   "zlib 1.2.11"
+  ],
+  "extraction": {
+   "artifacts": 3575,
+   "failed": [],
+   "formats": {
+    "elf": 701,
+    "empty": 23,
+    "gzip": 1,
+    "raw": 1255,
+    "tar": 1,
+    "text": 1593,
+    "xz": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:binary:cleartext-url": 29,
+   "builtin:binary:elf-dangerous-imports": 1,
+   "builtin:binary:elf-no-canary": 1,
+   "builtin:components:outdated-openssl": 1,
+   "builtin:components:outdated-zlib": 1,
+   "builtin:config:setuid-files": 1,
+   "builtin:secrets:hardcoded-credential-assignment": 6,
+   "builtin:secrets:pem-private-key": 10
+  },
+  "identification": {
+   "architecture": "ARM (32-bit)",
+   "bits": 32,
+   "board_id": null,
+   "endianness": "little",
+   "format": "gzip",
+   "os_hint": "linux",
+   "platform": "Unknown",
+   "platform_version": null,
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 96,
+   "distro": "debian",
+   "owned_files": 3033
+  }
+ },
+ "esp/bootloader_esp32.bin": {
+  "components": [],
+  "extraction": {
+   "artifacts": 4,
+   "failed": [],
+   "formats": {
+    "esp_image": 1,
+    "raw": 3
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "Xtensa (ESP32)",
+   "bits": 32,
+   "board_id": null,
+   "endianness": "little",
+   "format": "esp_image",
+   "os_hint": "bare-metal",
+   "platform": "Espressif",
+   "platform_version": null,
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "esp/bootloader_esp32c3.bin": {
+  "components": [],
+  "extraction": {
+   "artifacts": 5,
+   "failed": [],
+   "formats": {
+    "esp_image": 1,
+    "raw": 4
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "RISC-V (ESP32-C3)",
+   "bits": 32,
+   "board_id": null,
+   "endianness": "little",
+   "format": "esp_image",
+   "os_hint": "bare-metal",
+   "platform": "Espressif",
+   "platform_version": null,
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "esp/esp8266_deepsleep.bin": {
+  "components": [],
+  "extraction": {
+   "artifacts": 7,
+   "failed": [],
+   "formats": {
+    "esp_image": 2,
+    "raw": 5
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "Xtensa (ESP8266)",
+   "bits": 32,
+   "board_id": null,
+   "endianness": "little",
+   "format": "esp_image",
+   "os_hint": "bare-metal",
+   "platform": "Espressif",
+   "platform_version": null,
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "esp/esp_idf_blink_esp32s2.bin": {
+  "components": [
+   "blink qa-test-v5.0-20220830-4-g4532e6",
+   "esp-idf 5.0-beta1-427-g4532e6e0b2-dirt"
+  ],
+  "extraction": {
+   "artifacts": 7,
+   "failed": [],
+   "formats": {
+    "esp_image": 1,
+    "raw": 6
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "Xtensa (ESP32-S2)",
+   "bits": 32,
+   "board_id": null,
+   "endianness": "little",
+   "format": "esp_image",
+   "os_hint": "bare-metal",
+   "platform": "Espressif",
+   "platform_version": null,
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "esp/partitions_singleapp.bin": {
+  "components": [],
+  "extraction": {
+   "artifacts": 1,
+   "failed": [],
+   "formats": {
+    "esp_partition_table": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": null,
+   "bits": null,
+   "board_id": null,
+   "endianness": null,
+   "format": "esp_partition_table",
+   "os_hint": null,
+   "platform": "Unknown",
+   "platform_version": null,
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "px4_fmu-v2_default.elf": {
+  "components": [
+   "nuttx 11.0.0",
+   "px4 1.17.0"
+  ],
+  "extraction": {
+   "artifacts": 1,
+   "failed": [],
+   "formats": {
+    "elf": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": null,
+   "endianness": "little",
+   "format": "elf",
+   "os_hint": "bare-metal",
+   "platform": "PX4",
+   "platform_version": "1.17.0",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "px4_fmu-v2_default.px4": {
+  "components": [
+   "nuttx 11.0.0",
+   "px4 1.17.0"
+  ],
+  "extraction": {
+   "artifacts": 34,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 3,
+    "cromfs": 1,
+    "empty": 2,
+    "px4": 1,
+    "text": 26,
+    "xz": 1
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": 9,
+   "endianness": "little",
+   "format": "px4",
+   "os_hint": "bare-metal",
+   "platform": "PX4",
+   "platform_version": "1.17.0",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "px4_fmu-v5_default.px4": {
+  "components": [
+   "nuttx 11.0.0",
+   "px4 1.17.0"
+  ],
+  "extraction": {
+   "artifacts": 81,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 3,
+    "cromfs": 1,
+    "empty": 2,
+    "px4": 1,
+    "text": 70,
+    "xz": 4
+   },
+   "limits_hit": []
+  },
+  "findings": {
+   "builtin:drone:px4-cbrk_supply_chk": 2,
+   "builtin:drone:px4-cbrk_supply_chk-sim": 6
+  },
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": 50,
+   "endianness": "little",
+   "format": "px4",
+   "os_hint": "bare-metal",
+   "platform": "PX4",
+   "platform_version": "1.17.0",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ },
+ "px4_fmu-v6x_default.px4": {
+  "components": [
+   "nuttx 11.0.0",
+   "px4 1.17.0"
+  ],
+  "extraction": {
+   "artifacts": 66,
+   "failed": [],
+   "formats": {
+    "cortexm_raw": 2,
+    "cromfs": 1,
+    "empty": 2,
+    "px4": 1,
+    "text": 56,
+    "xz": 4
+   },
+   "limits_hit": []
+  },
+  "findings": {},
+  "identification": {
+   "architecture": "ARM Cortex-M (Thumb-2)",
+   "bits": 32,
+   "board_id": 53,
+   "endianness": "little",
+   "format": "px4",
+   "os_hint": "bare-metal",
+   "platform": "PX4",
+   "platform_version": "1.17.0",
+   "vehicle_type": null
+  },
+  "packages": {
+   "count": 0,
+   "distro": null,
+   "owned_files": 0
+  }
+ }
+}
