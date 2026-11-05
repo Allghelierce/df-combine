@@ -4,7 +4,7 @@ import { RiskGauge, SeverityDonut, StackedBar } from "../components/charts";
 import { FindingsTable } from "../components/FindingsTable";
 import { CopyText, Empty, ErrorBox, Icon, Panel, StatusBadge, usePolling } from "../components/ui";
 import { api, Artifact, ExportKind, EXPORTS, Finding, PackageInventory, PackageItem, Scan, ToolRun, VulnRef } from "../lib/api";
-import { buildLine, formatBytes, formatDate, formatDuration, imageSummary, toolStatusTone } from "../lib/format";
+import { buildLine, formatBytes, formatDate, formatDuration, imageSummary, INVENTORY_ROWS, inventoryCount, toolStatusTone } from "../lib/format";
 
 type Tab = "overview" | "findings" | "inventory" | "components" | "log";
 
@@ -446,9 +446,7 @@ function Inventory({ data, running }: { data: Awaited<ReturnType<typeof api.arti
           ))}
         </select>
         <input type="search" placeholder="Filter path…" value={q} onChange={(e) => setQ(e.target.value)} />
-        <span className="muted small">
-          {items.length} / {data.total}
-        </span>
+        <span className="muted small">{inventoryCount(items.length, data.items.length, data.total)}</span>
       </div>
       <div className="table-scroll">
         <table className="table inventory">
@@ -463,7 +461,7 @@ function Inventory({ data, running }: { data: Awaited<ReturnType<typeof api.arti
             </tr>
           </thead>
           <tbody>
-            {items.slice(0, 1500).map((a) => {
+            {items.slice(0, INVENTORY_ROWS).map((a) => {
               const elf = a.elf as Record<string, string | boolean | null> | undefined;
               return (
                 <tr key={a.id}>

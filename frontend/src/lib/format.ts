@@ -117,3 +117,15 @@ export function imageSummary(i: ImageInfo | null | undefined): string | null {
   if (i.identical_to !== undefined && i.identical_to !== null) parts.push(`identical to artifact #${i.identical_to}`);
   return parts.join(" · ");
 }
+
+export const INVENTORY_ROWS = 1500;
+
+/** Inventory counter that says when rows are cut off (rendered rows, loaded artifacts). */
+export function inventoryCount(matching: number, loaded: number, total: number): string {
+  const n = (x: number) => x.toLocaleString("en-US");
+  let text = matching > INVENTORY_ROWS ? `showing ${n(INVENTORY_ROWS)} of ${n(matching)} matching` : `${n(matching)} matching`;
+  text += ` · ${n(total)} artifacts`;
+  if (loaded < total) text += ` (first ${n(loaded)} loaded)`;
+  if (matching > INVENTORY_ROWS) text += " — filter to narrow";
+  return text;
+}

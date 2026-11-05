@@ -1,4 +1,4 @@
-import { buildLine, formatBytes, formatDuration, imageSummary, riskLabel, shortHash, toolStatusTone } from "../lib/format";
+import { buildLine, formatBytes, formatDuration, imageSummary, inventoryCount, riskLabel, shortHash, toolStatusTone } from "../lib/format";
 
 describe("format helpers", () => {
   it("formats bytes", () => {
@@ -39,5 +39,14 @@ describe("build and image facts", () => {
       .toBe("load address 0x8004000 · 6,934 function symbols (derived from the ELF)");
     expect(imageSummary({ flash_base: "0x8000000" })).toBe("load address 0x8000000");
     expect(imageSummary({})).toBeNull();
+  });
+});
+
+describe("inventory counter", () => {
+  it("says when rows are cut off", () => {
+    expect(inventoryCount(95, 95, 95)).toBe("95 matching · 95 artifacts");
+    // Debian 11 rootfs: 3,000+ artifacts, more than the rendered rows
+    expect(inventoryCount(3033, 3033, 3033)).toBe("showing 1,500 of 3,033 matching · 3,033 artifacts — filter to narrow");
+    expect(inventoryCount(12, 5000, 20000)).toBe("12 matching · 20,000 artifacts (first 5,000 loaded)");
   });
 });
