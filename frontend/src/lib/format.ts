@@ -149,3 +149,14 @@ export function externalUrl(ref: string): string | null {
     return null;
   }
 }
+
+// control, bidirectional-override and zero-width characters (tab and newline included)
+const HIDDEN = /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g;
+
+/** Firmware-derived text (names, paths, evidence) as it is: characters that would act instead of showing
+ * (U+202E reversing "evil\u202etxt.exe" into "evilexe.txt", zero-width ones, a newline in a name) are
+ * displayed as escapes such as \u202e. */
+export function shown(text: string | null | undefined): string {
+  if (!text) return text ?? "";
+  return text.replace(HIDDEN, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}

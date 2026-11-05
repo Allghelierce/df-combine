@@ -4,7 +4,7 @@ import { RiskGauge, SeverityDonut, StackedBar } from "../components/charts";
 import { FindingsTable } from "../components/FindingsTable";
 import { CopyText, Empty, ErrorBox, Icon, Panel, StatusBadge, usePolling } from "../components/ui";
 import { api, Artifact, ExportKind, EXPORTS, Finding, PackageInventory, PackageItem, Scan, ToolRun, VulnRef } from "../lib/api";
-import { buildLine, formatBytes, formatDate, formatDuration, imageSummary, INVENTORY_ROWS, inventoryCount, toolStatusTone } from "../lib/format";
+import { buildLine, formatBytes, formatDate, formatDuration, imageSummary, INVENTORY_ROWS, inventoryCount, shown, toolStatusTone } from "../lib/format";
 
 type Tab = "overview" | "findings" | "inventory" | "components" | "log";
 
@@ -465,8 +465,8 @@ function Inventory({ data, running }: { data: Awaited<ReturnType<typeof api.arti
               const elf = a.elf as Record<string, string | boolean | null> | undefined;
               return (
                 <tr key={a.id}>
-                  <td className="mono small path" style={{ paddingLeft: `${8 + a.depth * 12}px` }} title={a.display_path}>
-                    {a.name}
+                  <td className="mono small path" style={{ paddingLeft: `${8 + a.depth * 12}px` }} title={shown(a.display_path)}>
+                    {shown(a.name)}
                     {a.extraction && a.extraction !== "ok" && <span className={`pill ${a.extraction === "failed" ? "bad" : "warn"}`}>{a.extraction}</span>}
                   </td>
                   <td>

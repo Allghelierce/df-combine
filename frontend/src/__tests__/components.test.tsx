@@ -81,6 +81,13 @@ describe("finding basis and package attribution", () => {
     expect(screen.getByText(/Static-analysis warning\./)).toBeInTheDocument();
     expect(screen.getByText(/not a confirmed vulnerability/)).toBeInTheDocument();
   });
+  it("shows a spoofing name in a finding as it is", () => {
+    const f: Finding = { ...base, id: 9, severity: "high", classification: "detected", title: "Key in evil\u202etxt.exe",
+      source_tool: "builtin:secrets", affected_component: "fw > /bin/evil\u202etxt.exe" };
+    render(<FindingsTable findings={[f]} />);
+    expect(screen.getByText("Key in evil\\u202etxt.exe")).toBeInTheDocument();
+    expect(screen.getByTitle("fw > /bin/evil\\u202etxt.exe")).toHaveTextContent("fw > /bin/evil\\u202etxt.exe");
+  });
   it("distinguishes advisories from version matches", () => {
     expect(findingBasis({ source_tool: "osv", rule_id: "osv-distro-package", classification: "detected", tags: [] }).label).toBe(
       "Distribution security advisory",

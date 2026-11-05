@@ -1,4 +1,4 @@
-import { buildLine, externalUrl, formatBytes, formatDuration, imageSummary, inventoryCount, riskLabel, shortHash, toolStatusTone } from "../lib/format";
+import { buildLine, externalUrl, formatBytes, formatDuration, imageSummary, inventoryCount, riskLabel, shortHash, shown, toolStatusTone } from "../lib/format";
 
 describe("format helpers", () => {
   it("formats bytes", () => {
@@ -74,5 +74,15 @@ describe("artifact placement", () => {
     expect(imageSummary({ trailing_bytes: 4 })).toBe("4 bytes after the data (size field or checksum)");
     expect(imageSummary({ carved_offset: "0x10000", flash_base: "0x8000000" })).toBe("found at 0x10000 · load address 0x8000000");
     expect(imageSummary({})).toBeNull();
+  });
+});
+
+describe("firmware-derived text", () => {
+  it("shows characters that would act instead of applying them", () => {
+    expect(shown("evil\u202etxt.exe")).toBe("evil\\u202etxt.exe");
+    expect(shown("new\nline\ttab\u0000nul")).toBe("new\\u000aline\\u0009tab\\u0000nul");
+    expect(shown("zero\u200bwidth\ufeff")).toBe("zero\\u200bwidth\\ufeff");
+    expect(shown("/etc/été/中文/user\\x80dir")).toBe("/etc/été/中文/user\\x80dir");  // letters and \xNN text stay
+    expect(shown(null)).toBe("");
   });
 });

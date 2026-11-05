@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { CLASSIFICATIONS, Classification, Finding, SEVERITIES, Severity } from "../lib/api";
-import { CLASSIFICATION_HELP, externalUrl, findingBasis } from "../lib/format";
+import { CLASSIFICATION_HELP, externalUrl, findingBasis, shown } from "../lib/format";
 import { ClassBadge, Empty, SeverityBadge } from "./ui";
 
 export function FindingsTable({ findings }: { findings: Finding[] }) {
@@ -106,7 +106,7 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
                 <button type="button" className="finding-head" onClick={() => setOpen(isOpen ? null : f.id)} aria-expanded={isOpen}>
                   <SeverityBadge severity={f.severity} />
                   <ClassBadge value={f.classification} />
-                  <span className="finding-title">{f.title}</span>
+                  <span className="finding-title">{shown(f.title)}</span>
                   {f.tags
                     .filter((t) => t.startsWith("corroborated-by:"))
                     .map((t) => (
@@ -116,14 +116,14 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
                     ))}
                   {f.package && (
                     <span className="pill pkg" title="Installed package that owns the affected file">
-                      {f.package}
+                      {shown(f.package)}
                     </span>
                   )}
                   <span className="finding-meta mono">{f.source_tool}</span>
                   <span className="chev">{isOpen ? "▾" : "▸"}</span>
                 </button>
-                <div className="finding-component mono" title={f.affected_component}>
-                  {f.affected_component}
+                <div className="finding-component mono" title={shown(f.affected_component)}>
+                  {shown(f.affected_component)}
                 </div>
                 {isOpen && (
                   <div className="finding-body">
@@ -136,7 +136,7 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
                       {f.package && (
                         <>
                           <dt>Package</dt>
-                          <dd className="mono">{f.package}</dd>
+                          <dd className="mono">{shown(f.package)}</dd>
                         </>
                       )}
                       <dt>Classification</dt>
@@ -166,8 +166,8 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
                             {f.evidence.map((e, i) => (
                               <tr key={i}>
                                 <td className="ev-kind">{e.kind}</td>
-                                <td className="mono ev-value">{e.value}</td>
-                                <td className="mono ev-loc">{e.location}</td>
+                                <td className="mono ev-value">{shown(e.value)}</td>
+                                <td className="mono ev-loc">{shown(e.location)}</td>
                               </tr>
                             ))}
                           </tbody>
