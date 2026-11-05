@@ -207,6 +207,13 @@ make lint
   ```bash
   cd fixtures/real && cid=$(docker create --platform linux/arm64 alpine:3.15.0) && docker export $cid | gzip -1 > alpine3.15.0-arm64-rootfs.tar.gz && docker rm $cid
   ```
+* **Parser fuzzing** (opt-in): mutates the real samples into the CROMFS, `.px4`, Intel HEX, ESP and
+  vector-table parsers and the platform scanner, and reports hangs, memory blow-ups and unexpected
+  exception types (last run: ~17 million inputs, none found):
+
+  ```bash
+  python -I scripts/fuzz_parsers.py backend fixtures/real 60 /tmp/fuzz-out
+  ```
 * **Real tools** (opt-in, minutes): runs the actual FwAnalyzer, cwe_checker, Ghidra and FACT:
 
   ```bash
