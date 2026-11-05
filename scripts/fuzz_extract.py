@@ -111,6 +111,34 @@ def zip_of(files: dict[str, bytes], method: int = zipfile.ZIP_DEFLATED) -> bytes
     return b.getvalue()
 
 
+def zip_members(members: list[dict], base: int = 0, comment: bytes = b"") -> tuple[bytes, list[int]]:
+    """A hand-made zip: members are dicts of name, data, method (0 stored, 8 deflated, others written as given in
+    "raw"), crc (override) and "before" (bytes placed before the member's local header); the offsets written are
+    relative to ``base`` (a stub of that length in front: what 'zip -A' writes). Returns the zip and the offsets of
+    its headers and length fields."""
+    body, cds, hot, cd_entries = b"", b"", [], []
+    for m in members:
+        body += m.get("before", b"")
+        data, method = m["data"], m.get("method", 0)
+        if method == 8:
+            co = zlib.compressobj(9, zlib.DEFLATED, -15)
+            raw = co.compress(data) + co.flush()
+        else:
+            raw = m.get("raw", data)
+        crc, off = m.get("crc", zlib.crc32(data)), len(body)
+        hot += [off, off + 14, off + 18, off + 26]
+        body += struct.pack("<4sHHHHHIIIHH", b"PK\x03\x04", 20, 0, method, 0, 0x21, crc, len(raw), len(data),
+                            len(m["name"]), 0) + m["name"] + raw
+        cd_entries.append(len(cds))
+        cds += struct.pack("<4sHHHHHHIIIHHHHHII", b"PK\x01\x02", 20, 20, 0, method, 0, 0x21, crc, len(raw), len(data),
+                           len(m["name"]), 0, 0, 0, 0, 0, off + base) + m["name"]
+    cd = len(body)
+    end = cd + len(cds)
+    hot += [cd] + [cd + e + 42 for e in cd_entries] + [end, end + 12, end + 16, end + 20]
+    return body + cds + struct.pack("<4sHHHHIIH", b"PK\x05\x06", 0, 0, len(members), len(members), len(cds),
+                                    cd + base, len(comment)) + comment, hot
+
+
 def newc(entries: list[tuple[str, bytes, int]]) -> bytes:
     out = b""
     for ino, (name, data, mode) in enumerate(entries + [("TRAILER!!!", b"", 0)], 1):
@@ -217,6 +245,18 @@ def build_seeds(tmp: Path) -> dict[str, tuple[bytes, list[int]]]:
     over = len(img)
     img += gzip.compress(t2, mtime=0) + b"\xff" * 1024
     seeds["sysupgrade"] = (img, [0, 12, 64, rofs, rofs + 40, rofs + len(rootfs) - 8, over])
+    if sq.exists():  # two forged copies of the superblock, each claiming the rest of the dump, before the real image
+        tail = gzip.compress(tar_of({"etc/k": KEY}), mtime=0) + noise(1024)
+        total = 4096 + 2 * 4096 + len(rootfs) + len(tail)
+
+        def forged(rest: int) -> bytes:
+            sb = bytearray(rootfs[:96])
+            struct.pack_into("<Q", sb, 40, rest)
+            struct.pack_into("<I", sb, 4, 0x7FFFFFFF)
+            return bytes(sb) + b"\xff" * (4096 - 96)
+        data = noise(4096) + forged(total - 4096) + forged(total - 8192) + rootfs + tail
+        seeds["sqfs_double_forged"] = (data, [4096, 4096 + 4, 4096 + 40, 8192, 8192 + 40, 12288, 12288 + 40,
+                                              12288 + len(rootfs)])
 
     early = newc([("kernel/x86/microcode/GenuineIntel.bin", b"ucode", 0o100644)])
     main = newc([("etc/passwd", b"root::0:0::/root:/bin/sh\n", 0o100644), ("init", b"#!/bin/sh\n", 0o100755),
@@ -248,6 +288,30 @@ def build_seeds(tmp: Path) -> dict[str, tuple[bytes, list[int]]]:
     inner = zip_of({"update/rootfs.tar.gz": gzip.compress(t1, mtime=0), "update/nested.zip":
                     zip_of({"x/k": KEY}, zipfile.ZIP_STORED), "update/manifest.json": b'{"version": "1.2.3"}'})
     seeds["zip_prefixed"] = (vendor + inner, [0, 64, 64 + 30, 64 + len(inner) - 22, 64 + inner.rfind(b"PK\x01\x02")])
+
+    # data outside a zip's members (a fake start, gaps, the comment) and members that cannot be read (wrong CRC, an
+    # unsupported method, damaged bzip2 data)
+    fake = b"PK\x03\x04" + noise(26) + gzip.compress(KEY, mtime=0)
+    seeds["zip_gaps"] = zip_members([
+        {"name": b"etc/shadow", "data": ROOTFS["etc/shadow"], "method": 8, "before": fake},
+        {"name": b"fw/stored.tar", "data": t2, "before": lzma.compress(KEY, format=lzma.FORMAT_XZ)},
+        {"name": b"fw/badcrc.bin", "data": KEY, "crc": 0x12345678},
+        {"name": b"fw/aes.bin", "data": KEY, "method": 99},
+        {"name": b"fw/bz.bin", "data": KEY, "method": 12, "raw": b"BZh9" + noise(64)},
+    ], comment=gzip.compress(b"comment\n" + KEY, mtime=0))
+    stub = b"#!/bin/sh\nexec unzip -o \"$0\"\n" + noise(2000)  # a self-extractor whose offsets 'zip -A' adjusted
+    z, zhot = zip_members([{"name": b"etc/shadow", "data": ROOTFS["etc/shadow"], "method": 8},
+                           {"name": b"etc/ssl/k.pem", "data": KEY}], base=len(stub))
+    seeds["zip_sfx_adjusted"] = (stub + z, [0] + [len(stub) + h for h in zhot])
+
+    # overlapping gzip headers over one endless deflate stream: the candidate checks share one decode budget
+    co = zlib.compressobj(9, zlib.DEFLATED, -15)
+    endless = co.compress(b"\x00" * (4 * 1024 * 1024)) + co.flush(zlib.Z_SYNC_FLUSH)  # no final block
+    n = 40
+    heads = b"".join(b"\x1f\x8b\x08\x04" + b"\x00" * 4 + b"\x00\x03" + struct.pack("<H", 16 * (n - i) - 12)
+                     + b"\x00" * 4 for i in range(n))
+    seeds["gzip_flood"] = (noise(1024) + heads + endless + noise(512) + gzip.compress(tar_of({"etc/k": KEY}), mtime=0),
+                           [1024 + 16 * i for i in range(0, n, 4)] + [1024 + 16 * n])
 
     import lz4.block
     import lz4.frame

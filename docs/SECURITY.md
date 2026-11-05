@@ -247,11 +247,22 @@ boundary for hostile samples.
   are neither copied nor allowed to shadow anything; a checked object that fails anyway is not
   carved again. ROMFS, CROMFS, cpio and ELF objects inside a failed image of the same kind are not
   carved, for want of such a check (anything else they hold is). Carving examines every signature
-  (up to a million per file), checks up to 4,096 candidates and test-decodes at most twice the
-  per-file limit of gzip/xz data for all candidates together (a 5 KB upload of gzip headers used to
-  run each check to the 512 MiB limit and the scan timed out); before, it stopped silently after 256
-  signatures, valid or not, so a flood of magic bytes hid everything after it - every limit is
-  reported when reached and marks the file *partial*. An external unpacker that exits
+  (up to a million per file; those inside an object already carved are skipped in bulk) and checks
+  up to 4,096 candidates per file. Checking costs are bounded for the whole scan as well, since
+  per-file limits multiply with the number of files (a zip of 20,000 small floods would have run
+  for well over an hour): 131,072 candidates; bytes read plus bytes decoded while test-decoding
+  gzip/xz candidates or checking a failed image's own kind, twice the larger of the total and
+  per-file extraction limits (4 GiB by default); 64 checks that run `unsquashfs`. gzip headers in
+  front of the same deflate data (overlapping extra fields or names) share one test-decode, and
+  every header field is checked as zlib checks it. A 5 KB upload of gzip headers used to run
+  each check to the 512 MiB limit, so the scan timed out; gzip names without a terminating NUL were
+  read to the end of the file without being counted; a cpio candidate searched up to 64 MiB for
+  its trailer (347 s for a 64 MiB flood of cpio magics, and a bogus magic in front of a real archive
+  swallowed it - entry headers are walked now). When the decoding budget is spent, later gzip/xz
+  candidates are skipped but other objects are still carved; once the scan's candidate budget is
+  spent, later files are not searched, and the scan reports them once, on the input file. Before,
+  carving stopped silently after 256 signatures, valid or not, so a flood of magic bytes hid
+  everything after it - every limit is reported when reached and marks the file *partial*. An external unpacker that exits
   with an error without extracting anything marks the image as failed (it used to be reported as
   unpacked). The limit that remains: the extent of an ELF or an image that still unpacks comes from
   its own headers, so a section or block count claiming the appended bytes hides them;
@@ -266,7 +277,11 @@ boundary for hostile samples.
   file is dumped individually to a path we created;
 * ubi_reader and jefferson (which may follow links they create) run only inside the container;
 * external unpackers run with `RLIMIT_FSIZE`/`RLIMIT_CPU`, a wall-clock timeout and an output-size
-  watchdog;
+  watchdog; what they print is read while they run, keeping the last 4,000 bytes (it used to be read
+  only after they exited, so a tool printing more than a pipe holds - jefferson prints a line per
+  entry and per damaged node - stalled until the timeout and its image was cut short), and a run
+  that ends in milliseconds is noticed within milliseconds (a fixed quarter-second poll made each
+  nested image cost at least that: 200 small SquashFS-like files took 51 s, now 1 s);
 * encrypted or signed vendor containers (e.g. DJI IM\*H modules) are reported, never decrypted.
 
 ## Local fallback

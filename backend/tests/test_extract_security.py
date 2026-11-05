@@ -1690,6 +1690,16 @@ def _pem_block(seed: int, encrypted: bool = False) -> bytes:
 _SHADOW = b"root::19000:0:99999:7:::\n"
 
 
+def _tar_of(files: dict[str, bytes]) -> bytes:
+    b = io.BytesIO()
+    with tarfile.open(fileobj=b, mode="w") as tf:
+        for name, data in files.items():
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            tf.addfile(ti, io.BytesIO(data))
+    return b.getvalue()
+
+
 def test_zip_members_that_cannot_be_read_and_data_outside_the_members_are_analysed(tmp_path, run_analysis):
     """Fourth review: a member that could not be read was dropped while the zip stayed 'ok' (its bytes then went
     unscanned: no finding at all); some member errors still failed the whole archive; and data outside the members
@@ -1767,11 +1777,11 @@ def test_forged_claims_floods_and_adjusted_self_extractors(tmp_path, run_analysi
     n = 60
     heads = b"".join(b"\x1f\x8b\x08\x04" + b"\x00" * 4 + b"\x00\x03" + struct.pack("<H", 16 * (n - i) - 12)
                      + b"\x00" * 4 for i in range(n))
-    (tmp_path / "flood.bin").write_bytes(_noise(4096, 83) + heads + endless + _noise(4096, 84))
-    t0 = time.monotonic()
-    res = Extractor(tmp_path / "w_flood", Limits(max_file_bytes=1024 * 1024)).run(tmp_path / "flood.bin", "flood.bin")
-    assert time.monotonic() - t0 < 30 and "max_carve_decode" in res.limits_hit
-    assert res.artifacts[0].extraction == "partial"  # reported, not silent
+    real = gzip.compress(_tar_of({"etc/shadow": _SHADOW}), mtime=0)
+    (tmp_path / "flood.bin").write_bytes(_noise(4096, 83) + heads + endless + _noise(4096, 84) + real)
+    t0 = time.monotonic()  # the headers share one test-decode of the stream: what follows them is carved
+    found = run_analysis(tmp_path / "flood.bin", Limits(max_file_bytes=1024 * 1024))
+    assert time.monotonic() - t0 < 30 and "empty-password" in {f["rule_id"] for f in found["findings"]}
     if shutil.which("zip"):
         d = tmp_path / "sfx"
         (d / "etc").mkdir(parents=True)
@@ -1804,3 +1814,84 @@ def test_secrets_dedupe_keeps_a_containers_own_copy(tmp_path, run_analysis):
     src = tmp_path / "once.bin"  # the same bytes reported by the member and found in the dump: once
     src.write_bytes(_noise(8192, 95) + b.getvalue() + _noise(4096, 96))
     assert [f["rule_id"] for f in run_analysis(src)["findings"]].count("pem-private-key") == 1
+
+
+def test_floods_cannot_run_a_scan_out_of_time_or_hide_what_follows(tmp_path, run_analysis, monkeypatch):
+    """Carving checked each candidate within limits of its own file only: a cpio candidate read up to 64 MiB
+    looking for a trailer (a 64 MiB flood of cpio magics took 347 s, and a bogus magic in front of a real archive
+    swallowed it), test-decoding charged only bytes decoded (gzip names without a terminating NUL were read to the
+    end of the file for free), the decoding limit ended carving altogether, and the limits of one file multiplied
+    with the number of files (a zip of 20,000 small floods would have run for well over an hour)."""
+    import struct
+    import time
+    import zlib
+
+    from dfa.core import extract
+    rules_of = lambda p, lim=None: {f["rule_id"] for f in run_analysis(p, lim)["findings"]}  # noqa: E731
+    shadow_cpio = _newc([("etc/shadow", _SHADOW, 0o100600)])
+    (tmp_path / "decoy.bin").write_bytes(_noise(8192, 101) + b"070701" + b"\x00" * 200 + shadow_cpio
+                                         + _noise(4096, 102))
+    assert "empty-password" in rules_of(tmp_path / "decoy.bin")
+    flood = tmp_path / "cpioflood.bin"  # no trailer anywhere: each candidate read the rest of the file
+    with flood.open("wb") as f:
+        f.write(_noise(4096, 103) + (b"070701" + b"\x00" * 10) * 4000
+                + gzip.compress(_tar_of({"etc/shadow": _SHADOW}), mtime=0))
+        f.truncate(32 * 1024 * 1024)
+    t0 = time.monotonic()
+    assert "empty-password" in rules_of(flood) and time.monotonic() - t0 < 30
+
+    lim = Limits(max_file_bytes=4 * 1024 * 1024, max_total_bytes=16 * 1024 * 1024)  # 32 MiB of test-decoding
+    names = tmp_path / "names.bin"
+    names.write_bytes(_noise(4096, 104) + (b"\x1f\x8b\x08\x08" + b"AAAAAA") * 512 + b"A" * (8 * 1024 * 1024))
+    t0 = time.monotonic()
+    res = Extractor(tmp_path / "w_names", lim).run(names, names.name)
+    assert time.monotonic() - t0 < 30 and "max_carve_decode" in res.limits_hit
+    assert res.artifacts[0].extraction == "partial"  # reported
+
+    co = zlib.compressobj(9, zlib.DEFLATED, -15)
+    bomb = co.compress(b"\x00" * (8 * 1024 * 1024)) + co.flush(zlib.Z_SYNC_FLUSH)  # no final block: never valid
+    bombs = b"".join(b"\x1f\x8b\x08\x00" + struct.pack("<I", i + 1) + b"\x00\x03" + bomb for i in range(16))
+    z = io.BytesIO()
+    with zipfile.ZipFile(z, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("etc/shadow", _SHADOW)
+    src = tmp_path / "bombs.bin"  # distinct streams spend the budget: gzip/xz candidates after them are skipped,
+    src.write_bytes(_noise(4096, 105) + bombs + _noise(4096, 106) + z.getvalue() + _noise(4096, 107))
+    m = run_analysis(src, lim)  # other objects are still carved
+    rules = {f["rule_id"] for f in m["findings"]}
+    assert {"empty-password", "extraction-partial"} <= rules and "max_carve_decode" in m["extraction"]["limits_hit"]
+
+    monkeypatch.setattr(extract, "MAX_CARVE_ATTEMPTS_TOTAL", 3 * extract.MAX_CARVE_ATTEMPTS)
+    part = b"\x00" * 16 + (b"hsqs" + b"\x00" * 12) * extract.MAX_CARVE_ATTEMPTS
+    z = io.BytesIO()
+    with zipfile.ZipFile(z, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i in range(6):
+            zf.writestr(f"part{i}.bin", part)
+    (tmp_path / "floods.zip").write_bytes(z.getvalue())
+    res = Extractor(tmp_path / "w_floods", Limits()).run(tmp_path / "floods.zip", "floods.zip")
+    root = res.artifacts[0]  # the scan's budget is spent after three files; the rest is reported once, for the scan
+    assert root.extraction == "partial" and "3 file(s) were not searched" in root.extraction_note
+    assert all(a.extraction is None for a in res.artifacts[1:])  # no finding per file
+
+
+def test_an_unpacker_that_prints_a_lot_is_not_stalled(tmp_path):
+    """The tool's output went to a pipe read only after it exited: a tool printing more than the pipe holds (jefferson
+    prints a line per directory entry and per damaged node) blocked until the timeout and its image was cut short."""
+    import sys
+    import time
+
+    from dfa.core.identify import detect_format
+    from dfa.core.limits import LimitExceeded
+    src = tmp_path / "img.bin"
+    src.write_bytes(b"\x00" * 64)
+    ex = Extractor(tmp_path / "w", Limits(tool_timeout_s=20))
+    art = ex._register(src, "<input>", "img.bin", detect_format(src), None, 0, "input")
+    out = tmp_path / "out"
+    out.mkdir()
+    script = f"import sys; sys.stdout.write('node_crc does not match!\\n' * 20000); open({str(out / 'f')!r}, 'w').write('x')"
+    t0 = time.monotonic()
+    try:
+        ex._run_tool(art, [sys.executable, "-c", script], out)
+    except LimitExceeded as exc:  # the timeout
+        pytest.fail(f"stalled: {exc}")
+    assert time.monotonic() - t0 < 10 and (out / "f").exists()
+    assert art.details["tool_output_tail"].endswith("node_crc does not match!\n")

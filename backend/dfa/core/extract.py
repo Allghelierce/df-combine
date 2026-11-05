@@ -208,6 +208,12 @@ class Extractor:
         self._no_failure_carve: set[int] = set()  # same-kind objects carved out of a failed image
         self._partial_notes: dict[int, str] = {}  # artifact id -> why its unpacking is incomplete
         self._regions: set[int] = set()  # regions cut out of a container (leading, gap or trailing data)
+        # carving budgets for the whole scan: each file's own limits would otherwise multiply with the number of files
+        # (a zip of thousands of small floods of magic bytes ran a scan past its timeout)
+        self._attempts_left = MAX_CARVE_ATTEMPTS_TOTAL  # candidates checked
+        self._work_left = 2 * max(self.limits.max_total_bytes, self.limits.max_file_bytes)  # bytes read + decoded
+        self._tool_checks_left = MAX_TOOL_CHECKS_TOTAL  # external tool runs that check a candidate
+        self._uncarved: list[Artifact] = []  # not searched for embedded objects: a scan-wide budget had run out
         # Unpackers that may follow links they create themselves are only allowed inside the container sandbox.
         self.in_container = os.environ.get("DFA_IN_SANDBOX") == "1"
         self._progress = progress or (lambda msg: None)
@@ -220,6 +226,15 @@ class Extractor:
         info = detect_format(input_path)
         root = self._register(input_path, "<input>", original_name, info, None, 0, "input")
         self._process(root)
+        if self._uncarved:  # reported once, for the scan, rather than as one finding per file
+            names = ", ".join(a.name for a in self._uncarved[:3])
+            note = (f"{len(self._uncarved)} file(s) were not searched for embedded objects once the scan-wide carving "
+                    f"limit was reached ({names}{', ...' if len(self._uncarved) > 3 else ''})")
+            self.result.warnings.append(note)
+            if root.extraction in (None, "ok"):
+                root.extraction, root.extraction_note = "partial", note
+            else:
+                root.extraction_note = f"{root.extraction_note}; {note}"
         self._write_mode_images()
         self.result.stats = {
             "artifacts": len(self.result.artifacts),
@@ -489,9 +504,16 @@ class Extractor:
                                         "object(s) found)")
         return children
 
-    def _own_kind_valid(self, art: Artifact, kind: str, off: int, length: int, checks: list[int]) -> bool:
-        """Whether an object of a failed image's own kind checks out where it lies, without copying it."""
+    def _own_kind_valid(self, art: Artifact, kind: str, off: int, length: int, checks: list[int],
+                        note: Callable[[str, str], None]) -> bool:
+        """Whether an object of a failed image's own kind checks out where it lies, without copying it. Checks that
+        read the object are charged to the scan's work budget; those that run a tool are counted."""
         src = self.path_of(art.id)
+        if kind in ("zip", "uimage"):
+            if length > self._work_left:
+                note("checking limit reached", "max_carve_decode")
+                return False
+            self._work_left -= length  # zipfile reads the directory, the CRC the whole image: at most its length
         if kind == "zip":
             return _zip_region_valid(src, off, length)
         if kind == "uimage":
@@ -504,9 +526,11 @@ class Extractor:
                     left -= len(chunk)
             return left == 0 and len(head) == 64 and crc & 0xFFFFFFFF == struct.unpack_from(">I", head, 24)[0]
         if kind == "squashfs" and (tool := self._external_tools.get("unsquashfs")):
-            checks[0] += 1
-            if checks[0] > 16:  # each check runs the tool
+            if checks[0] >= MAX_TOOL_CHECKS or self._tool_checks_left <= 0:  # each check runs the tool
+                note("tool checking limit reached", "max_carve_tool_checks")
                 return False
+            checks[0] += 1
+            self._tool_checks_left -= 1
             try:  # a listing reads the inode, directory and id tables (a forged superblock fails here)
                 r = subprocess.run([tool, "-lln", "-o", str(off), str(src)], capture_output=True,
                                    stdin=subprocess.DEVNULL, timeout=min(60, self.limits.tool_timeout_s))
@@ -1262,10 +1286,23 @@ class Extractor:
 
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                 preexec_fn=preexec, env={"PATH": os.environ.get("PATH", ""), **(env or {})})
+        tail = bytearray()  # the end of what the tool prints, read as it goes: a full pipe would block the tool
+        # (a tool printing a line per file or per damaged node stalled until the timeout)
+
+        def drain() -> None:
+            for chunk in iter(lambda: proc.stdout.read1(65536), b""):
+                tail.extend(chunk)
+                del tail[:-4000]
+        reader = threading.Thread(target=drain, daemon=True)
+        reader.start()
         deadline = time.monotonic() + self.limits.tool_timeout_s
-        reason = None
-        while proc.poll() is None:
-            time.sleep(0.25)
+        reason, delay = None, 0.005
+        while True:
+            try:  # a short first wait: most runs take milliseconds, and nested images may need thousands of them
+                proc.wait(timeout=delay)
+                break
+            except subprocess.TimeoutExpired:
+                delay = min(delay * 2, 0.25)
             if time.monotonic() > deadline:
                 reason = f"{cmd[0]} timed out after {self.limits.tool_timeout_s}s"
             elif _dir_size(out) > remaining:
@@ -1274,7 +1311,8 @@ class Extractor:
                 proc.kill()
                 proc.wait()
                 break
-        output = (proc.stdout.read() if proc.stdout else b"")[-4000:].decode("utf-8", "replace")
+        reader.join(timeout=10)
+        output = bytes(tail).decode("utf-8", "replace")
         art.details["tool_output_tail"] = output[-800:]
         if reason:
             raise LimitExceeded(reason)
@@ -1609,33 +1647,54 @@ class Extractor:
     def _carve(self, art: Artifact, out_dir: Path | None = None, scan_to: int | None = None,
                own: str | None = None) -> list[Artifact]:
         """Carve well-delimited embedded objects out of raw images (objects starting before ``scan_to``). Objects of
-        kind ``own`` (a failed image's own) are carved only if they check out where they lie."""
+        kind ``own`` (a failed image's own) are carved only if they check out where they lie. Candidates are checked
+        within this file's limits and the scan's (candidates checked, bytes read and decoded to check them, tool
+        runs), so that neither a flood in one file nor many small floods make a scan run out of time; every limit
+        reached is reported."""
         src = self.path_of(art.id)
         scan_to = art.size if scan_to is None else scan_to
         found: list[tuple[int, int, str]] = []  # (offset, length, kind)
         examined = attempts = 0
-        decode_left = 2 * self.limits.max_file_bytes  # test-decoding of gzip/xz candidates, all of them together
-        checks = [0]  # own-kind checks that run an external tool
+        checks = [0]  # own-kind checks in this file that ran an external tool
         own_kind = "zip" if own == "zip_end" else own  # as it is recorded in found
+        members: dict[int, int | None] = {}  # deflate data offset -> end of the gzip member there (None: not one)
+        noted: set[str] = set()
+        skip = [0]  # signatures before this offset lie inside an object found: _scan_magics skips them in bulk
 
-        def cut(off: int, why: str, limit: str) -> None:
+        def note(why: str, limit: str) -> None:  # a limit that leaves some candidates unchecked; carving goes on
+            if limit not in noted:
+                noted.add(limit)
+                self.result.warnings.append(f"{art.name}: {why}; some embedded objects may not have been carved")
+                self.result.limits_hit.append(limit)
+                self._partial_notes.setdefault(art.id, f"{why}: some embedded objects may not have been carved")
+
+        def cut(off: int, why: str, limit: str) -> None:  # a limit that ends carving
             self.result.warnings.append(f"{art.name}: carving stopped at {off:#x}: {why}; objects after it were not "
                                         "carved")
             self.result.limits_hit.append(limit)
             self._partial_notes[art.id] = f"carving stopped at {off:#x} ({why})"
 
         with src.open("rb") as fp:
-            for off, kind in _scan_magics(fp, scan_to):
+            for off, kind in _scan_magics(fp, scan_to, skip):
                 if off >= scan_to:
                     break
+                # a 7z is only reported, not unpacked: what lies inside the length it claims is still carved
+                solid = [(o, ln) for o, ln, k in found if k != "7z"]
+                if kind != "zip_end" and (off == 0 or any(o <= off < o + ln for o, ln in solid)):
+                    continue  # (a zip's end record is checked wherever it lies: the zip may enclose what was found)
                 examined += 1
                 if examined > MAX_CARVE_HITS or attempts >= MAX_CARVE_ATTEMPTS:  # a flood of magic bytes
                     cut(off, f"{examined - 1:,} signatures seen, {attempts:,} checked", "max_carve_candidates")
                     break
-                # a 7z is only reported, not unpacked: what lies inside the length it claims is still carved
-                solid = [(o, ln) for o, ln, k in found if k != "7z"]
+                if self._attempts_left <= 0:  # spent on earlier files: reported once for the scan, not per file
+                    if attempts:
+                        cut(off, "the scan's limit of candidates checked was reached", "max_carve_candidates_total")
+                    else:
+                        self._uncarved.append(art)
+                    break
+                attempts += 1
+                self._attempts_left -= 1
                 if kind == "zip_end":  # a zip's end record says where the archive starts: carve back to there
-                    attempts += 1
                     extent = _zip_extent(fp, off, art.size)
                     if extent is None or (extent[0] == 0 and extent[1] >= art.size):
                         continue  # not a zip, or this very file
@@ -1645,26 +1704,24 @@ class Extractor:
                     # inside it - its stored members - are unpacked from the zip, so they are not carved again
                     if any(o < stop and start < o + ln and not (start <= o and o + ln <= stop) for o, ln in solid):
                         continue
-                    if own_kind == "zip" and not self._own_kind_valid(art, "zip", start, length, checks):
+                    if own_kind == "zip" and not self._own_kind_valid(art, "zip", start, length, checks, note):
                         continue
                     found = [r for r in found if r[2] == "7z" or not (start <= r[0] and r[0] + r[1] <= stop)]
                     found.append((start, length, "zip"))
+                    skip[0] = max(skip[0], stop)
                 else:
-                    if off == 0 or any(o <= off < o + ln for o, ln in solid):
-                        continue
-                    attempts += 1
-                    length = _carve_length(fp, off, kind, art.size)
-                    if length and kind in ("gz", "xz"):
-                        if decode_left <= 0:
-                            cut(off, "test-decoding limit reached", "max_carve_decode")
-                            break
-                        length, produced = _stream_length(fp, off, kind, min(self.limits.max_file_bytes, decode_left))
-                        decode_left -= produced
+                    length = _carve_length(fp, off, kind, art.size, self.limits.max_files)
+                    if length and kind == "gz":
+                        length = self._gzip_member_length(fp, off, members, note)
+                    elif length and kind == "xz":
+                        length = self._xz_length(fp, off, note)
                     if not length:
                         continue
-                    if kind == own_kind and not self._own_kind_valid(art, kind, off, length, checks):
+                    if kind == own_kind and not self._own_kind_valid(art, kind, off, length, checks, note):
                         continue
                     found.append((off, length, kind))
+                    if kind != "7z":
+                        skip[0] = max(skip[0], off + length)
                 if len(found) >= self.limits.max_carves_per_file:
                     cut(off, f"{len(found)} embedded objects carved (limit)", "max_carves_per_file")
                     break
@@ -1703,6 +1760,41 @@ class Extractor:
                 children.append(c)
         art.details["carved_objects"] = len(children)
         return children
+
+    def _gzip_member_length(self, fp: BinaryIO, off: int, members: dict[int, int | None],
+                            note: Callable[[str, str], None]) -> int | None:
+        """Length of the gzip member at ``off`` (header and trailer checked), test-decoded within the scan's work
+        budget (bytes read plus bytes decoded: a header or stream can make a decoder read much and decode nothing).
+        Headers in front of the same deflate data - overlapping extra fields or names - share one decode."""
+        if self._work_left <= 0:
+            note("test-decoding limit reached", "max_carve_decode")
+            return None
+        data_at, read = _gzip_header_end(fp, off, self._work_left)
+        self._work_left -= read
+        if data_at is not None and data_at not in members:
+            end, work = _deflate_member_end(fp, data_at, self.limits.max_file_bytes, self._work_left)
+            self._work_left -= work
+            if end is None and self._work_left <= 0:  # the budget, not the stream, decided: not remembered
+                note("test-decoding limit reached", "max_carve_decode")
+                return None
+            members[data_at] = end
+        if data_at is None:
+            if self._work_left <= 0:
+                note("test-decoding limit reached", "max_carve_decode")
+            return None
+        end = members[data_at]
+        return end - off if end else None
+
+    def _xz_length(self, fp: BinaryIO, off: int, note: Callable[[str, str], None]) -> int | None:
+        """Length of the xz stream at ``off``, test-decoded within the scan's work budget."""
+        if self._work_left <= 0:
+            note("test-decoding limit reached", "max_carve_decode")
+            return None
+        length, work = _xz_stream_length(fp, off, self.limits.max_file_bytes, self._work_left)
+        self._work_left -= work
+        if length is None and self._work_left <= 0:
+            note("test-decoding limit reached", "max_carve_decode")
+        return length
 
 
 class UnsupportedFormat(Exception):
@@ -1918,37 +2010,99 @@ class _ConcatenatedStreams:
         return b""
 
 
-def _stream_length(fp: BinaryIO, off: int, kind: str, max_out: int) -> tuple[int | None, int]:
-    """(compressed length of the gzip/xz stream at ``off``, bytes decoded to find it): a test-decode, its output
-    discarded and capped at ``max_out``."""
+def _xz_stream_length(fp: BinaryIO, off: int, max_out: int, max_work: int) -> tuple[int | None, int]:
+    """(length of the xz stream at ``off``, work done: bytes read plus bytes decoded): a test-decode, its output
+    discarded, that gives up past ``max_out`` bytes decoded or ``max_work`` bytes of work."""
     fp.seek(off)
-    if kind == "gz":
-        d = zlib.decompressobj(16 + zlib.MAX_WBITS)
-    else:
-        d = lzma.LZMADecompressor(format=lzma.FORMAT_XZ, memlimit=LZMA_MEMLIMIT)
-    consumed = 0
-    produced = 0
+    d = lzma.LZMADecompressor(format=lzma.FORMAT_XZ, memlimit=LZMA_MEMLIMIT)
+    consumed = produced = 0
     try:
         while True:
-            if kind == "xz" and not d.needs_input:
-                chunk = b""
-            else:
+            if produced > max_out or consumed + produced > max_work:
+                return None, consumed + produced
+            if d.needs_input:
                 chunk = fp.read(64 * 1024)
                 if not chunk:
-                    return None, produced
-            consumed += len(chunk)
-            out = d.decompress(chunk, COPY_CHUNK)
-            produced += len(out)
-            if kind == "gz":
-                while d.unconsumed_tail and produced <= max_out:
-                    out = d.decompress(d.unconsumed_tail, COPY_CHUNK)
-                    produced += len(out)
-            if produced > max_out:
-                return None, produced
+                    return None, consumed + produced
+                consumed += len(chunk)
+            else:
+                chunk = b""
+            produced += len(d.decompress(chunk, COPY_CHUNK))
             if d.eof:
-                return consumed - len(d.unused_data), produced
-    except (zlib.error, lzma.LZMAError, EOFError, MemoryError):
-        return None, produced
+                return consumed - len(d.unused_data), consumed + produced
+    except (lzma.LZMAError, EOFError, MemoryError):
+        return None, consumed + produced
+
+
+def _gzip_header_end(fp: BinaryIO, off: int, max_read: int) -> tuple[int | None, int]:
+    """(offset of the deflate data of the gzip member whose header is at ``off``, bytes read): None if the header is
+    not one zlib accepts (reserved flags, a header CRC that does not match) or does not end within ``max_read``
+    bytes (a name or comment is read up to its terminating NUL)."""
+    fp.seek(off)
+    head = fp.read(10)
+    read = len(head)
+    if len(head) < 10 or head[:3] != b"\x1f\x8b\x08" or head[3] & 0xE0:
+        return None, read
+    flags, crc, pos = head[3], zlib.crc32(head), off + 10
+    if flags & 0x04:  # FEXTRA: a length, then that many bytes
+        xlen = fp.read(2)
+        extra = fp.read(struct.unpack("<H", xlen)[0]) if len(xlen) == 2 else b""
+        read += len(xlen) + len(extra)
+        if len(xlen) < 2 or len(extra) < struct.unpack("<H", xlen)[0]:
+            return None, read
+        crc = zlib.crc32(extra, zlib.crc32(xlen, crc))
+        pos += 2 + len(extra)
+    for bit in (0x08, 0x10):  # FNAME, FCOMMENT: zero-terminated
+        if flags & bit:
+            while True:
+                chunk = fp.read(4096) if read < max_read else b""
+                if not chunk:
+                    return None, read
+                n = chunk.find(b"\x00") + 1 or len(chunk)
+                crc = zlib.crc32(chunk[:n], crc)
+                read += n
+                pos += n
+                if chunk[n - 1] == 0:
+                    fp.seek(pos)
+                    break
+    if flags & 0x02:  # FHCRC: the low 16 bits of the CRC-32 of the header up to here
+        h = fp.read(2)
+        read += len(h)
+        if len(h) < 2 or struct.unpack("<H", h)[0] != crc & 0xFFFF:
+            return None, read
+        pos += 2
+    return pos, read
+
+
+def _deflate_member_end(fp: BinaryIO, data_at: int, max_out: int, max_work: int) -> tuple[int | None, int]:
+    """(offset just after the gzip member whose deflate data starts at ``data_at`` - its CRC-32 and size trailer
+    checked - or None, work done: bytes read plus bytes decoded): a test-decode, its output discarded, that gives up
+    past ``max_out`` bytes decoded or ``max_work`` bytes of work."""
+    fp.seek(data_at)
+    d = zlib.decompressobj(-zlib.MAX_WBITS)
+    consumed = produced = crc = 0
+    tail = b""
+    try:
+        while not d.eof:
+            if produced > max_out or consumed + produced > max_work:
+                return None, consumed + produced
+            if not tail:
+                tail = fp.read(64 * 1024)
+                if not tail:
+                    return None, consumed + produced  # truncated
+                consumed += len(tail)
+            out = d.decompress(tail, COPY_CHUNK)
+            tail = d.unconsumed_tail
+            produced += len(out)
+            crc = zlib.crc32(out, crc)
+    except zlib.error:
+        return None, consumed + produced
+    end = data_at + consumed - len(d.unused_data)
+    fp.seek(end)
+    trailer = fp.read(8)
+    if len(trailer) < 8 or struct.unpack("<II", trailer) != (crc, produced & 0xFFFFFFFF):
+        return None, consumed + produced
+    return end + 8, consumed + produced
 
 
 class _GzipMemberReader:
@@ -2014,10 +2168,19 @@ def _zip_extent(fp: BinaryIO, end_record: int, size: int) -> tuple[int, int] | N
 # magic bytes must neither take unbounded time nor, as a silent cut-off, hide what follows it: both limits are reported)
 MAX_CARVE_HITS = 1_000_000
 MAX_CARVE_ATTEMPTS = 4096
+# ... and for the whole scan, where these limits would otherwise multiply with the number of files (a zip of 20,000
+# small floods would have taken well over an hour). Bytes read and decoded to check candidates are limited per scan
+# too (Extractor._work_left), as are tool runs that check one.
+MAX_CARVE_ATTEMPTS_TOTAL = 32 * MAX_CARVE_ATTEMPTS
+MAX_TOOL_CHECKS = 16
+MAX_TOOL_CHECKS_TOTAL = 64
 
 
-def _scan_magics(fp: BinaryIO, size: int):
-    """(offset, kind) of every carve signature before ``size``, in offset order; read in 4 MiB chunks, found lazily."""
+def _scan_magics(fp: BinaryIO, size: int, skip: list[int] | None = None):
+    """(offset, kind) of every carve signature before ``size``, in offset order; read in 4 MiB chunks, found lazily.
+    Signatures before ``skip[0]``, which the caller raises past each object it carves, are skipped in bulk - except
+    zip end records, as a zip may enclose that object."""
+    skip = [0] if skip is None else skip
     chunk, overlap, pos = 4 * 1024**2, 16, 0
     while pos < size:
         fp.seek(pos)
@@ -2028,6 +2191,9 @@ def _scan_magics(fp: BinaryIO, size: int):
         def hits(magic: bytes, kind: str, block: bytes = block, pos: int = pos):
             i = block.find(magic)
             while 0 <= i < chunk:
+                if pos + i < skip[0] and kind != "zip_end":
+                    i = block.find(magic, skip[0] - pos)
+                    continue
                 yield pos + i, kind
                 i = block.find(magic, i + 1)
         yield from heapq.merge(*(hits(m, k) for m, k in CARVE_MAGICS.items()))
@@ -2200,7 +2366,32 @@ def _all_erased(fp: BinaryIO, size: int) -> bool:
     return True
 
 
-def _carve_length(fp: BinaryIO, off: int, kind: str, size: int) -> int | None:
+_HEX_FIELDS = re.compile(rb"[0-9A-Fa-f]{104}")
+
+
+def _cpio_length(fp: BinaryIO, off: int, size: int, max_entries: int) -> int | None:
+    """Length of the newc cpio archive at ``off``, from walking its entry headers to the TRAILER!!! entry (rounded
+    up to the 512-byte blocks cpio writes, within the file). An archive damaged after some entries is carved up to
+    its last valid entry (an entry that does not check out ends the walk); None if the first one does not."""
+    pos, good = off, None
+    for _ in range(max_entries + 1):
+        fp.seek(pos)
+        hdr = fp.read(110)
+        if len(hdr) < 110 or hdr[:6] != b"070701" or not _HEX_FIELDS.fullmatch(hdr, 6):
+            break
+        filesize, namesize = int(hdr[54:62], 16), int(hdr[94:102], 16)
+        name_at = pos + 110
+        data_at = (name_at + namesize + 3) & ~3
+        if not 0 < namesize <= 4096 or data_at + filesize > size:
+            break
+        if fp.read(namesize) == b"TRAILER!!!\x00":
+            return min((name_at + 10 - off + 511) // 512 * 512, size - off)
+        pos = (data_at + filesize + 3) & ~3
+        good = min(pos, size) - off
+    return good
+
+
+def _carve_length(fp: BinaryIO, off: int, kind: str, size: int, max_entries: int = 20_000) -> int | None:
     fp.seek(off)
     head = fp.read(128)
     if kind == "squashfs":
@@ -2232,13 +2423,8 @@ def _carve_length(fp: BinaryIO, off: int, kind: str, size: int) -> int | None:
         if flags & 0xE0:
             return None
         return size - off  # upper bound; reader stops at end of member
-    if kind == "cpio":
-        fp.seek(off)
-        window = fp.read(min(size - off, 64 * 1024**2))
-        end = window.find(b"TRAILER!!!")
-        if end < 0:
-            return None
-        return min(((end + 10 + 511) // 512) * 512, len(window))
+    if kind == "cpio":  # (a search for the trailer read up to 64 MiB per candidate: a flood took minutes)
+        return _cpio_length(fp, off, size, max_entries)
     if kind == "7z":  # signature header: CRC over the next-header offset/size/CRC, which give the length
         if len(head) < 32 or zlib.crc32(head[12:32]) != struct.unpack_from("<I", head, 8)[0]:
             return None
