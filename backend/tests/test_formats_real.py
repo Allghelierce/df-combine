@@ -181,6 +181,9 @@ def test_real_px4_extraction(run_analysis):
     m = run_analysis(REAL / "px4_fmu-v5_default.px4")
     i = m["identification"]
     assert i["platform"] == "PX4" and i["platform_version"] == "1.17.0" and i["board_id"] == 50
+    # board and build as recorded in the .px4 container (summary, git_hash, build_time)
+    assert i["board_name"] == "PX4FMUv5" and i["build"]["revision"] == "d6f12ad1c4f7"
+    assert i["build"]["date"] == "May 13 2026"
     assert i["architecture"].startswith("ARM Cortex-M")
     arts = m["extraction"]["artifacts"]
     image = next(a for a in arts if a["format"] == "cortexm_raw" and a["name"] == "image.bin")

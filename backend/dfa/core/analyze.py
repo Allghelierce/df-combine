@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 import traceback
@@ -263,8 +264,8 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
         "platform_candidates": [p.to_dict() for p in platforms],
         "board_id": board_id,
         "board_hint": BOARD_IDS.get(board_id) if isinstance(board_id, int) else None,
-        "board_name": primary.board if primary else None,
-        "build": primary.build if primary else None,
+        "board_name": (primary.board if primary else None) or _container_board(container_meta),
+        "build": (primary.build if primary else None) or _container_build(container_meta),
         "container_metadata": container_meta,
         "ardupilot_descriptor": ap_desc,
         "details": root.details,
@@ -289,6 +290,26 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
         "duration_s": round(time.monotonic() - t0, 3),
     })
     return manifest
+
+
+def _container_board(meta: dict) -> str | None:
+    """Board named by a .px4/.apj container ('summary', e.g. 'CubeOrange', 'PX4FMUv6C')."""
+    s = meta.get("summary")
+    return s[:64] if isinstance(s, str) and s.strip() and s.isprintable() else None
+
+
+def _container_build(meta: dict) -> dict | None:
+    """Build facts recorded by a .px4/.apj container: git commit and build time (UTC)."""
+    out: dict[str, str] = {}
+    h = meta.get("git_hash")
+    if isinstance(h, str) and re.fullmatch(r"[0-9a-f]{7,40}", h):
+        out["revision"] = h[:12]
+    t = meta.get("build_time")
+    if isinstance(t, int) and 946684800 <= t < 4102444800:  # 2000..2100
+        from datetime import UTC, datetime
+        dt = datetime.fromtimestamp(t, UTC)
+        out["date"], out["time"] = dt.strftime("%b %d %Y"), dt.strftime("%H:%M:%S UTC")
+    return out or None
 
 
 def _link_images_to_elf_symbols(arts: list[Artifact], ctx: ScanContext) -> None:

@@ -17,7 +17,7 @@ from typing import Any
 MAGICS = {"PX4FWv1": "PX4", "APJFWv1": "ArduPilot"}
 METADATA_KEYS = (
     "board_id", "board_revision", "magic", "description", "summary", "version",
-    "git_identity", "build_time", "image_size", "image_maxsize", "flash_total",
+    "git_identity", "git_hash", "build_time", "image_size", "image_maxsize", "flash_total",
     "flash_free", "extflash_total", "extflash_free", "USBID", "manufacturer",
     "brand_name", "signed_firmware", "airframe_xml", "parameter_xml",
 )
