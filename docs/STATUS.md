@@ -18,7 +18,7 @@ data. Numbers come from actual runs in the development environment (2026-11-04/0
 | cwe_checker | ARM and AArch64 ELF (Debian/Alpine binaries, CWE-676 on `strcpy` user), bare-metal Cortex-M (PX4 image/IO/bootloader, ArduPilot bootloader); results always `unverified`. |
 | Ghidra headless layer | Function recovery on ELF (2,500–2,660 functions for perl/libc/bash) and raw Cortex-M images seeded from the vector table (PX4 8,258 functions; ArduPilot bootloader 331). |
 | FwAnalyzer | Debian 11 / Alpine 3.15 root filesystems (`dirfs`), PX4 NuttX `/etc` with drone rules (independently matched the `CBRK_SUPPLY_CHK` overrides the built-in scanner found). |
-| FACT integration (REST) | Real FACT_core instance: upload, status polling, result retrieval; keep-alive reset and per-file cwe_checker slowness found and fixed; timeouts/cancellation keep partial results. |
+| FACT integration (REST) | Real FACT_core instance: upload, status polling, result retrieval, per-file details. Found and fixed on real output: stale keep-alive resets, per-file cwe_checker slowness, re-submissions misread from earlier runs, and plug-in summaries over-reported as credentials/weaknesses. Alpine rootfs: completed in 21 s. |
 | Package inventory and backport-aware matching | Debian 11 (96 packages) and Alpine 3.15 (14) parsed; distro advisories matched against exact installed versions (e.g. `libssl1.1 1.1.1k-1` → DLA-3942-1, fixed in `1.1.1n-0+deb11u6`). |
 | File ownership → findings | 3,033 Debian files mapped to their packages; binary findings name the owning package. |
 | Architecture detection for raw code | ARM, Thumb-2, AArch64, MIPS, x86-64 verified on real binaries; random/compressed data never classified. |

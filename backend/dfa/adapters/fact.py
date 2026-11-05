@@ -127,7 +127,9 @@ class FactAdapter(ToolAdapter):
                 if fw:
                     (out_dir / f"firmware_{i}.json").write_text(json.dumps(fw, indent=1)[:50_000_000])
                     meta = fw.get("meta_data", {}) or {}
-                    fs = normalize(fw, ctx.original_name if i == 0 else f"{ctx.original_name} > {Path(t['path']).name}")
+                    creds = self._credential_details(c, fw)
+                    fs = normalize(fw, ctx.original_name if i == 0 else f"{ctx.original_name} > {Path(t['path']).name}",
+                                   creds)
                     findings += fs
                     components += fact_components(fw, t["label"])
                     analysis = fw.get("analysis", {}) or {}
@@ -166,6 +168,29 @@ class FactAdapter(ToolAdapter):
                                                      else "failed"),
                              msg, findings, str(out_dir), {"submissions": submissions, "fact_url": self.settings.fact_url,
                                                            "components": components})
+
+    @staticmethod
+    def _credential_details(c: httpx.Client, fw: dict, limit: int = 25) -> list[dict] | None:
+        """Full users_and_passwords results of the files the summary points to (the summary alone does not
+        say whether an account has a password). None if they cannot be retrieved."""
+        summary = (((fw or {}).get("analysis") or {}).get("users_and_passwords") or {}).get("summary") or {}
+        uids = sorted({u for v in summary.values() for u in v}) if isinstance(summary, dict) else []
+        entries: list[dict] = []
+        try:
+            for uid in uids[:limit]:
+                r = c.get(f"/rest/file_object/{uid}")
+                if r.status_code != 200:
+                    return None
+                fo = r.json().get("file_object") or {}
+                result = (((fo.get("analysis") or {}).get("users_and_passwords") or {}).get("result")) or {}
+                path = (fo.get("meta_data") or {}).get("hid")
+                for kind in ("unix", "http", "mosquitto"):
+                    for e in result.get(kind) or []:
+                        if isinstance(e, dict):
+                            entries.append({**e, "path": path, "type": e.get("type") or kind})
+        except (httpx.HTTPError, ValueError):
+            return None
+        return entries
 
     @staticmethod
     def _put_once_more_on_reset(c: httpx.Client, payload: dict) -> httpx.Response:
@@ -235,7 +260,63 @@ class FactAdapter(ToolAdapter):
         return "running" if queued or analysis.get("analysis_main_scheduler", 0) else "unknown"
 
 
-def normalize(fw: dict, name: str) -> list[Finding]:
+# FACT/checksec labels that describe a missing or weakening property. Everything else (mitigations that are
+# enabled, 'PIE/DSO present', stripped symbols, the rarely used CLANGCFI/SAFESTACK) is not a weakness.
+MITIGATION_WEAK = {
+    "NX disabled": (S.medium, "the stack/heap is executable (NX disabled)"),
+    "CANARY disabled": (S.low, "built without stack canaries"),
+    "PIE disabled": (S.low, "not position independent, so ASLR does not apply to the executable"),
+    "RELRO disabled": (S.low, "built without RELRO (writable relocation tables)"),
+    "RPATH enabled": (S.low, "an RPATH is set (library search path that can enable library hijacking)"),
+    "RUNPATH enabled": (S.low, "a RUNPATH is set (library search path that can enable library hijacking)"),
+}
+_REAL_HASH = re.compile(r"^(\$[0-9a-z]+\$.+|[./0-9A-Za-z]{13})$")
+
+
+def credential_findings(entries: list[dict] | None, name: str, listed: int) -> list[Finding]:
+    """FACT users_and_passwords entries (full per-file results). The plug-in's summary lists every account
+    line ('root:unix'), including shadowed ('x') and locked ('*', '!') ones, so only entries with an actual
+    password hash, a cracked password or an empty password field are findings."""
+    if entries is None:
+        if not listed:
+            return []
+        return [Finding(
+            title=f"[FACT] {listed} account entr{'y' if listed == 1 else 'ies'} in password files",
+            description="FACT listed account entries, but their password fields could not be retrieved, so "
+                        "it is unknown whether any has a password set. The built-in shadow/passwd checks apply.",
+            severity=S.info, classification=C.info, confidence=K.low, source_tool="fact",
+            rule_id="fact-users_and_passwords", affected_component=name,
+            remediation="Review the password files in FACT.", tags=["fact", "users_and_passwords"])]
+    out = []
+    for e in entries:
+        user, pw, hsh, path = e.get("username", "?"), e.get("password"), e.get("password_hash") or "", e.get("path")
+        loc = f"{path} ({e.get('type', 'unix')})" if path else e.get("type", "unix")
+        if pw:
+            title, sev = f"[FACT] Password of '{user}' recovered from its hash", S.high
+            desc = ("FACT cracked the password hash of this account with a wordlist: the password is weak and "
+                    "identical on every device built from this image.")
+            ev = f"{user}:{pw[:1]}{'*' * max(len(pw) - 1, 3)} (len={len(pw)})"
+        elif _REAL_HASH.match(hsh):
+            title, sev = f"[FACT] Password hash for '{user}' stored in the image", S.medium
+            desc = ("The image ships a password hash for this account; every device shares it and it can be "
+                    "attacked offline. FACT could not crack it with its wordlist.")
+            ev = f"{user}:{hsh[:3]}...{hsh[-4:]}"
+        elif hsh == "" and e.get("type", "unix") in ("unix", "http"):
+            title, sev = f"[FACT] Account '{user}' has an empty password field", S.high
+            desc = "An empty password field allows logging in to this account without a password."
+            ev = f"{user}:<empty>"
+        else:
+            continue  # 'x' (shadowed), '*', '!', '!!': no usable credential
+        out.append(Finding(
+            title=title, description=desc, severity=sev, classification=C.detected, confidence=K.medium,
+            source_tool="fact", rule_id="fact-users_and_passwords", affected_component=f"{name} > {path or 'password file'}",
+            remediation="Remove default passwords from the image; provision per-device credentials or disable "
+                        "password login for the account.",
+            evidence=[Evidence("config", ev, loc)], cwe="CWE-798", tags=["fact", "users_and_passwords", "credentials"]))
+    return out
+
+
+def normalize(fw: dict, name: str, credentials: list[dict] | None = None) -> list[Finding]:
     out: list[Finding] = []
     analysis = (fw or {}).get("analysis", {}) or {}
     for plugin, result in analysis.items():
@@ -245,21 +326,29 @@ def normalize(fw: dict, name: str) -> list[Finding]:
         if not summary:
             continue
         items = list(summary.items()) if isinstance(summary, dict) else [(s, []) for s in summary]
+        if plugin == "users_and_passwords":
+            out += credential_findings(credentials, name, len(items))
+            continue
         sev, cls, prefix, cwe = PLUGIN_MAP[plugin]
         for label, uids in items[:200]:
             label_s = str(label)
-            if plugin == "exploit_mitigations" and "enabled" in label_s.lower():
-                continue  # only report missing mitigations
-            s = sev
-            if plugin == "cve_lookup":
+            s, c, why = sev, cls, ""
+            if plugin == "exploit_mitigations":
+                if label_s not in MITIGATION_WEAK:
+                    continue
+                s, why = MITIGATION_WEAK[label_s]
+            elif plugin == "crypto_material" and "private" not in label_s.lower():
+                s, c = S.info, C.info  # certificates and public keys are not secrets
+                why = "public key material or a certificate (not a secret)"
+            elif plugin == "cve_lookup":
                 low = label_s.lower()
                 s = S.high if "critical" in low or "high" in low else S.medium
             out.append(Finding(
                 title=f"[FACT] {prefix}: {label_s[:160]}",
-                description=(f"FACT plugin '{plugin}' reported '{label_s}'. "
+                description=(f"FACT plugin '{plugin}' reported '{label_s}'" + (f": {why}." if why else ". ")
                              + ("Version/signature based result - requires manual verification."
-                                if cls == C.unverified else "Reported by FACT's analysis of the firmware contents.")),
-                severity=s, classification=cls, confidence=K.medium, source_tool="fact", rule_id=f"fact-{plugin}",
+                                if c == C.unverified else "Reported by FACT's analysis of the firmware contents.")),
+                severity=s, classification=c, confidence=K.medium, source_tool="fact", rule_id=f"fact-{plugin}",
                 affected_component=name if not uids else f"{name} ({len(uids)} FACT object(s))",
                 remediation="Review the corresponding FACT analysis page for affected files.",
                 evidence=[Evidence("tool_output", label_s[:240], f"FACT uid {u}") for u in list(uids)[:10]]

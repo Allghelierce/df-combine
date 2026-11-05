@@ -162,12 +162,23 @@ class FakeFact:
             return httpx.Response(200, json={"firmware": {"meta_data": {"number_of_included_files": 7}, "analysis": {
                 "unpacker": {"summary": {"unpacked": ["abc_123"]}},
                 "software_components": {"summary": {"BusyBox 1.31.1": ["uid9"], "OpenSSL 1.0.2k": ["uid8"]}},
-                "crypto_material": {"summary": {"SshRsaPrivateKeyBlock": ["uid1", "uid2"]}},
-                "users_and_passwords": {"summary": {"root:unix": ["uid3"]}},
+                "crypto_material": {"summary": {"SshRsaPrivateKeyBlock": ["uid1", "uid2"], "SSLCertificate": ["uid6"]}},
+                "users_and_passwords": {"summary": {"root:unix": ["uid3"], "bin:unix": ["uid3"], "daemon:unix": ["uid3"]}},
                 "cve_lookup": {"summary": {"OpenSSL 1.0.1e (CRITICAL)": ["uid4"]}},
-                "exploit_mitigations": {"summary": {"NX enabled": ["u"], "Canary disabled": ["u5"]}},
+                # label vocabulary of FACT's exploit_mitigations plug-in (checksec)
+                "exploit_mitigations": {"summary": {"NX enabled": ["u"], "CANARY disabled": ["u5"],
+                                                    "PIE/DSO present": ["u5"], "RPATH disabled": ["u5"],
+                                                    "STRIPPED SYMBOLS disabled": ["u5"]}},
                 "file_type": {"summary": {"application/x-executable": ["u"]}},
             }}})
+        if request.url.path == "/rest/file_object/uid3":
+            # shape of FACT's full users_and_passwords result (captured from a real instance)
+            entries = [{"username": "root", "type": "unix", "password_hash": "$6$saltsalt$abcdefghijkl", "password": "admin",
+                        "full_entry": "root:$6$...", "error": None},
+                       {"username": "bin", "type": "unix", "password_hash": "x", "password": None, "error": None},
+                       {"username": "daemon", "type": "unix", "password_hash": "*", "password": None, "error": None}]
+            return httpx.Response(200, json={"file_object": {"meta_data": {"hid": "/etc/shadow"}, "analysis": {
+                "users_and_passwords": {"result": {"unix": entries, "http": [], "mosquitto": []}}}}})
         return httpx.Response(404)
 
 
@@ -189,7 +200,13 @@ def test_fact_adapter_with_mock(settings, tmp_path, monkeypatch):
     assert "crypto_material" in fake.uploaded["requested_analysis_systems"]
     titles = [f.title for f in res.findings]
     assert any("SshRsaPrivateKeyBlock" in t for t in titles)
-    assert any("Canary disabled" in t for t in titles) and not any("NX enabled" in t for t in titles)
+    mitigations = sorted(t for t in titles if "Exploit mitigation" in t)
+    assert mitigations == ["[FACT] Exploit mitigation: CANARY disabled"]  # good/neutral states are not weaknesses
+    cert = next(f for f in res.findings if "SSLCertificate" in f.title)
+    assert (cert.severity.value, cert.classification.value) == ("info", "info")
+    creds = [f for f in res.findings if f.rule_id == "fact-users_and_passwords"]
+    assert [f.title for f in creds] == ["[FACT] Password of 'root' recovered from its hash"]  # not bin ('x'), daemon ('*')
+    assert "admin" not in str(creds[0].evidence)
     assert {"name": "busybox", "version": "1.31.1"}.items() <= res.details["components"][0].items()
     assert "8 file(s)" in res.message or "file(s)" in res.message
     cve = next(f for f in res.findings if f.rule_id == "fact-cve_lookup")

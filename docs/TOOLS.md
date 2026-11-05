@@ -37,7 +37,8 @@ ESP test images. Numbers are from actual runs, not mocks.
 | FwAnalyzer | Debian 11 / Alpine 3.15 rootfs (`dirfs`) | completed (no offenders with the default rule set) |
 | FwAnalyzer | PX4 FMUv5 / FMUv2 CROMFS `/etc` (NuttX profile) | completed; FMUv5: 1 finding |
 | FACT | PX4 `.px4` and decoded image; PX4 CAN bootloader; ArduPilot CubeOrange bootloader | completed end to end over REST; FACT's unpacker cannot unpack `.px4`/raw MCU images and no plug-in produced results — reported as such |
-| FACT | Debian 11 rootfs | see the milestone report (run in progress at time of writing) |
+| FACT | Debian 11 rootfs | with FACT's per-file cwe_checker plug-in requested (former default): did not finish within the 3,600 s timeout (reported `timeout`) |
+| FACT | Alpine 3.15 rootfs | with the current plug-in set: completed in 21 s; results from 8 plug-ins (15 findings after the corrected mapping) |
 
 Opt-in real integration tests (`DFA_REAL_TOOLS=1 pytest tests/test_real_tools.py`) cover FwAnalyzer
 (Alpine, PX4 CROMFS), cwe_checker (ARM ELF, bare-metal), Ghidra (bare-metal) and FACT; all six pass
@@ -117,6 +118,15 @@ parsing and error handling.
   Debian root filesystem one by one (hundreds of binaries, several minutes each), so FACT did not
   finish within the adapter's one-hour timeout. cwe_checker already runs directly on a bounded
   selection of binaries.
+* **Result mapping, checked against real output** (Alpine 3.15 root filesystem, FACT finished in 21 s
+  with results from eight plug-ins):
+  * `users_and_passwords` summaries list every account line (`root:unix`), including shadowed (`x`)
+    and locked (`*`, `!`) accounts. The adapter fetches the per-file results and reports only cracked
+    passwords (high), stored password hashes (medium) and empty password fields; on Alpine that is
+    none (the first mapping had reported 25 "credentials").
+  * `crypto_material`: private keys are findings; certificates and public keys are info.
+  * `exploit_mitigations`: only weak states (NX/canary/PIE/RELRO disabled, RPATH/RUNPATH set) are
+    reported; "PIE/DSO present", stripped symbols, CLANGCFI/SAFESTACK are not weaknesses.
 * Normalisation maps `crypto_material`, `users_and_passwords`, `cve_lookup`, `known_vulnerabilities`,
   `cwe_checker` and `exploit_mitigations` summaries to findings; FACT's software components are
   merged into the component list.
