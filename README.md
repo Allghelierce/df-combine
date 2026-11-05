@@ -214,6 +214,22 @@ make lint
   ```bash
   python -I scripts/fuzz_parsers.py backend fixtures/real 60 /tmp/fuzz-out
   ```
+* **End-to-end fuzzing** (opt-in): `scripts/fuzz_extract.py` mutates composite images (concatenated
+  archives, compressed streams with trailing data, filesystem images, executables with overlays, raw
+  flash dumps with embedded objects) into the whole sandbox-side analysis. Each input runs in a forked
+  child with an address-space limit, as in the local sandbox. The resulting manifest is then checked
+  the way the worker checks it. `scripts/fuzz_pipeline.py` sends the same kind of input through upload,
+  worker, database and every report. They found the LZO codec leak (a few hundred lzop files aborted
+  the analysis). Last runs (2026-11-05): ~306,000 analyses from 15 composite seeds and 900 full
+  scans, nothing else found:
+
+  ```bash
+  .venv/bin/python scripts/fuzz_extract.py 60 /tmp/fuzz-extract-out
+  ```
+
+  ```bash
+  .venv/bin/python scripts/fuzz_pipeline.py 40 /tmp/fuzz-pipeline-out
+  ```
 * **Real tools** (opt-in, minutes): runs the actual FwAnalyzer, cwe_checker, Ghidra and FACT:
 
   ```bash

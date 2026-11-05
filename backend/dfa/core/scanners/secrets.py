@@ -106,9 +106,11 @@ def scan(ctx: ScanContext) -> list[Finding]:
 
 
 def _rebuild_pem_text(ctx: ScanContext, art) -> str:
-    raw = bytearray(ctx.paths[art.id].read_bytes()[: ctx.limits.max_scan_bytes_per_file])
-    for start, end in ctx.copied.get(art.id, ()):
-        raw[start:end] = bytes(len(raw[start:end]))  # carved into a child: analysed there
+    raw = ctx.paths[art.id].read_bytes()[: ctx.limits.max_scan_bytes_per_file]
+    if copied := ctx.copied.get(art.id):
+        raw = bytearray(raw)
+        for start, end in copied:
+            raw[start:end] = bytes(len(raw[start:end]))  # carved into a child: analysed there
     return raw.decode("latin-1")
 
 

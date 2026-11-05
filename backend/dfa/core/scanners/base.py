@@ -1,6 +1,7 @@
 """Shared context passed to all built-in content scanners."""
 from __future__ import annotations
 
+import bisect
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +31,7 @@ class ScanContext:
     copied: dict[int, list[tuple[int, int]]] = field(default_factory=dict)  # byte ranges carved verbatim into children
     _strings: dict[int, list[tuple[int, str]]] = field(default_factory=dict)
     _text: dict[int, str | None] = field(default_factory=dict)
+    _merged: dict[int, tuple[list[int], list[int]]] = field(default_factory=dict)
 
     def content_artifacts(self) -> Iterator[Artifact]:
         """Artifacts whose bytes should be scanned (skip fully unpacked containers)."""
@@ -68,7 +70,17 @@ class ScanContext:
     def outside_children(self, art: Artifact, offset: int) -> bool:
         """Whether a byte of ``art`` lies outside the regions carved verbatim into child artifacts (whose own
         analysis covers them)."""
-        return not any(start <= offset < end for start, end in self.copied.get(art.id, ()))
+        if art.id not in self._merged:
+            merged: list[list[int]] = []
+            for start, end in sorted(self.copied.get(art.id, ())):  # regions may nest (inside a 7z's claim)
+                if merged and start <= merged[-1][1]:
+                    merged[-1][1] = max(merged[-1][1], end)
+                else:
+                    merged.append([start, end])
+            self._merged[art.id] = ([m[0] for m in merged], [m[1] for m in merged])
+        starts, ends = self._merged[art.id]
+        i = bisect.bisect_right(starts, offset) - 1
+        return i < 0 or offset >= ends[i]
 
     def fs_path(self, art: Artifact) -> str:
         """Path of the artifact inside its filesystem/archive ('/etc/shadow')."""
