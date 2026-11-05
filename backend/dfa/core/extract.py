@@ -483,9 +483,9 @@ class Extractor:
         what it holds - or what a forged header claims as its own, such as a SquashFS superblock claiming the rest
         of a flash dump - is still analysed. Only the extent it declares is carved; data after it is examined as
         trailing data, as for any image. An object of its own kind is carved only if it checks out where it lies
-        (zipfile reads it, unsquashfs lists it, a uImage's data CRC matches): forged claims are neither copied nor
-        allowed to shadow anything, while the real image behind them is unpacked; one that fails all the same is
-        not carved again."""
+        (zipfile reads it, unsquashfs lists it, a uImage's data CRC matches, a cpio archive's headers lead to its
+        trailer): forged claims are neither copied nor allowed to shadow anything, while the real image behind them
+        is unpacked; one that fails all the same is not carved again."""
         if art.size < 64 or art.format in ("raw", "cortexm_raw") or art.id in self._no_failure_carve:
             return []  # (any size: a small zip whose forged end record failed it still holds the real one)
         try:
@@ -537,7 +537,10 @@ class Extractor:
             except subprocess.TimeoutExpired:
                 return False
             return r.returncode == 0
-        return False  # ROMFS, CROMFS, cpio, ELF: no check without unpacking it, so not carved
+        if kind == "cpio":  # its entry headers walked to the trailer
+            with src.open("rb") as fp:
+                return _cpio_length(fp, off, art.size, self.limits.max_files, complete=True) == length
+        return False  # ROMFS, CROMFS, ELF: no check without unpacking it, so not carved
 
     def _salvage(self, art: Artifact) -> list[Artifact]:
         """After a failure, register whatever was safely written so it is still analysed."""
@@ -1783,6 +1786,9 @@ class Extractor:
                 note("test-decoding limit reached", "max_carve_decode")
             return None
         end = members[data_at]
+        if end == TOO_BIG:
+            note("a compressed stream decodes to more than the per-file limit", "max_file_bytes")
+            return None
         return end - off if end else None
 
     def _xz_length(self, fp: BinaryIO, off: int, note: Callable[[str, str], None]) -> int | None:
@@ -1794,6 +1800,9 @@ class Extractor:
         self._work_left -= work
         if length is None and self._work_left <= 0:
             note("test-decoding limit reached", "max_carve_decode")
+        if length == TOO_BIG:
+            note("a compressed stream decodes to more than the per-file limit", "max_file_bytes")
+            return None
         return length
 
 
@@ -2010,16 +2019,21 @@ class _ConcatenatedStreams:
         return b""
 
 
+TOO_BIG = -1  # a test-decode that went past the per-file limit: a stream, but too large to carve
+
+
 def _xz_stream_length(fp: BinaryIO, off: int, max_out: int, max_work: int) -> tuple[int | None, int]:
     """(length of the xz stream at ``off``, work done: bytes read plus bytes decoded): a test-decode, its output
-    discarded, that gives up past ``max_out`` bytes decoded or ``max_work`` bytes of work."""
+    discarded, that gives up past ``max_work`` bytes of work (None) or ``max_out`` bytes decoded (TOO_BIG)."""
     fp.seek(off)
     d = lzma.LZMADecompressor(format=lzma.FORMAT_XZ, memlimit=LZMA_MEMLIMIT)
     consumed = produced = 0
     try:
         while True:
-            if produced > max_out or consumed + produced > max_work:
+            if consumed + produced > max_work:
                 return None, consumed + produced
+            if produced > max_out:
+                return TOO_BIG, consumed + produced
             if d.needs_input:
                 chunk = fp.read(64 * 1024)
                 if not chunk:
@@ -2077,15 +2091,17 @@ def _gzip_header_end(fp: BinaryIO, off: int, max_read: int) -> tuple[int | None,
 def _deflate_member_end(fp: BinaryIO, data_at: int, max_out: int, max_work: int) -> tuple[int | None, int]:
     """(offset just after the gzip member whose deflate data starts at ``data_at`` - its CRC-32 and size trailer
     checked - or None, work done: bytes read plus bytes decoded): a test-decode, its output discarded, that gives up
-    past ``max_out`` bytes decoded or ``max_work`` bytes of work."""
+    past ``max_work`` bytes of work (None) or ``max_out`` bytes decoded (TOO_BIG)."""
     fp.seek(data_at)
     d = zlib.decompressobj(-zlib.MAX_WBITS)
     consumed = produced = crc = 0
     tail = b""
     try:
         while not d.eof:
-            if produced > max_out or consumed + produced > max_work:
+            if consumed + produced > max_work:
                 return None, consumed + produced
+            if produced > max_out:
+                return TOO_BIG, consumed + produced
             if not tail:
                 tail = fp.read(64 * 1024)
                 if not tail:
@@ -2369,10 +2385,11 @@ def _all_erased(fp: BinaryIO, size: int) -> bool:
 _HEX_FIELDS = re.compile(rb"[0-9A-Fa-f]{104}")
 
 
-def _cpio_length(fp: BinaryIO, off: int, size: int, max_entries: int) -> int | None:
+def _cpio_length(fp: BinaryIO, off: int, size: int, max_entries: int, complete: bool = False) -> int | None:
     """Length of the newc cpio archive at ``off``, from walking its entry headers to the TRAILER!!! entry (rounded
     up to the 512-byte blocks cpio writes, within the file). An archive damaged after some entries is carved up to
-    its last valid entry (an entry that does not check out ends the walk); None if the first one does not."""
+    its last valid entry (an entry that does not check out ends the walk) unless ``complete`` is set; None if the
+    first one does not check out."""
     pos, good = off, None
     for _ in range(max_entries + 1):
         fp.seek(pos)
@@ -2381,14 +2398,14 @@ def _cpio_length(fp: BinaryIO, off: int, size: int, max_entries: int) -> int | N
             break
         filesize, namesize = int(hdr[54:62], 16), int(hdr[94:102], 16)
         name_at = pos + 110
-        data_at = (name_at + namesize + 3) & ~3
+        data_at = off + ((name_at - off + namesize + 3) & ~3)  # padded to 4 bytes from the archive's start
         if not 0 < namesize <= 4096 or data_at + filesize > size:
             break
         if fp.read(namesize) == b"TRAILER!!!\x00":
             return min((name_at + 10 - off + 511) // 512 * 512, size - off)
-        pos = (data_at + filesize + 3) & ~3
+        pos = off + ((data_at - off + filesize + 3) & ~3)
         good = min(pos, size) - off
-    return good
+    return None if complete else good
 
 
 def _carve_length(fp: BinaryIO, off: int, kind: str, size: int, max_entries: int = 20_000) -> int | None:

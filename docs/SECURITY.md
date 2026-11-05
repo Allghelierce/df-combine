@@ -227,7 +227,8 @@ boundary for hostile samples.
   enough. A zip behind other data (a vendor header, a self-extracting stub) or inside a raw image
   is found from its end record, a zip64 archive from its zip64 end record (before, a zip64 archive
   in either place passed as raw data, its contents unanalysed), and so is a zip moved behind a stub
-  with `zip -A` (offsets adjusted to the whole file). Every region of a zip that no member, data
+  with `zip -A` (offsets adjusted to the whole file; also with an archive comment, and inside a larger
+  image - before, only the whole file without a comment). Every region of a zip that no member, data
   descriptor, central directory or end record accounts for - what precedes the first member (a
   vendor header, a self-extracting stub, a fake start, an earlier archive or the rest of a flash
   dump), bytes between members, the archive comment - is analysed as an artifact of its own, before
@@ -242,10 +243,11 @@ boundary for hostile samples.
   extent it declares (from 64 bytes up), so what it holds or hides is still analysed. An object of
   its own kind is carved only if it checks out where it lies - zipfile reads its end records and
   central directory, `unsquashfs` lists the SquashFS image (at most 16 such checks per file), a
-  uImage's data CRC matches - and then follows the normal disjoint rules: the real image behind a
+  uImage's data CRC matches, a cpio archive's entry headers lead to its trailer - and then follows the
+  normal disjoint rules: the real image behind a
   forged copy of its superblock (or behind two of them) is unpacked, while forged claims and decoys
   are neither copied nor allowed to shadow anything; a checked object that fails anyway is not
-  carved again. ROMFS, CROMFS, cpio and ELF objects inside a failed image of the same kind are not
+  carved again. ROMFS, CROMFS and ELF objects inside a failed image of the same kind are not
   carved, for want of such a check (anything else they hold is). Carving examines every signature
   (up to a million per file; those inside an object already carved are skipped in bulk) and checks
   up to 4,096 candidates per file. Checking costs are bounded for the whole scan as well, since
@@ -262,7 +264,8 @@ boundary for hostile samples.
   candidates are skipped but other objects are still carved; once the scan's candidate budget is
   spent, later files are not searched, and the scan reports them once, on the input file. Before,
   carving stopped silently after 256 signatures, valid or not, so a flood of magic bytes hid
-  everything after it - every limit is reported when reached and marks the file *partial*. An external unpacker that exits
+  everything after it - every limit is reported when reached and marks the file *partial*, as does a compressed stream that
+  decodes past the per-file limit (it used to be skipped as if it were none). An external unpacker that exits
   with an error without extracting anything marks the image as failed (it used to be reported as
   unpacked). The limit that remains: the extent of an ELF or an image that still unpacks comes from
   its own headers, so a section or block count claiming the appended bytes hides them;

@@ -108,17 +108,33 @@ def detect_format(path: Path) -> FormatInfo:
 
 def zip_at_end(fp: BinaryIO, size: int) -> int | None:
     """Offset of a zip archive that ends the file after other data (a vendor header, a self-extracting stub),
-    which zipfile opens as it is; None if there is none. Needs the end record at the very end (no comment),
-    a central directory and a first local header where the end record says."""
+    which zipfile opens as it is; None if there is none. Needs the end record zipfile would use, followed by its
+    comment up to the very end, and a central directory and a first local header where the record says."""
     if size < 22 + 46 + 30:
         return None
-    fp.seek(size - 22)
-    if fp.read(22)[20:22] != b"\x00\x00":
+    end = _end_record_at_end(fp, size)
+    if end is None:
         return None
-    start = zip_start(fp, size - 22)
-    if start is None:  # offsets counted from the file's start (zip -A adjusts a self-extractor's): the first member
-        start = _first_member_at(fp, size - 22)  # follows the stub
+    start = zip_start(fp, end)
+    if start == 0:  # offsets counted from the file's start (zip -A adjusts a self-extractor's): the first member
+        start = _first_member_at(fp, end)  # follows the stub
     return start if start else None
+
+
+def _end_record_at_end(fp: BinaryIO, size: int) -> int | None:
+    """Where the end record that zipfile uses lies - at the very end, else the last signature within reach of a
+    comment - if its comment then ends the file exactly."""
+    fp.seek(size - 22)
+    rec = fp.read(22)
+    if rec[:4] == b"PK\x05\x06" and rec[20:22] == b"\x00\x00":
+        return size - 22
+    n = min(size, 22 + 0xFFFF)
+    fp.seek(size - n)
+    tail = fp.read(n)
+    i = tail.rfind(b"PK\x05\x06")
+    if i < 0 or i + 22 > n or i + 22 + struct.unpack_from("<H", tail, i + 20)[0] != n:
+        return None
+    return size - n + i
 
 
 def _first_member_at(fp: BinaryIO, end_record: int) -> int | None:
@@ -168,10 +184,20 @@ def zip_start(fp: BinaryIO, end_record: int) -> int | None:
     if not count or cd_size < 46 or start < 0:
         return None
     fp.seek(start + cd_off)
-    if fp.read(4) != b"PK\x01\x02":
+    cd = fp.read(46)
+    if cd[:4] != b"PK\x01\x02":
         return None
     fp.seek(start)
-    return start if fp.read(4) == b"PK\x03\x04" else None
+    if fp.read(4) == b"PK\x03\x04":
+        return start
+    # offsets counted from the start of a stub in front of the archive ('zip -A' adjusts a self-extractor's): the
+    # archive, for zipfile, starts with the stub, and its first member lies where the first entry says
+    lho = struct.unpack_from("<I", cd, 42)[0] if len(cd) == 46 else 0
+    if 0 < lho < cd_off:
+        fp.seek(start + lho)
+        if fp.read(4) == b"PK\x03\x04":
+            return start
+    return None
 
 
 def detect_format_bytes(head: bytes, size: int) -> FormatInfo:

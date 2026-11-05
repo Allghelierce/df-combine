@@ -1832,6 +1832,11 @@ def test_floods_cannot_run_a_scan_out_of_time_or_hide_what_follows(tmp_path, run
     (tmp_path / "decoy.bin").write_bytes(_noise(8192, 101) + b"070701" + b"\x00" * 200 + shadow_cpio
                                          + _noise(4096, 102))
     assert "empty-password" in rules_of(tmp_path / "decoy.bin")
+    (tmp_path / "failed.cpio").write_bytes(b"070701" + b"\x00" * 200 + shadow_cpio)  # a failed cpio: its own kind
+    assert "empty-password" in rules_of(tmp_path / "failed.cpio")  # is carved once its headers lead to a trailer
+    two = _newc([("etc/shadow", _SHADOW, 0o100600), ("etc/ssl/k.pem", _pem_block(116), 0o100600)])
+    (tmp_path / "odd.bin").write_bytes(_noise(8191, 117) + two + _noise(4096, 118))  # padding counts from its start
+    assert {"empty-password", "pem-private-key"} <= rules_of(tmp_path / "odd.bin")
     flood = tmp_path / "cpioflood.bin"  # no trailer anywhere: each candidate read the rest of the file
     with flood.open("wb") as f:
         f.write(_noise(4096, 103) + (b"070701" + b"\x00" * 10) * 4000
@@ -1895,3 +1900,35 @@ def test_an_unpacker_that_prints_a_lot_is_not_stalled(tmp_path):
         pytest.fail(f"stalled: {exc}")
     assert time.monotonic() - t0 < 10 and (out / "f").exists()
     assert art.details["tool_output_tail"].endswith("node_crc does not match!\n")
+
+
+def test_adjusted_self_extractors_with_a_comment_and_streams_past_the_file_limit(tmp_path, run_analysis):
+    """A self-extractor whose offsets 'zip -A' adjusted was recognised only without an archive comment, and never
+    inside a larger image (its end record's offsets count from the stub, not from the first member); a compressed
+    stream that decodes past the per-file limit was skipped as if it were none, without a word."""
+    import struct
+    import zlib
+    stub = b"\x7fSTUB" + _noise(6000, 111)
+    sfx = bytearray(stub + _zip_of_members([{"name": b"etc/shadow", "data": _SHADOW, "method": 8},
+                                            {"name": b"readme.txt", "data": b"hello\n", "method": 8}]))
+    count, cd_size, cd_off = struct.unpack_from("<HII", sfx, len(sfx) - 12)  # what 'zip -A' does: every offset
+    pos = len(stub) + cd_off  # now counts from the start of the stub
+    for _ in range(count):
+        struct.pack_into("<I", sfx, pos + 42, struct.unpack_from("<I", sfx, pos + 42)[0] + len(stub))
+        pos += 46 + sum(struct.unpack_from("<HHH", sfx, pos + 28))
+    struct.pack_into("<I", sfx, len(sfx) - 6, cd_off + len(stub))
+    comment = b"made by zip -A"
+    struct.pack_into("<H", sfx, len(sfx) - 2, len(comment))
+    (tmp_path / "sfx.bin").write_bytes(bytes(sfx) + comment)
+    m = run_analysis(tmp_path / "sfx.bin")
+    assert m["extraction"]["artifacts"][0]["format"] == "zip"
+    assert "empty-password" in {f["rule_id"] for f in m["findings"]}
+    (tmp_path / "image.bin").write_bytes(_noise(8192, 112) + bytes(sfx) + comment + _noise(4096, 113))
+    assert "empty-password" in {f["rule_id"] for f in run_analysis(tmp_path / "image.bin")["findings"]}
+
+    co = zlib.compressobj(9, zlib.DEFLATED, -15)
+    big = co.compress(b"\x00" * (3 * 1024 * 1024)) + co.flush()
+    stream = b"\x1f\x8b\x08\x00" + b"\x00" * 4 + b"\x00\x03" + big + struct.pack("<II", zlib.crc32(b"\x00" * (3 * 1024 * 1024)), 3 * 1024 * 1024)
+    (tmp_path / "big.bin").write_bytes(_noise(8192, 114) + stream + _noise(4096, 115))
+    res = Extractor(tmp_path / "w_big", Limits(max_file_bytes=1024 * 1024)).run(tmp_path / "big.bin", "big.bin")
+    assert res.artifacts[0].extraction == "partial" and "max_file_bytes" in res.limits_hit  # reported
