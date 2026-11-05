@@ -98,14 +98,17 @@ def match(manifest: dict, db: VulnDB, where: str) -> tuple[list[Finding], dict]:
         findings.append(Finding(
             title=f"{name} {ver}: {len(ms)} known vulnerabilit{'y' if len(ms) == 1 else 'ies'} (upstream release)",
             description=(f"Version {ver} of {name} was identified from {comp.get('method', 'version strings')} and "
-                         f"matches the affected release tags of {len(ms)} vulnerabilities in OSV's upstream (GIT) "
-                         "data. This is a version-based match: vendor backports cannot be seen, so each entry needs "
-                         "manual confirmation."),
+                         f"matches {len(ms)} vulnerabilities in OSV's upstream (GIT) data, by the affected release "
+                         "tags or by the affected-version range published with the CVE. This is a version-based "
+                         "match: vendor backports and whether the affected code is built in cannot be seen, so "
+                         "each entry needs manual confirmation."),
             severity=_max_sev(ms), classification=C.unverified, confidence=K.medium, source_tool="osv",
             rule_id=f"osv-upstream-{name}", affected_component=f"{name} {ver}",
             remediation=f"Upgrade {name} to a release that fixes these issues, or confirm vendor backports.",
             evidence=[Evidence("string", f"{m.id} [{m.severity or 'n/a'}{f' {m.score}' if m.score else ''}]: "
-                                         f"{m.summary[:120]}", ", ".join(m.aliases[:3]) or None) for m in ms[:40]],
+                                         f"{m.summary[:120]}" + (f" ({m.source.removeprefix('OSV GIT (')[:-1]})"
+                                                                  if "range" in m.source else ""),
+                               ", ".join(m.aliases[:3]) or None) for m in ms[:40]],
             references=[m.id for m in ms[:50]], cwe="CWE-1395",
             tags=["vulnerable-dependency", "osv", "version-match"]))
     return findings, stats

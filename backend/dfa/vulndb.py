@@ -253,6 +253,9 @@ CREATE TABLE IF NOT EXISTS distro (vuln_id TEXT, ecosystem TEXT, package TEXT, r
 CREATE INDEX IF NOT EXISTS distro_pkg ON distro (ecosystem, package);
 CREATE TABLE IF NOT EXISTS upstream (vuln_id TEXT, component TEXT, tag TEXT);
 CREATE INDEX IF NOT EXISTS upstream_tag ON upstream (component, tag);
+CREATE TABLE IF NOT EXISTS upstream_range (vuln_id TEXT, component TEXT, introduced TEXT, fixed TEXT,
+                                           last_affected TEXT, source TEXT);
+CREATE INDEX IF NOT EXISTS upstream_range_comp ON upstream_range (component);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS cvss (cve TEXT PRIMARY KEY, score REAL);
 """
@@ -285,6 +288,61 @@ def _cve_ids(d: dict) -> set[str]:
     return out
 
 
+# Where an OSV GIT record's version range comes from (osv.dev conversion of the CVE), most reliable first.
+RANGE_SOURCES = ("AFFECTED_FIELD", "CPE_RANGE", "CPE_STRING", "DESCRIPTION")
+
+
+def _version_ranges(r: dict) -> list[tuple[str, str | None, str | None, str]]:
+    """(introduced, fixed, last_affected, source) version ranges of a GIT range, from the affected versions
+    published with the CVE. OSV's own tag list misses releases tagged on release branches (e.g. NuttX
+    nuttx-11.0.0), so these ranges are matched as well. Duplicates keep the most reliable source."""
+    best: dict[tuple, str] = {}
+    for e in ((r.get("database_specific") or {}).get("extracted_events") or [])[:20]:
+        if not isinstance(e, dict) or not isinstance(e.get("range"), list):
+            continue
+        ev = {k: str(v)[:40] for x in e["range"] if isinstance(x, dict) for k, v in x.items()
+              if k in ("introduced", "fixed", "last_affected")}
+        if "introduced" not in ev:
+            continue
+        key = (ev["introduced"], ev.get("fixed"), ev.get("last_affected"))
+        src = str(e.get("source") or "")
+        rank = RANGE_SOURCES.index(src) if src in RANGE_SOURCES else len(RANGE_SOURCES)
+        if key not in best or rank < (RANGE_SOURCES.index(best[key]) if best[key] in RANGE_SOURCES else 99):
+            best[key] = src
+    return [(*k, s) for k, s in best.items()]
+
+
+_UPSTREAM_VERSION = re.compile(r"v?(\d+(?:\.\d+){0,3})(?:[-.]?(alpha|beta|rc|pre)\.?(\d*))?", re.I)
+_STAGES = {"alpha": 0, "beta": 1, "rc": 2, "pre": 2}
+
+
+def upstream_version_key(v: str | None) -> tuple | None:
+    """Ordering key for upstream release versions ('11.0.0', '1.14.0-rc2', '2.50'); None if unparseable."""
+    m = _UPSTREAM_VERSION.fullmatch((v or "").strip())
+    if not m:
+        return None
+    nums = [int(x) for x in m.group(1).split(".")] + [0] * 4
+    stage = _STAGES[m.group(2).lower()] if m.group(2) else 3
+    return (*nums[:4], stage, int(m.group(3) or 0))
+
+
+def in_version_range(version: str, introduced: str, fixed: str | None, last_affected: str | None) -> bool:
+    v = upstream_version_key(version)
+    if v is None:
+        return False
+    if introduced not in ("0", ""):
+        lo = upstream_version_key(introduced)
+        if lo is None or v < lo:
+            return False
+    if fixed:
+        hi = upstream_version_key(fixed)
+        return hi is not None and v < hi
+    if last_affected:
+        hi = upstream_version_key(last_affected)
+        return hi is not None and v <= hi
+    return False  # no end: not used (an open range says too little for a version match)
+
+
 def import_zip(con: sqlite3.Connection, zpath: Path, ecosystem: str) -> int:
     n = 0
     with zipfile.ZipFile(zpath) as z:
@@ -293,7 +351,7 @@ def import_zip(con: sqlite3.Connection, zpath: Path, ecosystem: str) -> int:
                 d = json.loads(z.read(name))
             except (json.JSONDecodeError, KeyError):
                 continue
-            rows_distro, rows_up = [], []
+            rows_distro, rows_up, rows_range = [], [], []
             for a in d.get("affected") or []:
                 pkg = a.get("package") or {}
                 eco = pkg.get("ecosystem", "")
@@ -305,13 +363,14 @@ def import_zip(con: sqlite3.Connection, zpath: Path, ecosystem: str) -> int:
                         comp = _repo_key(r.get("repo", "")) if r.get("type") == "GIT" else None
                         if comp:
                             rows_up += [(d["id"], comp, t) for t in (a.get("versions") or [])[:5000]]
+                            rows_range += [(d["id"], comp, *rng) for rng in _version_ranges(r)]
                             break
             sev, score = _severity_of(d)
             if score is not None:  # CVSS of every record is kept to score CVEs that other sources leave unrated
                 for cve in _cve_ids(d):
                     con.execute("INSERT INTO cvss VALUES (?, ?) ON CONFLICT(cve) DO UPDATE SET "
                                 "score = max(score, excluded.score)", (cve, score))
-            if not rows_distro and not rows_up:
+            if not rows_distro and not rows_up and not rows_range:
                 continue
             refs = [r.get("url") for r in (d.get("references") or [])[:5] if r.get("url")]
             con.execute("INSERT OR REPLACE INTO vulns VALUES (?,?,?,?,?,?,?,?)",
@@ -319,6 +378,7 @@ def import_zip(con: sqlite3.Connection, zpath: Path, ecosystem: str) -> int:
                          sev, score, d.get("published"), d.get("modified"), json.dumps(refs)))
             con.executemany("INSERT INTO distro VALUES (?,?,?,?,?)", rows_distro)
             con.executemany("INSERT INTO upstream VALUES (?,?,?)", rows_up)
+            con.executemany("INSERT INTO upstream_range VALUES (?,?,?,?,?,?)", rows_range)
             n += 1
     return n
 
@@ -437,6 +497,31 @@ class VulnDB:
                 summary, aliases, sev, score, refs = row
                 out.append(VulnMatch(vid, sev, score, summary or "", json.loads(aliases or "[]"), None,
                                      "OSV GIT (upstream release tags)", json.loads(refs or "[]")))
+        out += self._range_matches(key, _describe_base(version), {m.id for m in out})
+        return out
+
+    def _range_matches(self, key: str, version: str, known: set[str]) -> list[VulnMatch]:
+        if not self.con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='upstream_range'").fetchone():
+            return []  # database built before version ranges were imported
+        hits: dict[str, tuple] = {}
+        for vid, intro, fixed, last, src in self.con.execute(
+                "SELECT vuln_id, introduced, fixed, last_affected, source FROM upstream_range WHERE component=?",
+                (key,)):
+            if vid in known or vid in hits or not in_version_range(version, intro, fixed, last):
+                continue
+            hits[vid] = (intro, fixed, last, src)
+        out = []
+        for vid, (intro, fixed, last, src) in hits.items():
+            row = self._vuln(vid)
+            if not row:
+                continue
+            summary, aliases, sev, score, refs = row
+            span = (f">= {intro}" if intro not in ("0", "") else "all versions") + \
+                (f", < {fixed}" if fixed else f", <= {last}")
+            where = {"AFFECTED_FIELD": "the CVE's affected versions", "CPE_RANGE": "the NVD CPE range",
+                     "CPE_STRING": "an NVD CPE entry", "DESCRIPTION": "the CVE description"}.get(src, "the CVE record")
+            out.append(VulnMatch(vid, sev, score, summary or "", json.loads(aliases or "[]"), fixed,
+                                 f"OSV GIT (affected-version range {span}, from {where})", json.loads(refs or "[]")))
         return out
 
 

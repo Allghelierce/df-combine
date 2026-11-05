@@ -444,3 +444,40 @@ def test_real_px4_bundle_gives_the_px4_image_the_elf_symbols(tmp_path, settings)
     targets, why = CweCheckerAdapter(settings).plan(ctx)
     assert len(targets) == 3 and "3 identical copies merged" in why  # main image, IO firmware, bootloader
     assert (targets[0]["artifact"].get("details") or {}).get("symbol_map")
+
+
+def test_vulndb_matches_published_version_ranges(tmp_path):
+    """OSV's GIT tag lists miss releases tagged on release branches (NuttX 'nuttx-11.0.0' is not listed for
+    CVE-2025-48769, whose CVE says 7.20 up to, not including, 12.11.0); the published range is matched too."""
+    from dfa.vulndb import VulnDB, update
+    from dfa.vulnmatch import match
+
+    def ranges(*evs):
+        return {"extracted_events": [{"range": r, "source": s} for r, s in evs]}
+    _osv_zip(tmp_path / "Debian.zip", [])
+    _osv_zip(tmp_path / "Alpine.zip", [])
+    _osv_zip(tmp_path / "GIT.zip", [
+        {"id": "CVE-2025-48769", "summary": "Apache NuttX RTOS: fs/vfs/fs_rename: use after free",
+         "affected": [{"ranges": [{"type": "GIT", "repo": "https://github.com/apache/nuttx", "events": [],
+                                   "database_specific": ranges(([{"introduced": "7.20"}, {"fixed": "12.11.0"}],
+                                                                "AFFECTED_FIELD"),
+                                                               ([{"introduced": "7.20"}, {"fixed": "12.11.0"}],
+                                                                "CPE_RANGE"))}],
+                       "versions": ["nuttx-8.2", "nuttx-12.11.0-RC0"]}]},
+        {"id": "CVE-2099-0100", "summary": "old px4 bug",
+         "affected": [{"ranges": [{"type": "GIT", "repo": "https://github.com/PX4/PX4-Autopilot", "events": [],
+                                   "database_specific": ranges(([{"introduced": "0"}, {"last_affected": "1.13.3"}],
+                                                                "CPE_RANGE"))}]}]},
+    ])
+    db_path = tmp_path / "v.sqlite"
+    update(db_path, tmp_path)
+    db = VulnDB(db_path)
+    manifest = {"packages": {}, "components": [{"name": "nuttx", "version": "11.0.0"}, {"name": "nuttx", "version": "12.11.0"},
+                                               {"name": "px4", "version": "1.13.3"}, {"name": "px4", "version": "1.14.0"}]}
+    fs, _ = match(manifest, db, "fw")
+    hits = {f.affected_component: f for f in fs}
+    assert set(hits) == {"nuttx 11.0.0", "px4 1.13.3"}  # 12.11.0 is the fix; 1.14.0 is past last_affected
+    ev = hits["nuttx 11.0.0"].evidence[0].value
+    assert "CVE-2025-48769" in ev and ">= 7.20, < 12.11.0" in ev and "the CVE's affected versions" in ev
+    assert hits["nuttx 11.0.0"].classification.value == "unverified"
+    assert "<= 1.13.3, from the NVD CPE range" in hits["px4 1.13.3"].evidence[0].value

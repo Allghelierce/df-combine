@@ -177,8 +177,14 @@ parsing and error handling.
 * **Upstream components:** versions identified from strings or descriptors are matched to affected
   release tags (OpenSSL, BusyBox, Dropbear, dnsmasq, zlib, glibc, SQLite, OpenSSH, U-Boot, mbedTLS,
   hostapd/wpa_supplicant, lighttpd, uClibc-ng, curl, libpcap, NuttX, PX4, ArduPilot (per vehicle tag),
-  ESP-IDF, FreeRTOS kernel, Zephyr). Always `unverified`: vendor backports are invisible. Components
-  already covered by distro package data are not matched twice.
+  ESP-IDF, FreeRTOS kernel, Zephyr) **and** to the affected-version ranges published with each CVE
+  (OSV's `extracted_events`: the CVE's affected field, NVD CPE ranges, CPE strings or the description;
+  each match names its range and source). The ranges matter because OSV's tag lists only contain tags
+  on the main branch: releases tagged on release branches - NuttX `nuttx-11.0.0`, used by PX4 - were
+  never matched. On the official PX4 builds this added 5 NuttX 11.0.0 CVEs and raised PX4 matches from
+  1/0/1 to 19/15/7 for v1.15.0/v1.16.2/v1.17.0. Always `unverified`: vendor backports, and whether the
+  affected code (a driver, a host tool, an example) is built into the firmware, are invisible.
+  Components already covered by distro package data are not matched twice.
 * **Ownership:** findings in files owned by an installed package name that package (dpkg/opkg file
   lists, apk installed database).
 * **SBOM / exchange:** CycloneDX 1.5 (`/api/scans/{id}/sbom.cdx.json`) with purls and CPEs; SARIF 2.1.0
