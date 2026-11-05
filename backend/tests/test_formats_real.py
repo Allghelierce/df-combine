@@ -481,3 +481,15 @@ def test_vulndb_matches_published_version_ranges(tmp_path):
     assert "CVE-2025-48769" in ev and ">= 7.20, < 12.11.0" in ev and "the CVE's affected versions" in ev
     assert hits["nuttx 11.0.0"].classification.value == "unverified"
     assert "<= 1.13.3, from the NVD CPE range" in hits["px4 1.13.3"].evidence[0].value
+
+
+def test_upstream_matches_note_host_tools_and_examples():
+    """Real NuttX CVE summaries: host build tools and example programs are named, severity is unchanged."""
+    from dfa.vulndb import VulnMatch
+    from dfa.vulnmatch import HOST_OR_EXAMPLE, _max_sev
+    assert HOST_OR_EXAMPLE.search("Apache NuttX RTOS: tools/bdf-converter.: tools/bdf-converter: Fix loop").group(0) \
+        == "tools/bdf-converter"
+    assert HOST_OR_EXAMPLE.search("Apache NuttX RTOS: examples/xmlrpc: Fix calls buffers size.").group(0) == "examples/xmlrpc"
+    assert HOST_OR_EXAMPLE.search("Apache NuttX RTOS: fs/vfs/fs_rename: use after free") is None
+    assert HOST_OR_EXAMPLE.search("PX4 Autopilot through 1.17.0 Stack Exhaustion via tests file2 Command") is None
+    assert _max_sev([VulnMatch("CVE-2025-47868", "critical", 9.8, "tools/bdf-converter: x", [])]).value == "critical"

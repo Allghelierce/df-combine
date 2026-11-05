@@ -1,6 +1,7 @@
 """Vulnerability matching stage (runs on the worker against the offline OSV database)."""
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 
 from .core.findings import Classification as C
@@ -18,6 +19,11 @@ DISTRO_SOURCE = {"glibc": ("glibc", "eglibc"), "openssl": ("openssl", "openssl1.
                  "libpcap": ("libpcap",), "freertos": ("freertos",), "zephyr": ("zephyr",)}
 
 SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4, None: 2}
+
+# CVE summaries that name a source path under tools/ or examples/ (e.g. NuttX 'tools/bdf-converter',
+# 'examples/xmlrpc'): host build tools and example programs, which are usually not part of a firmware image.
+# Only a note - severity is not changed on this basis.
+HOST_OR_EXAMPLE = re.compile(r"(?<![\w/])(?:tools|examples)/[\w+-]+(?:\.[\w+-]+)*")
 
 
 def _sort(ms: list[VulnMatch]) -> list[VulnMatch]:
@@ -107,7 +113,10 @@ def match(manifest: dict, db: VulnDB, where: str) -> tuple[list[Finding], dict]:
             remediation=f"Upgrade {name} to a release that fixes these issues, or confirm vendor backports.",
             evidence=[Evidence("string", f"{m.id} [{m.severity or 'n/a'}{f' {m.score}' if m.score else ''}]: "
                                          f"{m.summary[:120]}" + (f" ({m.source.removeprefix('OSV GIT (')[:-1]})"
-                                                                  if "range" in m.source else ""),
+                                                                  if "range" in m.source else "")
+                               + (f" - names {HOST_OR_EXAMPLE.search(m.summary).group(0)}, a host tool or example "
+                                  "program, usually not part of a firmware image" if HOST_OR_EXAMPLE.search(m.summary)
+                                  else ""),
                                ", ".join(m.aliases[:3]) or None) for m in ms[:40]],
             references=[m.id for m in ms[:50]], cwe="CWE-1395",
             tags=["vulnerable-dependency", "osv", "version-match"]))
