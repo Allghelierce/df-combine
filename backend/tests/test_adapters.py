@@ -184,6 +184,9 @@ def test_fact_adapter_with_mock(settings, tmp_path, monkeypatch):
     res = ad.execute(ctx_for(settings, {"identification": {"platform": "PX4"}}, tmp_path, input_path=inp))
     assert res.status == "completed", res.message
     assert fake.uploaded["vendor"] == "PX4" and fake.uploaded["binary"] == "ZmlybXdhcmU="
+    # FACT's own cwe_checker plug-in would analyse every ELF of a rootfs (hours); it is opt-in only
+    assert "cwe_checker" not in fake.uploaded["requested_analysis_systems"]
+    assert "crypto_material" in fake.uploaded["requested_analysis_systems"]
     titles = [f.title for f in res.findings]
     assert any("SshRsaPrivateKeyBlock" in t for t in titles)
     assert any("Canary disabled" in t for t in titles) and not any("NX enabled" in t for t in titles)
@@ -213,3 +216,43 @@ def test_correlation_merges_fwanalyzer_duplicates():
     assert any(e.value.startswith("[fwanalyzer]") for e in b.evidence)
     # Unrelated FwAnalyzer results stay.
     assert any(f.rule_id == "fwa-bad-file" for f in merged)
+
+
+class SlowFact(FakeFact):
+    """FACT that never finishes (or cancels) the analysis but already has partial plug-in results."""
+
+    def __init__(self, cancel: bool = False):
+        super().__init__()
+        self.cancel = cancel
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/rest/status":
+            analysis = {"current_analyses": {} if self.cancel else {"abc_123": {}},
+                        "recently_canceled_analyses": {"abc_123": {}} if self.cancel else {}}
+            return httpx.Response(200, json={"system_status": {"backend": {"analysis": analysis}}})
+        if request.url.path == "/rest/firmware/abc_123":
+            return httpx.Response(200, json={"firmware": {"meta_data": {"number_of_included_files": 3311}, "analysis": {
+                "unpacker": {"summary": {"unpacked": ["abc_123"]}},
+                "crypto_material": {"summary": {"SshRsaPrivateKeyBlock": ["uid1"]}}}}})
+        return super().handler(request)
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_fact_timeout_or_cancel_keeps_partial_results(settings, tmp_path, monkeypatch, cancel):
+    settings.fact_url, settings.fact_poll_s, settings.fact_timeout_s = "http://fact.test", 0, 0.2
+    fake = SlowFact(cancel=cancel)
+    ad = fact.FactAdapter(settings)
+    monkeypatch.setattr(ad, "_client", lambda: httpx.Client(base_url="http://fact.test",
+                                                            transport=httpx.MockTransport(fake.handler)))
+    inp = tmp_path / "fw.bin"
+    inp.write_bytes(b"firmware")
+    res = ad.execute(ctx_for(settings, {"identification": {}}, tmp_path, input_path=inp))
+    sub = res.details["submissions"][0]
+    if cancel:
+        assert res.status == "failed" and sub["status"] == "cancelled"
+        assert "cancelled in FACT" in res.message
+    else:
+        assert res.status == "timeout" and sub["status"] == "timeout"
+        assert "did not finish within" in res.message
+    assert sub["partial"] and "partial results so far" in res.message and "3312 file(s)" in res.message
+    assert any("SshRsaPrivateKeyBlock" in f.title for f in res.findings)  # what FACT had already found is kept

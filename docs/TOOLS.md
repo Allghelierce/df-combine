@@ -103,11 +103,20 @@ parsing and error handling.
   completion requires the `unpacker` analysis to be present. The installation needed patches
   for the environment (magic database built from source, Docker Hub image for the cwe_checker
   plug-in, binwalk and ip_and_uri_finder plug-ins disabled because they failed to install).
+* **Timeouts and cancellation:** if FACT does not finish within `DFA_FACT_TIMEOUT_S`, or the analysis is
+  cancelled in FACT (`recently_canceled_analyses`), the tool run says so (`timeout` / `failed`) and
+  keeps whatever plug-in results FACT had produced by then, labelled as partial.
 * **Behaviour notes:** FACT's uWSGI closes idle keep-alive connections, so the client uses a fresh
   connection per request and repeats an upload once after a dropped connection (FACT derives the
   UID from the content, so this is idempotent). `.px4` containers and raw MCU images are not
   unpackable by FACT; the adapter also submits the decoded images and says when no plug-in produced
   results.
+* **Plug-in selection** (`DFA_FACT_PLUGINS`): crypto material, users/passwords, software
+  components, CVE lookup, known vulnerabilities, exploit mitigations, ELF analysis. FACT's own
+  cwe_checker plug-in is **not** requested by default: in a real run it analysed every ELF of a
+  Debian root filesystem one by one (hundreds of binaries, several minutes each), so FACT did not
+  finish within the adapter's one-hour timeout. cwe_checker already runs directly on a bounded
+  selection of binaries.
 * Normalisation maps `crypto_material`, `users_and_passwords`, `cve_lookup`, `known_vulnerabilities`,
   `cwe_checker` and `exploit_mitigations` summaries to findings; FACT's software components are
   merged into the component list.

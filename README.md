@@ -121,6 +121,7 @@ Environment variables (prefix `DFA_`, also read from `backend/.env`). Main ones:
 | `DFA_GHIDRA_ENABLED` / `_IMAGE` / `_MAX_BINARIES` / `_TIMEOUT_S` / `_MEMORY` | `true` / cwe_checker image / 3 / 1800 / `6g` | Ghidra headless layer |
 | `DFA_FWANALYZER_ENABLED` / `_TIMEOUT_S` | `true` / 600 | FwAnalyzer |
 | `DFA_FACT_URL` / `_API_KEY` / `_TIMEOUT_S` / `_POLL_S` | – / – / 3600 / 15 | FACT REST service |
+| `DFA_FACT_PLUGINS` | crypto, credentials, components, CVE lookup, known vulns, mitigations, ELF | FACT plug-ins to request (JSON list); FACT's cwe_checker plug-in is opt-in |
 | `DFA_VULNDB_PATH` | `<data>/vulndb.sqlite` | Offline OSV database |
 | `DFA_KEEP_EXTRACTED` | `true` | `false` deletes extracted files after each scan |
 

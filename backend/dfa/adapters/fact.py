@@ -34,8 +34,6 @@ from ..core.findings import Severity as S
 from .base import AdapterContext, AdapterResult, ToolAdapter
 
 FACT_OPAQUE_CONTAINERS = {"px4", "apj", "fw_json", "ihex", "dfu"}
-REQUESTED_PLUGINS = ["crypto_material", "users_and_passwords", "software_components", "cve_lookup",
-                     "known_vulnerabilities", "exploit_mitigations", "cwe_checker", "elf_analysis"]
 
 PLUGIN_MAP = {
     # plugin: (severity, classification, title prefix, cwe)
@@ -111,7 +109,7 @@ class FactAdapter(ToolAdapter):
                     "device_name": f"dfa-{ctx.scan_id[:8]}", "device_part": t["part"], "device_class": "UAV/drone",
                     "vendor": ident.get("platform") or "unknown", "version": str(ident.get("platform_version") or "unknown"),
                     "release_date": "1970-01-01", "tags": "drone-firmware-analyzer",
-                    "requested_analysis_systems": REQUESTED_PLUGINS,
+                    "requested_analysis_systems": list(self.settings.fact_plugins),
                 }
                 r = self._put_once_more_on_reset(c, payload)
                 if r.status_code not in (200, 201) or not r.json().get("uid"):
@@ -121,31 +119,41 @@ class FactAdapter(ToolAdapter):
                     continue
                 uid = r.json()["uid"]
                 ctx.log(f"FACT: submitted {t['label']} as {uid}; waiting for unpacking and analysis")
-                fw = self._wait(c, uid)
-                if fw is None:
+                state, fw = self._wait(c, uid)
+                entry: dict = {"target": t["label"], "uid": uid, "status": state}
+                if fw:
+                    (out_dir / f"firmware_{i}.json").write_text(json.dumps(fw, indent=1)[:50_000_000])
+                    meta = fw.get("meta_data", {}) or {}
+                    fs = normalize(fw, ctx.original_name if i == 0 else f"{ctx.original_name} > {Path(t['path']).name}")
+                    findings += fs
+                    components += fact_components(fw, t["label"])
+                    analysis = fw.get("analysis", {}) or {}
+                    entry.update({
+                        "files_analysed": 1 + int(meta.get("number_of_included_files") or 0),
+                        "file_types": sorted((analysis.get("file_type", {}) or {}).get("summary", {}) or {})[:15],
+                        "unpacker": sorted((analysis.get("unpacker", {}) or {}).get("summary", {}) or {}),
+                        "findings": len(fs), "partial": state != "completed",
+                        "plugins_with_results": sorted(p for p, r in analysis.items() if isinstance(r, dict)
+                                                       and r.get("summary") and p not in ("file_type", "unpacker"))})
+                if state != "completed":
                     failed += 1
-                    submissions.append({"target": t["label"], "uid": uid, "status": "timeout"})
-                    continue
-                (out_dir / f"firmware_{i}.json").write_text(json.dumps(fw, indent=1)[:50_000_000])
-                meta = fw.get("meta_data", {}) or {}
-                fs = normalize(fw, ctx.original_name if i == 0 else f"{ctx.original_name} > {Path(t['path']).name}")
-                findings += fs
-                components += fact_components(fw, t["label"])
-                analysis = fw.get("analysis", {}) or {}
-                file_types = sorted((analysis.get("file_type", {}) or {}).get("summary", {}) or {})
-                unpack = sorted((analysis.get("unpacker", {}) or {}).get("summary", {}) or {})
-                with_results = sorted(p for p, r in analysis.items()
-                                      if isinstance(r, dict) and r.get("summary") and p not in ("file_type", "unpacker"))
-                submissions.append({"target": t["label"], "uid": uid, "status": "completed",
-                                    "files_analysed": 1 + int(meta.get("number_of_included_files") or 0),
-                                    "file_types": file_types[:15], "unpacker": unpack, "findings": len(fs),
-                                    "plugins_with_results": with_results})
+                submissions.append(entry)
         ok = len(targets) - failed
         def describe(s: dict) -> str:
-            if s["status"] != "completed":
+            if s["status"] == "timeout":
+                head = f"FACT did not finish within {self.settings.fact_timeout_s}s"
+            elif s["status"] == "cancelled":
+                head = "the analysis was cancelled in FACT"
+            elif s["status"] != "completed":
                 return s["status"] + (f" ({s.get('error', '')})" if s.get("error") else "")
+            else:
+                head = ""
+            if "files_analysed" not in s:
+                return head or s["status"]
             text = (f"FACT analysed {s['files_analysed']} file(s) [{', '.join(s['file_types'][:4]) or 'no type'}], "
                     f"unpacker: {', '.join(s['unpacker']) or 'n/a'}, {s['findings']} finding(s)")
+            if s.get("partial"):
+                text = f"{head}; partial results so far: {text}"
             if not s["plugins_with_results"]:
                 text += "; no FACT plug-in produced results for this input"
             return text
@@ -165,35 +173,55 @@ class FactAdapter(ToolAdapter):
             time.sleep(2)
             return c.put("/rest/firmware", json=payload)
 
-    def _wait(self, c: httpx.Client, uid: str) -> dict | None:
+    def _wait(self, c: httpx.Client, uid: str) -> tuple[str, dict | None]:
+        """Poll until FACT finishes. Returns ('completed' | 'cancelled' | 'timeout', firmware summary or None);
+        on timeout or cancellation the summary holds whatever FACT had analysed by then."""
         deadline = time.monotonic() + self.settings.fact_timeout_s
         while time.monotonic() < deadline:
             time.sleep(self.settings.fact_poll_s)
-            if self._in_progress(c, uid):
+            state = self._state(c, uid)
+            if state == "running":
                 continue
-            fr = c.get(f"/rest/firmware/{uid}", params={"summary": "true"})
-            if fr.status_code == 200:
-                fw = fr.json().get("firmware") or {}
-                if "unpacker" in (fw.get("analysis") or {}):
-                    return fw
-        return None
+            fw = self._fetch(c, uid)
+            if state == "cancelled":
+                return "cancelled", fw
+            if fw and "unpacker" in (fw.get("analysis") or {}):
+                return "completed", fw
+        return "timeout", self._fetch(c, uid)
 
     @staticmethod
-    def _in_progress(c: httpx.Client, uid: str) -> bool:
-        """Real FACT status: system_status.backend.{analysis.current_analyses, unpacking.unpacking_queue}."""
+    def _fetch(c: httpx.Client, uid: str) -> dict | None:
+        try:
+            fr = c.get(f"/rest/firmware/{uid}", params={"summary": "true"})
+        except httpx.HTTPError:
+            return None
+        if fr.status_code != 200:
+            return None
+        try:
+            return fr.json().get("firmware") or None
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _state(c: httpx.Client, uid: str) -> str:
+        """'running' | 'finished' | 'cancelled' | 'unknown' from FACT's status endpoint
+        (system_status.backend.analysis.{current_analyses, recently_finished_analyses,
+        recently_canceled_analyses}, unpacking.unpacking_queue)."""
         try:
             r = c.get("/rest/status")
             data = r.json()
         except (httpx.HTTPError, ValueError):
-            return True
+            return "running"
         backend = data.get("system_status", {}).get("backend", {}) or {}
         analysis = backend.get("analysis", {}) or {}
+        if uid in (analysis.get("recently_canceled_analyses") or {}):
+            return "cancelled"
         if uid in (analysis.get("recently_finished_analyses") or {}):
-            return False
+            return "finished"
         if uid in (analysis.get("current_analyses") or {}):
-            return True
+            return "running"
         queued = (backend.get("unpacking", {}) or {}).get("unpacking_queue", 0) or 0
-        return bool(queued) or bool(analysis.get("analysis_main_scheduler", 0))
+        return "running" if queued or analysis.get("analysis_main_scheduler", 0) else "unknown"
 
 
 def normalize(fw: dict, name: str) -> list[Finding]:

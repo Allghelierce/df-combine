@@ -93,6 +93,11 @@ class Settings(BaseSettings):
     fact_poll_s: float = 15.0
     fact_max_upload_mb: int = 256
     fact_verify_tls: bool = True
+    # FACT plug-ins to request. FACT's own cwe_checker plug-in is left out by default: it analyses every
+    # ELF of a root filesystem (hours for a Debian image), and cwe_checker already runs here on a bounded
+    # selection of binaries. Add "cwe_checker" to opt in.
+    fact_plugins: list[str] = ["crypto_material", "users_and_passwords", "software_components", "cve_lookup",
+                               "known_vulnerabilities", "exploit_mitigations", "elf_analysis"]
 
     @property
     def db_url(self) -> str:
