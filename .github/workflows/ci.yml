@@ -67,3 +67,5 @@ jobs:
       - name: Real-sample regression and format tests
         run: python -m pytest -q tests/test_regression_real.py tests/test_formats_real.py
         working-directory: backend
+      - name: Parser fuzzing seeded with the real samples (time-boxed)
+        run: python -I scripts/fuzz_parsers.py backend fixtures/real 5 "$RUNNER_TEMP/fuzz-out"

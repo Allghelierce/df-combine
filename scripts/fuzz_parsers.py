@@ -70,6 +70,9 @@ def mutate(data: bytes) -> bytes:
     return bytes(b)
 
 
+FAILED: list[str] = []
+
+
 def run(name, seed: bytes, fn, seconds: float):
     start, n, slow, errs = time.monotonic(), 0, 0.0, Counter()
     while time.monotonic() - start < seconds:
@@ -97,6 +100,8 @@ def run(name, seed: bytes, fn, seconds: float):
             signal.alarm(0)
         slow = max(slow, time.monotonic() - t0)
     print(f"{name:18s} {n:7d} inputs, slowest {slow:.2f}s, unexpected: {dict(errs) or 'none'}", flush=True)
+    if errs:
+        FAILED.append(name)
 
 
 # ---------------------------------------------------------------- seeds (real firmware)
@@ -140,3 +145,6 @@ targets = [
 ]
 for name, seed, fn in targets:
     run(name, seed, fn, budget)
+if FAILED:
+    print(f"FAILED: {', '.join(FAILED)} (reproducers in {OUT})")
+    sys.exit(1)

@@ -92,7 +92,9 @@ parsing and error handling.
   the unstripped PX4 ELF) make cwe_checker 0.9.0 panic. The sandbox lays out their `PT_LOAD` segments by
   physical address into a flash image (0xFF-filled gaps, ≤ 64 MiB) and writes the ELF's function
   symbols next to it; cwe_checker analyses the image bare-metal with the ELF's load address, and every
-  reported address is shown with its function (`0x8079b38 (_ZN12MissionBlock30get_absolute_altitude_for_itemERK14mission_item_sf)`).
+  reported address is shown with its function, demangled on the sandbox side with binutils' `c++filt`
+  (`0x8079b38 (MissionBlock::get_absolute_altitude_for_item)`; 5,279 of the FMUv2 ELF's 6,934 function
+  symbols are C++).
   Ghidra analyses the ELF itself, so symbols and DWARF are used there.
 * **`.px4` + `.elf` of the same build** (e.g. a PX4 build directory uploaded as one archive): the image
   decoded from the `.px4` is byte-identical to the one derived from the ELF (same SHA-256 and load
