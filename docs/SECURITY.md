@@ -208,7 +208,9 @@ boundary for hostile samples.
   executable's own data (ELF overlays; signed kernel modules are recognised),
   or under ext names that debugfs commands could not
   quote (listing and dumping go by inode number); data after a stream or image that is not padding
-  is analysed as an artifact of its own, starting where the erased-flash padding ends;
+  is analysed as an artifact of its own, starting where the erased-flash padding ends, and reported:
+  as a *suspicious* pattern when appended to an executable (packers, self-extracting programs,
+  droppers), as *info* after an image or archive;
 * symlinks, hardlinks, device nodes and FIFOs are **never created** - they are recorded in the
   manifest; external unpacker output is walked and such entries removed;
 * files created with `O_EXCL|O_NOFOLLOW`, mode 0644 (setuid/setgid recorded, never applied);
