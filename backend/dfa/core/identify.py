@@ -113,12 +113,35 @@ def zip_at_end(fp: BinaryIO, size: int) -> int | None:
     if size < 22 + 46 + 30:
         return None
     fp.seek(size - 22)
-    end = fp.read(22)
-    if end[:4] != b"PK\x05\x06" or end[20:22] != b"\x00\x00":
+    if fp.read(22)[20:22] != b"\x00\x00":
         return None
-    count, cd_size, cd_off = struct.unpack_from("<HII", end, 10)
-    start = size - 22 - cd_size - cd_off
-    if not count or cd_size < 46 or start <= 0:
+    start = zip_start(fp, size - 22)
+    return start if start else None
+
+
+def zip_start(fp: BinaryIO, end_record: int) -> int | None:
+    """Where the zip archive whose end-of-central-directory record is at ``end_record`` starts, if its central
+    directory and first local header are where the record says - for zip64, where its zip64 end record says."""
+    fp.seek(end_record)
+    rec = fp.read(22)
+    if len(rec) < 22 or rec[:4] != b"PK\x05\x06":
+        return None
+    count, cd_size, cd_off = struct.unpack_from("<HII", rec, 10)
+    cd_end = end_record
+    if 0xFFFFFFFF in (cd_size, cd_off) or count == 0xFFFF:  # zip64: the sizes are in the zip64 end record
+        if end_record < 20 + 56:
+            return None
+        fp.seek(end_record - 20)
+        if fp.read(4) != b"PK\x06\x07":  # its locator; the record itself precedes it (no extensible data)
+            return None
+        cd_end = end_record - 20 - 56
+        fp.seek(cd_end)
+        rec64 = fp.read(56)
+        if rec64[:4] != b"PK\x06\x06":
+            return None
+        count, cd_size, cd_off = struct.unpack_from("<QQQ", rec64, 32)
+    start = cd_end - cd_size - cd_off
+    if not count or cd_size < 46 or start < 0:
         return None
     fp.seek(start + cd_off)
     if fp.read(4) != b"PK\x01\x02":

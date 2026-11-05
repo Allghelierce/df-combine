@@ -52,7 +52,7 @@ from .formats.simplefs import (
     parse_partitions,
     romfs_size,
 )
-from .identify import HEAD_BYTES, FormatInfo, detect_format, detect_format_bytes, parse_uimage_header
+from .identify import HEAD_BYTES, FormatInfo, detect_format, detect_format_bytes, parse_uimage_header, zip_start
 from .limits import ExtractionBudget, LimitExceeded, Limits
 from .text import escape_surrogates
 
@@ -1715,22 +1715,16 @@ CARVE_MAGICS = {
 
 def _zip_extent(fp: BinaryIO, end_record: int, size: int) -> tuple[int, int] | None:
     """(start, length) of the zip whose end-of-central-directory record is at ``end_record``, if its central
-    directory and first local header are where the record says (zip64 archives are not carved)."""
+    directory and first local header are where the record (or its zip64 end record) says."""
     fp.seek(end_record)
     rec = fp.read(22)
     if len(rec) < 22:
         return None
-    count, cd_size, cd_off, comment = struct.unpack_from("<HIIH", rec, 10)
-    if not count or count == 0xFFFF or 0xFFFFFFFF in (cd_size, cd_off) or cd_size < 46:
+    end = end_record + 22 + struct.unpack_from("<H", rec, 20)[0]  # after the archive comment
+    start = zip_start(fp, end_record)
+    if start is None or end > size:
         return None
-    start, end = end_record - cd_size - cd_off, end_record + 22 + comment
-    if start < 0 or end > size:
-        return None
-    fp.seek(start + cd_off)
-    if fp.read(4) != b"PK\x01\x02":
-        return None
-    fp.seek(start)
-    return (start, end - start) if fp.read(4) == b"PK\x03\x04" else None
+    return start, end - start
 
 
 def _scan_magics(fp: BinaryIO, size: int, max_hits: int):

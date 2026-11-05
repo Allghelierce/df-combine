@@ -546,6 +546,110 @@ def test_zip_name_fixes_follow_prepended_data(tmp_path):
         zipnames.utf8_flag_fixes(src)
 
 
+def _zip64_archive(files: dict[bytes, bytes], prefix: bytes = b"") -> bytes:
+    """A stored zip with zip64 end records, whose central directory gives each local header offset only in a
+    zip64 extra field (as for members past 4 GiB). Names containing 0x80 are flagged UTF-8."""
+    import struct
+    import zlib
+    body, cd = b"", b""
+    for name, data in files.items():
+        flags, crc, off = 0x800 if b"\x80" in name else 0, zlib.crc32(data), len(body)
+        body += struct.pack("<4sHHHHHIIIHH", b"PK\x03\x04", 45, flags, 0, 0, 0x21, crc, len(data), len(data),
+                            len(name), 0) + name + data
+        extra = struct.pack("<HHQ", 1, 8, off)
+        cd += struct.pack("<4sHHHHHHIIIHHHHHII", b"PK\x01\x02", 0x031E, 45, flags, 0, 0, 0x21, crc, len(data),
+                          len(data), len(name), len(extra), 0, 0, 0, 0o100644 << 16, 0xFFFFFFFF) + name + extra
+    end64 = len(body) + len(cd)
+    return (prefix + body + cd
+            + struct.pack("<4sQHHIIQQQQ", b"PK\x06\x06", 44, 45, 45, 0, 0, len(files), len(files), len(cd), len(body))
+            + struct.pack("<4sIQI", b"PK\x06\x07", 0, end64, 1)
+            + struct.pack("<4sHHHHIIH", b"PK\x05\x06", 0, 0, 0xFFFF, 0xFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0))
+
+
+def test_zip64_or_miscounted_zip_with_a_bad_utf8_flagged_name_is_extracted(tmp_path):
+    """The name fix-up refused zip64 end records and walked the central directory by the entry count the end
+    record declares (zipfile walks it by size): such archives were reported as failed, every member unanalysed."""
+    import struct
+    import subprocess
+    key, passwd = b"key", b"root:x:0:0::/root:/bin/sh\n"
+    good = _zip64_archive({b"etc/userXdir/id_rsa": key, b"etc/passwd": passwd}, b"VENDOR-HEADER" * 9)
+    with zipfile.ZipFile(io.BytesIO(good)) as zf:  # zipfile itself reads the hand-made zip64 layout
+        assert zf.read("etc/userXdir/id_rsa") == key and zf.read("etc/passwd") == passwd
+    cases = {"zip64.zip": _zip64_archive({b"etc/user\x80dir/id_rsa": key, b"etc/passwd": passwd}, b"VENDOR" * 9)}
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w") as zf:
+        zf.writestr("etc/passwd", passwd)
+        zf.writestr("etc/userXdir/id_rsa", key)
+    miscounted = bytearray(b.getvalue().replace(b"userXdir", b"user\x80dir"))
+    end = miscounted.rfind(b"PK\x05\x06")
+    struct.pack_into("<HH", miscounted, end + 8, 1, 1)  # declares one entry; zipfile reads both
+    if shutil.which("zip"):  # the reference tool's zip64 layout (zip -fz: zip64 end records and size fields)
+        tree = tmp_path / "t"
+        (tree / "etc" / "userXdir").mkdir(parents=True)
+        (tree / "etc" / "userXdir" / "id_rsa").write_bytes(key)
+        (tree / "etc" / "passwd").write_bytes(passwd)
+        subprocess.run(["zip", "-q", "-fz", "-r", str(tmp_path / "ref.zip"), "etc"], cwd=tree, check=True)
+        ref = bytearray((tmp_path / "ref.zip").read_bytes().replace(b"userXdir", b"user\x80dir"))
+        assert b"PK\x06\x06" in ref
+        cases["info-zip.zip"] = ref
+    cases["miscounted.zip"] = miscounted
+    for name, data in cases.items():
+        data = bytearray(data)
+        for sig, flag_at, name_at, len_at in ((b"PK\x03\x04", 6, 30, 26), (b"PK\x01\x02", 8, 46, 28)):
+            i = data.find(sig)
+            while i >= 0:  # flag every name that is not UTF-8 as UTF-8, in both headers
+                (n,) = struct.unpack_from("<H", data, i + len_at)
+                if b"\x80" in data[i + name_at:i + name_at + n]:
+                    struct.pack_into("<H", data, i + flag_at, struct.unpack_from("<H", data, i + flag_at)[0] | 0x800)
+                i = data.find(sig, i + 4)
+        src = tmp_path / name
+        src.write_bytes(bytes(data))
+        with pytest.raises(UnicodeDecodeError):
+            zipfile.ZipFile(src)
+        ex = Extractor(tmp_path / f"w_{name}", Limits())
+        res = ex.run(src, name)
+        assert res.artifacts[0].extraction == "ok", (name, res.artifacts[0].extraction_note)
+        files = {a.name: ex.path_of(a.id).read_bytes() for a in res.artifacts if a.origin == "extracted"}
+        assert files == {"/etc/user\\x80dir/id_rsa": key, "/etc/passwd": passwd}, name
+
+
+def test_zip_name_fixes_locate_zip64_directories_as_older_zipfile_versions_do(tmp_path, monkeypatch):
+    """zipfile versions before the zip64 locator checks give the classic end record's position for a zip64
+    archive (and subtract the zip64 records themselves); the patches must land in the same places."""
+    from dfa.core.formats import zipnames
+    src = tmp_path / "fw.bin"
+    src.write_bytes(_zip64_archive({b"etc/user\x80dir/id_rsa": b"key", b"etc/passwd": b"x"}, b"HDR" * 7))
+    current = zipnames.utf8_flag_fixes(src)
+    real = zipfile._EndRecData
+
+    def older(fp):  # noqa: ANN001, ANN202
+        endrec = real(fp)
+        endrec[zipfile._ECD_LOCATION] = src.stat().st_size - 22
+        return endrec
+    monkeypatch.setattr(zipfile, "_EndRecData", older)
+    assert zipnames.utf8_flag_fixes(src) == current and len(current[0]) == 2
+
+
+def test_zip64_after_a_header_or_inside_a_raw_image_is_analysed(tmp_path, run_analysis):
+    """A zip64 archive (sizes in its zip64 end record) after a vendor header or a self-extracting stub was taken
+    for raw data, and one inside a raw image was not carved: nothing in it was analysed."""
+    key = b"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA" + b"A" * 64 + b"\n-----END RSA PRIVATE KEY-----\n"
+    archive = _zip64_archive({b"etc/ssl/server.key": key, b"etc/passwd": b"root::0:0::/root:/bin/sh\n"})
+    cases = {"prefixed.bin": (b"VENDOR-HEADER" * 9 + archive, "zip"),
+             "sfx.bin": (_noise(8192, 21) + archive, "zip"),
+             "flash.bin": (_noise(8192, 22) + archive + _noise(4096, 23), "raw")}
+    for name, (data, fmt) in cases.items():
+        src = tmp_path / name
+        src.write_bytes(data)
+        ex = Extractor(tmp_path / f"w_{name}", Limits())
+        res = ex.run(src, name)
+        assert res.artifacts[0].format == fmt, name
+        files = {a.name: ex.path_of(a.id).read_bytes() for a in res.artifacts if a.origin == "extracted"}
+        assert files.get("/etc/ssl/server.key") == key, (name, res.warnings)
+        rules = {f["rule_id"] for f in run_analysis(src)["findings"]}
+        assert {"pem-private-key", "empty-password"} <= rules, (name, rules)
+
+
 def _cpio_modes(path: Path) -> dict[str, tuple[int, int, int]]:
     """name -> (mode, uid, gid) from a newc cpio archive."""
     data, out, i = path.read_bytes(), {}, 0

@@ -199,7 +199,8 @@ boundary for hostile samples.
 * member names normalised; absolute paths re-rooted; `..`, NUL, drive letters and over-long names
   rejected; output paths re-checked to resolve inside the extraction root; bytes that are not UTF-8
   become a literal `\xNN` in the name on disk and in the manifest (tar, zip, external unpacker
-  output), and a zip entry flagged UTF-8 whose name is not no longer makes the whole zip unreadable;
+  output), and a zip entry flagged UTF-8 whose name is not no longer makes the whole zip unreadable
+  (zip64 archives included; the central directory is located as zipfile itself locates it);
 * content cannot be hidden from analysis behind a tar end-of-archive marker or a damaged tar header
   (reading continues, with a warning giving the bytes skipped), behind padding after a gzip, xz or
   zstd stream (0xFF padding used to fail the whole stream), in the later archives of an initramfs,
@@ -215,7 +216,10 @@ boundary for hostile samples.
   container's error handling; an ELF's extent comes from its tables, never from its header-size
   field. A kernel module's appended signature is skipped only if every field checks out (relocatable
   object, PKCS#7 id, DER SEQUENCE of the declared length, at most 16 KiB); a marker alone is not
-  enough. Carved regions stay disjoint (a zip carved back from its end record replaces the regions
+  enough. A zip behind other data (a vendor header, a self-extracting stub) or inside a raw image
+  is found from its end record, a zip64 archive from its zip64 end record (before, a zip64 archive
+  in either place passed as raw data, its contents unanalysed). Carved regions stay disjoint (a zip
+  carved back from its end record replaces the regions
   inside it and may not nest or cross others), and a 7-Zip archive, which is only reported, does
   not hide what lies inside the length it claims. Limits that remain: the extent of an ELF or an
   image comes from its own headers, so a section claiming the appended bytes hides them, and a
