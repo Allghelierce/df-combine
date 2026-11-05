@@ -393,3 +393,31 @@ def test_real_betaflight_and_inav_builds_identified(run_analysis):
         assert image["format"] == "cortexm_raw" and image["details"]["flash_base"] == "0x8000000"
         assert [(c["name"], c["version"]) for c in m["components"]] == [(platform.lower(), version)]
         assert i["build"]["revision"] and i["build"]["date"]
+
+
+@pytest.mark.skipif(not ((REAL / "px4_fmu-v2_default.elf").exists() and (REAL / "px4_fmu-v2_default.px4").exists()),
+                    reason="official PX4 FMUv2 ELF/.px4 not downloaded")
+def test_real_px4_bundle_gives_the_px4_image_the_elf_symbols(tmp_path, settings):
+    """A PX4 build directory (.px4 + .elf of the same build) uploaded as one archive: the stripped .px4 image
+    is identical to the ELF's flash image, so it gets the ELF's symbols and is analysed only once."""
+    import tarfile
+
+    from dfa.adapters.base import AdapterContext
+    from dfa.adapters.cwe_checker import CweCheckerAdapter
+    from dfa.core.analyze import run
+    from dfa.core.limits import Limits
+    bundle = tmp_path / "px4_fmu-v2_build.tar"
+    with tarfile.open(bundle, "w") as tf:
+        for n in ("px4_fmu-v2_default.px4", "px4_fmu-v2_default.elf"):
+            tf.add(REAL / n, arcname=n)
+    work = tmp_path / "work"
+    m = run(bundle, bundle.name, work, Limits())
+    arts = m["extraction"]["artifacts"]
+    px4_image = next(a for a in arts if a["display_path"].endswith("px4_fmu-v2_default.px4 > image.bin"))
+    assert px4_image["details"]["symbol_count"] > 5000
+    assert px4_image["details"]["symbols_from"].endswith("px4_fmu-v2_default.elf")
+    ctx = AdapterContext(scan_id="t", input_path=bundle, original_name=bundle.name, work_dir=work, manifest=m,
+                         settings=settings)
+    targets, why = CweCheckerAdapter(settings).plan(ctx)
+    assert len(targets) == 3 and "3 identical copies merged" in why  # main image, IO firmware, bootloader
+    assert (targets[0]["artifact"].get("details") or {}).get("symbol_map")

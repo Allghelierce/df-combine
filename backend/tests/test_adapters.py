@@ -443,3 +443,34 @@ def test_fact_file_count_tolerates_unknown():
     assert fact.files_analysed({"number_of_included_files": 1, "total_files_in_firmware": 3311}) == 3311
     assert fact.files_analysed({"number_of_included_files": 2, "total_files_in_firmware": "unknown"}) == 3
     assert fact.files_analysed({}) == 1
+
+
+def test_identical_binaries_are_analysed_once(settings, tmp_path):
+    """A .px4 image and the image derived from the same build's ELF have the same SHA-256: one cwe_checker run,
+    on the copy with symbols; Ghidra analyses the ELF instead of an image identical to its derived one."""
+    from dfa.adapters.ghidra import GhidraAdapter
+    elf = {"machine": "EM_ARM", "arch": cwe_checker.CORTEX_M, "is_kernel_module": False}
+    img = {"flash_base": "0x8004000", "initial_sp": "0x20005c18"}
+    man = {"extraction": {"artifacts": [
+        {"id": 1, "name": "fw.elf", "display_path": "b.tar > fw.elf", "format": "elf", "elf": elf, "size": 9000,
+         "sha256": "e1", "category": "executable"},
+        {"id": 2, "name": "flash.bin", "display_path": "b.tar > fw.elf > flash.bin", "format": "cortexm_raw",
+         "size": 1000, "sha256": "aa", "details": {**img, "derived_from_elf": True, "symbol_map": "s.json"}},
+        {"id": 3, "name": "image.bin", "display_path": "b.tar > fw.px4 > image.bin", "format": "cortexm_raw",
+         "size": 1000, "sha256": "aa", "details": {**img, "symbol_map": "s.json", "identical_to": 2}},
+        {"id": 4, "name": "/extras/io.bin", "display_path": "b.tar > fw.px4 > image.bin > io", "format": "cortexm_raw",
+         "size": 100, "sha256": "bb", "details": {"flash_base": "0x8001000", "initial_sp": "0x20002000"}},
+        {"id": 5, "name": "/extras/io.bin", "display_path": "b.tar > fw.elf > flash.bin > io", "format": "cortexm_raw",
+         "size": 100, "sha256": "bb", "details": {"flash_base": "0x8001000", "initial_sp": "0x20002000"}},
+    ]}}
+    targets, why = cwe_checker.CweCheckerAdapter(settings).plan(ctx_for(settings, man, tmp_path))
+    assert [t["artifact"]["id"] for t in targets] == [2, 4] and "2 identical copies merged" in why
+    assert targets[0]["duplicates"] == ["b.tar > fw.px4 > image.bin"]
+    targets, _ = GhidraAdapter(settings).plan(ctx_for(settings, man, tmp_path))
+    assert [t["artifact"]["id"] for t in targets] == [1, 4]  # the ELF, and one copy of the IO image
+    # without symbols anywhere, the higher-priority copy is kept
+    from dfa.adapters.base import unique_targets
+    a = {"artifact": {"sha256": "x", "display_path": "first"}}
+    b = {"artifact": {"sha256": "x", "display_path": "second"}}
+    assert [t["artifact"]["display_path"] for t in unique_targets([(9, 1, a), (1, 1, b)])] == ["first"]
+    assert a["duplicates"] == ["second"]

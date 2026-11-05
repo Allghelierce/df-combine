@@ -144,6 +144,7 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
                     a.details["flash_base"] = hex(est[0])
                     a.details["flash_base_source"] = est[1]["method"]
                     a.details["flash_base_scores"] = est[1]["candidates"]
+    _link_images_to_elf_symbols(arts, ctx)
 
     progress("platform detection")
     acc = PlatformAccumulator()
@@ -288,6 +289,22 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
         "duration_s": round(time.monotonic() - t0, 3),
     })
     return manifest
+
+
+def _link_images_to_elf_symbols(arts: list[Artifact], ctx: ScanContext) -> None:
+    """A stripped image (e.g. from a .px4) that is byte-identical to the flash image derived from an ELF in the
+    same upload - same SHA-256 and same load address, as for a PX4 build's .px4 and .elf - is the same program,
+    so the ELF's function symbols apply to it."""
+    derived = {(a.sha256, a.details.get("flash_base")): a for a in arts
+               if a.format == "cortexm_raw" and a.details.get("derived_from_elf") and a.details.get("symbol_map")}
+    if not derived:
+        return
+    for a in arts:
+        src = derived.get((a.sha256, a.details.get("flash_base")))
+        if a.format != "cortexm_raw" or src is None or src.id == a.id or a.details.get("symbol_map"):
+            continue
+        a.details.update({"symbol_map": src.details["symbol_map"], "symbol_count": src.details.get("symbol_count"),
+                          "symbols_from": ctx.display.get(src.parent_id, ""), "identical_to": src.id})
 
 
 def _art_dict(a: Artifact, ctx: ScanContext) -> dict:

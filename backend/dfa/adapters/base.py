@@ -92,6 +92,31 @@ class AdapterContext:
         return safefs.read_bytes(self.work_dir, art["path"], limit)
 
 
+def unique_targets(cands: list[tuple[int, int, dict]]) -> list[dict]:
+    """Planned targets in priority order with identical binaries (same SHA-256) merged: e.g. the image of a
+    .px4 and the one derived from the ELF of the same build, or a file present twice. The copy that has function
+    symbols is analysed; the others are listed in ``duplicates``."""
+    out: list[dict] = []
+    by_sha: dict[str, dict] = {}
+    for _score, _size, t in cands:
+        a = t["artifact"]
+        sha = a.get("sha256")
+        kept = by_sha.get(sha) if sha else None
+        if kept is None:
+            t["duplicates"] = []
+            if sha:
+                by_sha[sha] = t
+            out.append(t)
+            continue
+        if (a.get("details") or {}).get("symbol_map") and not (kept["artifact"].get("details") or {}).get("symbol_map"):
+            dup = kept["artifact"]
+            kept.update({k: v for k, v in t.items() if k != "duplicates"})
+        else:
+            dup = a
+        kept["duplicates"].append(dup.get("display_path") or dup.get("name"))
+    return out
+
+
 @dataclass
 class AdapterResult:
     status: str

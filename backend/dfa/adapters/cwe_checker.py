@@ -23,7 +23,7 @@ from ..core.findings import Classification as C
 from ..core.findings import Confidence as K
 from ..core.findings import Evidence, Finding
 from ..core.findings import Severity as S
-from .base import AdapterContext, AdapterResult, ToolAdapter, run_cmd
+from .base import AdapterContext, AdapterResult, ToolAdapter, run_cmd, unique_targets
 
 SUPPORTED_ELF_ARCH = {"EM_ARM", "EM_AARCH64", "EM_X86_64", "EM_386", "EM_MIPS", "EM_PPC", "EM_PPC64", "EM_RISCV"}
 CWE_SEVERITY = {
@@ -124,8 +124,11 @@ class CweCheckerAdapter(ToolAdapter):
                             "(DFA_CWE_CHECKER_BARE_METAL=true enables it)")
             return [], "no ELF binaries for a supported architecture and no raw Cortex-M image with a known load address"
         cands.sort(key=lambda c: (-c[0], -c[1]))
+        targets = unique_targets(cands)
         n = self.settings.cwe_checker_max_binaries
-        return [c[2] for c in cands[:n]], f"{len(cands)} candidates, analysing top {n}"
+        same = len(cands) - len(targets)
+        return targets[:n], (f"{len(targets)} candidates" + (f" ({same} identical copies merged)" if same else "")
+                             + f", analysing top {n}")
 
     def run(self, ctx: AdapterContext, targets: list) -> AdapterResult:
         out_dir = ctx.tool_dir(self.name)
@@ -181,7 +184,8 @@ class CweCheckerAdapter(ToolAdapter):
             findings += fs
             per_target.append({"binary": a["display_path"], "status": "completed", "warnings": len(warnings),
                                "duration_s": dur, "mode": "bare-metal" if t["bare_metal"] else "elf",
-                               "bare_metal_config": t["bare_metal"]})
+                               "bare_metal_config": t["bare_metal"], "identical_copies": t.get("duplicates") or [],
+                               "symbols_from": (a.get("details") or {}).get("symbols_from")})
         ok = len(targets) - failures
         status = "completed" if ok else "failed"
         msg = f"analysed {ok}/{len(targets)} binaries, {len(findings)} grouped findings"

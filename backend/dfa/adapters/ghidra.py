@@ -23,7 +23,7 @@ from ..core.findings import Classification as C
 from ..core.findings import Confidence as K
 from ..core.findings import Evidence, Finding
 from ..core.findings import Severity as S
-from .base import AdapterContext, AdapterResult, ToolAdapter
+from .base import AdapterContext, AdapterResult, ToolAdapter, unique_targets
 
 ELF_MACHINES = {"EM_ARM", "EM_AARCH64", "EM_X86_64", "EM_386", "EM_MIPS", "EM_PPC", "EM_PPC64", "EM_RISCV"}
 RISK_RULES = {
@@ -74,8 +74,9 @@ class GhidraAdapter(ToolAdapter):
                 if "busybox" in a["name"]:
                     score -= 20
                 cands.append((score, a["size"], {"artifact": a, "raw": None}))
-            elif a.get("format") == "cortexm_raw" and not a.get("details", {}).get("derived_from_elf"):
-                # (images derived from an ELF are covered by analysing the ELF itself, with its symbols)
+            elif a.get("format") == "cortexm_raw" and not a.get("details", {}).get("derived_from_elf") \
+                    and a.get("details", {}).get("identical_to") is None:
+                # (images derived from an ELF, or identical to one, are covered by analysing the ELF itself)
                 base = a.get("details", {}).get("flash_base")
                 if base:
                     cands.append((8, a["size"], {"artifact": a, "raw": {"processor": "ARM:LE:32:Cortex",
@@ -83,8 +84,11 @@ class GhidraAdapter(ToolAdapter):
         if not cands:
             return [], "no ELF binaries or raw Cortex-M images with a known load address"
         cands.sort(key=lambda c: (-c[0], -c[1]))
+        targets = unique_targets(cands)
         n = self.settings.ghidra_max_binaries
-        return [c[2] for c in cands[:n]], f"{len(cands)} candidates, analysing top {n}"
+        same = len(cands) - len(targets)
+        return targets[:n], (f"{len(targets)} candidates" + (f" ({same} identical copies merged)" if same else "")
+                             + f", analysing top {n}")
 
     def run(self, ctx: AdapterContext, targets: list) -> AdapterResult:
         out_dir = ctx.tool_dir(self.name)
