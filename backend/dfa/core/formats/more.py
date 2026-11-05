@@ -181,6 +181,20 @@ class Lz4LegacyReader(_Reader):
                 return out
 
 
+_LZO = None
+
+
+def _lzo():  # noqa: ANN202 - lzallright.LZOCompressor
+    """One LZO codec per process: every LZOCompressor() keeps 448 KiB of compression work memory that is never
+    released, so one per lzop artifact let a firmware of a few thousand small lzop files exhaust the address-space
+    limit of the analysis. Decompression keeps no state between calls."""
+    global _LZO
+    if _LZO is None:
+        from lzallright import LZOCompressor
+        _LZO = LZOCompressor()
+    return _LZO
+
+
 class LzopReader(_Reader):
     """lzop files (LZO1X), parsed per the lzop file format."""
 
@@ -188,9 +202,8 @@ class LzopReader(_Reader):
     F_ADLER32_D, F_ADLER32_C, F_H_EXTRA_FIELD, F_CRC32_D, F_CRC32_C, F_H_FILTER = 1, 2, 0x40, 0x100, 0x200, 0x800
 
     def __init__(self, path: Path) -> None:
-        from lzallright import LZOCompressor
         super().__init__(path)
-        self.lzo = LZOCompressor()
+        self.lzo = _lzo()
         if self.fp.read(9) != self.MAGIC:
             raise FormatError("not an lzop file")
         version, _lib, _need = struct.unpack(">HHH", self.fp.read(6))

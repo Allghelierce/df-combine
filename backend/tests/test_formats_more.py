@@ -84,6 +84,34 @@ def test_lzop_reference_tool(tmp_path):
     assert "/etc/shadow" in _names(res)
 
 
+@pytest.mark.skipif(not shutil.which("lzop"), reason="lzop not installed")
+def test_many_lzop_files_do_not_exhaust_the_address_space(tmp_path):
+    """Each lzop artifact created an LZO codec whose 448 KiB of work memory was never released, so a firmware of a
+    few thousand small lzop files exhausted the analysis's address-space limit (RLIMIT_AS in the local sandbox)."""
+    import sys
+    t = tmp_path / "busybox.txt"
+    t.write_bytes(b"BusyBox v1.30.1 (2020-01-01) multi-call binary\n" * 64)
+    subprocess.run(["lzop", "-q", str(t)], check=True)
+    one = (tmp_path / "busybox.txt.lzo").read_bytes()
+    b = io.BytesIO()
+    with tarfile.open(fileobj=b, mode="w") as tf:
+        for i in range(400):
+            ti = tarfile.TarInfo(f"lib/modules/m{i}.lzo")
+            ti.size = len(one)
+            tf.addfile(ti, io.BytesIO(one))
+    fw = tmp_path / "many.tar"
+    fw.write_bytes(b.getvalue())
+    code = ("import resource, sys\nfrom pathlib import Path\nfrom dfa.core.extract import Extractor\n"
+            "from dfa.core.limits import Limits\n"
+            "vm = int(next(ln for ln in open('/proc/self/status') if ln.startswith('VmSize')).split()[1]) * 1024\n"
+            "resource.setrlimit(resource.RLIMIT_AS, (vm + 96 * 1024**2, vm + 96 * 1024**2))  # 400 x 448 KiB: 175 MiB\n"
+            "res = Extractor(Path(sys.argv[2]), Limits()).run(Path(sys.argv[1]), 'many.tar')\n"
+            "print(sum(a.format == 'lzop' and a.extraction == 'ok' for a in res.artifacts))\n")
+    proc = subprocess.run([sys.executable, "-c", code, str(fw), str(tmp_path / "w")], capture_output=True, text=True,
+                          timeout=600, cwd=Path(__file__).resolve().parents[1])
+    assert proc.returncode == 0 and proc.stdout.strip() == "400", (proc.returncode, proc.stderr[-1500:])
+
+
 @pytest.mark.skipif(not (shutil.which("mkfs.cramfs") or Path("/usr/sbin/mkfs.cramfs").exists()),
                     reason="mkfs.cramfs not installed")
 def test_cramfs_reference_tool(tmp_path):
