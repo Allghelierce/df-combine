@@ -126,6 +126,50 @@ def _mem_bytes(spec: str) -> int:
     return int(float(spec.rstrip("kmg")) * mult)
 
 
+# Shape of the manifest the worker relies on (it is produced by the sandbox, so it is checked, not trusted).
+MANIFEST_SCHEMA: dict[str, type | dict] = {
+    "identification": dict, "components": list, "findings": list, "scanner_runs": list,
+    "inventory": {"categories": dict},
+    "extraction": {"artifacts": list, "filesystems": list, "warnings": list, "limits_hit": list, "stats": dict,
+                   "link_count": int, "rootfs": object},
+}
+
+
+def _check_shape(obj: dict, schema: dict, where: str = "") -> None:
+    for key, kind in schema.items():
+        if key not in obj:
+            raise ValueError(f"manifest lacks '{where}{key}'")
+        if isinstance(kind, dict):
+            if not isinstance(obj[key], dict):
+                raise ValueError(f"manifest '{where}{key}' is not an object")
+            _check_shape(obj[key], kind, f"{where}{key}.")
+        elif not isinstance(obj[key], kind):
+            raise ValueError(f"manifest '{where}{key}' is not a {kind.__name__}")
+    if not where:
+        for i, a in enumerate(obj["extraction"]["artifacts"][:200_000]):
+            if not (isinstance(a, dict) and isinstance(a.get("id"), int) and isinstance(a.get("path"), str)
+                    and isinstance(a.get("name"), str) and isinstance(a.get("format"), str)):
+                raise ValueError(f"manifest artifact #{i} is malformed")
+        for r in obj["scanner_runs"]:
+            if not (isinstance(r, dict) and isinstance(r.get("name"), str) and isinstance(r.get("status"), str)
+                    and isinstance(r.get("findings"), int)):
+                raise ValueError("manifest scanner run entry is malformed")
+
+
+def load_manifest(base: Path, name: str, settings: Settings) -> dict:
+    """Parse a sandbox-produced manifest: size-limited, no links followed, shape checked.
+    Raises FileNotFoundError, OSError, ValueError or RecursionError (deeply nested JSON)."""
+    data = json.loads(safefs.read_bytes(base, name, settings.max_manifest_mb * 1024 * 1024))
+    if not isinstance(data, dict):
+        raise ValueError("manifest is not a JSON object")
+    if "fatal_error" not in data:
+        _check_shape(data, MANIFEST_SCHEMA)
+    return data
+
+
+PROGRESS_LINES_PER_POLL = 20
+
+
 def _pump_progress(work_dir: Path, progress: Callable[[str], None] | None, seen: int) -> int:
     if not progress:
         return seen
@@ -133,7 +177,7 @@ def _pump_progress(work_dir: Path, progress: Callable[[str], None] | None, seen:
         lines = safefs.read_text(work_dir, "progress.log", 8 * 1024 * 1024).splitlines()
     except OSError:
         return seen
-    for ln in lines[seen:]:
+    for ln in lines[seen:][-PROGRESS_LINES_PER_POLL:]:  # a flood of lines cannot turn into a flood of events
         progress(ln.split(" ", 1)[-1][:500])
     return len(lines)
 
@@ -218,14 +262,12 @@ def run_analysis(input_path: Path, original_name: str, work_dir: Path, settings:
             raise SandboxError(f"analysis sandbox timed out after {settings.sandbox_timeout_s}s")
         returncode = proc.returncode
     try:
-        manifest = json.loads(safefs.read_bytes(work_dir, "manifest.json", settings.max_manifest_mb * 1024 * 1024))
+        manifest = load_manifest(work_dir, "manifest.json", settings)
     except FileNotFoundError:
         raise SandboxError(f"analysis sandbox exited with status {returncode} without a manifest. "
                            f"Output: {log_tail[-1500:]}") from None
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
         raise SandboxError(f"unusable manifest from the analysis sandbox: {exc}") from None
-    if not isinstance(manifest, dict):
-        raise SandboxError("unusable manifest from the analysis sandbox: not a JSON object")
     if "fatal_error" in manifest:
         raise SandboxError(f"analysis failed: {manifest['fatal_error']}")
     if returncode != 0:

@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from . import __version__, safefs
+from . import __version__
 from .adapters.registry import all_statuses
 from .auth import (
     CSRF_HEADER,
@@ -41,7 +41,7 @@ from .config import Settings, get_settings
 from .db import get_session, init_engine, session_scope
 from .models import ApiToken, FindingRow, Scan, ScanEvent, User
 from .reports.export import finding_to_dict, json_report, pdf_report, scan_to_dict
-from .sandbox import remove_workdir, resolve_mode
+from .sandbox import load_manifest, remove_workdir, resolve_mode
 from .worker import Worker
 
 log = logging.getLogger("dfa.api")
@@ -413,10 +413,10 @@ def create_app(settings: Settings | None = None, start_worker: bool | None = Non
             return None
         p = Path(scan.manifest_path)
         try:
-            return json.loads(safefs.read_bytes(p.parent, p.name, settings.max_manifest_mb * 1024 * 1024))
+            return load_manifest(p.parent, p.name, settings)
         except FileNotFoundError:
             return None
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:
             log.warning("unreadable manifest for scan %s: %s", scan.id, exc)
             return None
 

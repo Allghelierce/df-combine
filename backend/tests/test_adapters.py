@@ -478,3 +478,22 @@ def test_identical_binaries_are_analysed_once(settings, tmp_path):
     f = cwe_checker.normalize(json.loads(CWE_SAMPLE), "b.tar > fw.elf > flash.bin")[0]
     note_identical_copies([f], ["b.tar > fw.px4 > image.bin"])
     assert f.description.endswith("also present as: b.tar > fw.px4 > image.bin.")
+
+
+def test_fwanalyzer_plan_confines_filesystem_roots_from_the_manifest(settings, tmp_path):
+    """The manifest is written by the sandbox: a filesystem root or permission image outside the work directory
+    (security review finding) must never be scanned on the worker or handed to FwAnalyzer."""
+    (tmp_path / "files" / "root.d" / "etc").mkdir(parents=True)
+    (tmp_path / "files" / "root.d" / "bin").mkdir()
+    art = {"id": 1, "name": "rootfs.tar", "display_path": "rootfs.tar", "format": "tar", "path": "files/x.tar"}
+    good = {"artifact_id": 1, "type": "tar", "root": "files/root.d"}
+    for bad in ({"artifact_id": 1, "type": "tar", "root": "../../../../../../.."},
+                {"artifact_id": 1, "type": "cromfs", "root": "/etc"},
+                {"artifact_id": 1, "type": "tar", "root": "files/root.d", "mode_image": "../../../../etc/passwd"},
+                {"artifact_id": 1, "type": "tar", "root": "<input>"}, {"artifact_id": 1, "type": "tar", "root": ""}):
+        man = {"extraction": {"artifacts": [art], "filesystems": [bad]}}
+        targets, _ = fwanalyzer.FwAnalyzerAdapter(settings).plan(ctx_for(settings, man, tmp_path))
+        assert targets == [], bad
+    man = {"extraction": {"artifacts": [art], "filesystems": [good]}}
+    targets, _ = fwanalyzer.FwAnalyzerAdapter(settings).plan(ctx_for(settings, man, tmp_path))
+    assert [t["fallback_dir"] for t in targets] == [(tmp_path / "files" / "root.d").resolve()]

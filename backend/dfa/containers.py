@@ -18,6 +18,7 @@ Mounts are derived from the scan id only:
 from __future__ import annotations
 
 import contextlib
+import errno
 import http.client
 import json
 import logging
@@ -274,35 +275,54 @@ class DockerJobExecutor:
             os.close(root_fd)
 
     @staticmethod
-    def _chown_tree_fd(top_fd: int, uid: int, gid: int, skip: str | None = None, strip: bool = False) -> int:
-        """chown a tree through directory fds: never follows a symlink, not even one swapped in mid-walk.
-
-        With ``strip``, every entry that is neither a directory nor a regular file is removed (unlink never
-        follows links), and group/other write and setuid/setgid bits are cleared. Analysis output never
-        contains links or special files - the extractor records links in the manifest instead of creating
-        them - so any found were planted by a compromised container to make the worker follow them; and a
-        world-writable directory left by one job must not let the next job's (different) UID write
-        outside its own directory. Returns the number of entries removed."""
-        removed = 0
-        unsafe_bits = 0o6022
+    def _chown_tree_fd(top_fd: int, uid: int, gid: int, skip: str | None = None) -> None:
+        """Before a job: chown a tree through directory fds; never follows a symlink, not even one swapped in
+        mid-walk (lchown via dir_fd; fwalk does not descend into links)."""
         os.fchown(top_fd, uid, gid)
-        if strip and os.fstat(top_fd).st_mode & unsafe_bits:
-            os.fchmod(top_fd, stat.S_IMODE(os.fstat(top_fd).st_mode) & ~unsafe_bits)
         for dirpath, dirs, files, dfd in os.fwalk(".", dir_fd=top_fd, follow_symlinks=False):
             if skip and dirpath == "." and skip in dirs:
                 dirs.remove(skip)
-            for name in list(dirs) + files:
-                if strip:
-                    st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
-                    if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
-                        os.unlink(name, dir_fd=dfd)
-                        removed += 1
-                        if name in dirs:
-                            dirs.remove(name)
-                        continue
-                    if st.st_mode & unsafe_bits:  # not a link (checked above; the job has exited)
-                        os.chmod(name, stat.S_IMODE(st.st_mode) & ~unsafe_bits, dir_fd=dfd)
+            for name in dirs + files:
                 os.chown(name, uid, gid, dir_fd=dfd, follow_symlinks=False)
+
+    @staticmethod
+    def _secure_tree_fd(top_fd: int, uid: int, gid: int) -> int:
+        """After a job: hand its writable tree to uid:gid (the worker) in a state the worker can trust.
+
+        * Every entry that is neither a directory nor a regular file is removed. Analysis output never
+          contains links or special files (the extractor records links in the manifest), so any found were
+          planted to make the worker follow them.
+        * Group/other write and setuid/setgid bits are cleared, so a directory left world-writable by one job
+          cannot be used by the next job's (different) UID.
+        * The walk is bottom-up: a directory is given to the new owner only after everything below it is done,
+          so the new owner - a separate, live process - can never swap an entry the broker is still working
+          on. Each entry is changed through an fd opened with O_NOFOLLOW (fchmod/fchown), never by path.
+        Returns the number of entries removed."""
+        removed = 0
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        for _dirpath, dirs, files, dfd in os.fwalk(".", dir_fd=top_fd, topdown=False, follow_symlinks=False):
+            for name in dirs + files:
+                st0 = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+                if not (stat.S_ISDIR(st0.st_mode) or stat.S_ISREG(st0.st_mode)):
+                    os.unlink(name, dir_fd=dfd)  # never follows a link
+                    removed += 1
+                    continue
+                try:
+                    fd = os.open(name, flags, dir_fd=dfd)
+                except OSError as exc:
+                    if exc.errno != errno.ELOOP:
+                        raise
+                    os.unlink(name, dir_fd=dfd)  # it became a link after the stat: remove it, never follow it
+                    removed += 1
+                    continue
+                try:
+                    st = os.fstat(fd)
+                    if (st.st_dev, st.st_ino) != (st0.st_dev, st0.st_ino):
+                        raise JobError(f"scan directory entry {name!r} changed during hand-back")
+                    _secure_fd(fd, st, uid, gid)
+                finally:
+                    os.close(fd)
+        _secure_fd(top_fd, os.fstat(top_fd), uid, gid)
         return removed
 
     @staticmethod
@@ -428,7 +448,7 @@ class DockerJobExecutor:
             uid, gid = self._worker_identity()
             # the whole writable tree, 'tools/' included: the analysis sandbox owned the scan directory, so
             # it could have replaced 'tools/' too
-            removed = self._chown_tree_fd(fd, uid, gid, strip=True)
+            removed = self._secure_tree_fd(fd, uid, gid)
             if removed:
                 log.warning("scan %s: removed %d link(s)/special file(s) left by the %s job", scan_id, removed,
                             prof.name)
@@ -541,6 +561,13 @@ class DockerJobExecutor:
                 tools[binary] = _image_has(self.settings.sandbox_image, binary)
         return {"docker": _docker_ok(), "images": images, "runtime": self.settings.sandbox_runtime or "runc",
                 "profiles": sorted(PROFILES), "sandbox_tools": tools, "daemon": self.daemon_status()}
+
+
+def _secure_fd(fd: int, st: os.stat_result, uid: int, gid: int) -> None:
+    unsafe_bits = 0o6022  # setuid, setgid, group write, other write
+    if st.st_mode & unsafe_bits:
+        os.fchmod(fd, stat.S_IMODE(st.st_mode) & ~unsafe_bits)
+    os.fchown(fd, uid, gid)
 
 
 def _dir_size(path: Path) -> int:

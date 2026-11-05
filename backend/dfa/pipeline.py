@@ -69,12 +69,16 @@ def process_scan(scan_id: str, settings: Settings) -> None:
     log_event(scan_id, "sandbox", "Starting isolated analysis (identify, extract, built-in scanners)", progress=5)
     stage_progress = {"identify+extract": 10, "inventory": 40, "platform detection": 50, "components": 60}
     last = [0.0]
+    stages_seen: set[str] = set()
 
     def sb_progress(msg: str) -> None:
-        if time.monotonic() - last[0] < 1.0 and msg not in stage_progress:
+        # the sandbox writes these messages, so they are throttled; each stage marker passes once
+        stage = msg in stage_progress and msg not in stages_seen
+        if time.monotonic() - last[0] < 1.0 and not stage:
             return
+        stages_seen.add(msg)
         last[0] = time.monotonic()
-        log_event(scan_id, "sandbox", msg[:300], progress=stage_progress.get(msg))
+        log_event(scan_id, "sandbox", msg[:300], progress=stage_progress.get(msg) if stage else None)
 
     started = now()
     try:

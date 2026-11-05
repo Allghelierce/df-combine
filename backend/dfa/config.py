@@ -45,7 +45,9 @@ class Settings(BaseSettings):
     sandbox_runtime: str | None = None  # e.g. "runsc" (gVisor) for an additional kernel boundary
     sandbox_max_jobs: int = 2  # concurrent sandbox containers
     max_work_dir_mb: int = 8192  # per-scan work directory cap enforced while containers run
-    max_manifest_mb: int = 256  # largest sandbox-produced manifest the worker/API will parse
+    # largest sandbox-produced manifest the worker/API will parse (JSON expands ~10x in memory; a Debian rootfs
+    # with 3,000+ files gives 3.5 MB, and extraction stops at 20,000 files)
+    max_manifest_mb: int = 64
     # Sandbox broker: when set, the worker sends jobs to this Unix socket and needs no Docker access.
     broker_socket: Path | None = None
     broker_token: str | None = None

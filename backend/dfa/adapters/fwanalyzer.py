@@ -89,16 +89,22 @@ class FwAnalyzerAdapter(ToolAdapter):
             art = arts.get(fs.get("image_artifact", fs["artifact_id"]))
             if not art:
                 continue
-            fallback = fs.get("root")
-            if fs.get("mode_image") and _looks_like_rootfs(ctx.work_dir / fs["root"]):
+            try:  # 'root' and 'mode_image' come from the untrusted manifest: confined to the work directory
+                fallback = ctx.artifact_path({"path": str(fs.get("root") or "")})
+                image_path = ctx.artifact_path({"path": str(fs["mode_image"])}) if fs.get("mode_image") else None
+            except ValueError:
+                continue
+            if fallback == ctx.work_dir.resolve() or str(fs.get("root")) == "<input>":
+                continue
+            if image_path and _looks_like_rootfs(fallback):
                 # cpio written by the sandbox with the original modes/owners: permission rules work
                 targets.append({"kind": "image", "fstype": "cpiofs", "artifact": art, "fallback_dir": fallback,
-                                "image_path": fs["mode_image"]})
-            elif fstype and _looks_like_rootfs(ctx.work_dir / fs["root"]):
+                                "image_path": image_path})
+            elif fstype and _looks_like_rootfs(fallback):
                 targets.append({"kind": "image", "fstype": fstype, "artifact": art, "fallback_dir": fallback})
-            elif fs["type"] in ("tar", "zip", "romfs") and _looks_like_rootfs(ctx.work_dir / fs["root"]):
+            elif fs["type"] in ("tar", "zip", "romfs") and _looks_like_rootfs(fallback):
                 targets.append({"kind": "dir", "fstype": "dirfs", "artifact": art, "fallback_dir": fallback})
-            elif fs["type"] in ("cromfs", "romfs") and _looks_like_nuttx_etc(ctx.work_dir / fs["root"]):
+            elif fs["type"] in ("cromfs", "romfs") and _looks_like_nuttx_etc(fallback):
                 # NuttX ROM filesystem (PX4 /etc): FwAnalyzer cannot read CROMFS images itself, so it runs in
                 # directory mode over the safely extracted tree with a PX4/NuttX rule set.
                 targets.append({"kind": "dir", "fstype": "dirfs", "artifact": art, "fallback_dir": fallback,
@@ -121,17 +127,16 @@ class FwAnalyzerAdapter(ToolAdapter):
             art = t["artifact"]
             report, mode, note = None, t["fstype"], None
             if t["kind"] == "image":
-                image = ctx.artifact_path({"path": t["image_path"]}) if t.get("image_path") else art
-                report, err = self._run_one(runner, b, out_dir, i, t["fstype"], image,
-                                            ctx.work_dir / t["fallback_dir"], perms=True)
+                image = t.get("image_path") or art  # validated in plan()
+                report, err = self._run_one(runner, b, out_dir, i, t["fstype"], image, t["fallback_dir"],
+                                            perms=True)
                 if report is None:
                     note = f"image mode ({t['fstype']}) failed: {err}; fell back to dirfs on extracted tree"
                     ctx.log(f"fwanalyzer: {note}")
             if report is None:
                 mode = "dirfs"
-                report, err = self._run_one(runner, b, out_dir, i, "dirfs", ctx.work_dir / t["fallback_dir"],
-                                            ctx.work_dir / t["fallback_dir"], perms=False,
-                                            profile=t.get("profile", "linux"))
+                report, err = self._run_one(runner, b, out_dir, i, "dirfs", t["fallback_dir"], t["fallback_dir"],
+                                            perms=False, profile=t.get("profile", "linux"))
                 if report is None:
                     runs.append({"target": art["display_path"], "status": "failed", "error": err, "note": note})
                     continue

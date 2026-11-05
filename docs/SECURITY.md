@@ -87,6 +87,14 @@ The upload is not mounted from `uploads/<id>.bin` (a path the API writes and cou
 broker's check and Docker's mount) but from a hard link the broker pins in `work/.inputs/` - inside
 the broker-owned work root - after checking with `O_NOFOLLOW` that the source is a regular file.
 
+The hand-back walk is **bottom-up** and changes each entry through a file descriptor opened with
+`O_NOFOLLOW` (`fchmod`/`fchown`), never by path: a directory is given to the worker only after
+everything below it is done, so the worker - a separate, live process - can never swap an entry the
+broker is still working on. (An independent review found that an earlier, path-based version of the
+mode clearing followed a symlink swapped in by the worker between the broker's `stat` and its `chmod`,
+which let a compromised worker make the root broker change the mode of a host file; reproduced in
+`tests/test_sandbox.py::test_hand_back_never_follows_a_link_swapped_in_mid_walk` and fixed.)
+
 **What a compromised API/worker can do now:** run the four analysis profiles on scans in the data
 directory, read and alter scan data. It cannot start arbitrary containers, mount host paths, enable
 networking, or change limits or images.
@@ -100,7 +108,11 @@ access the scan directory only through `dfa/safefs.py`:
 * paths are walked component by component through directory fds with `O_NOFOLLOW`, so no planted
   symlink is followed, not even an intermediate one;
 * only regular files are read, with size limits (a FIFO cannot block the worker, a link to
-  `/dev/zero` cannot exhaust its memory; the manifest is capped by `DFA_MAX_MANIFEST_MB`);
+  `/dev/zero` cannot exhaust its memory). The manifest is capped at `DFA_MAX_MANIFEST_MB` (64 MiB; JSON
+  grows about tenfold when parsed), deeply nested JSON is rejected, and its shape is checked before use;
+* paths taken from the manifest (artifacts, filesystem roots, permission images) are resolved and must
+  stay inside the work directory before any adapter uses them;
+* progress messages from the sandbox are throttled and capped per poll;
 * files the worker writes (`manifest.json`, `findings.json`, tool configs and outputs) are created
   under a fresh `O_EXCL` name and renamed over the target, which replaces a planted link instead of
   writing through it.
@@ -117,7 +129,9 @@ has no network (`network_mode: none`), a read-only root filesystem and only the 
 `DAC_OVERRIDE` and `FOWNER` capabilities (for the ownership hand-over). `api` and `worker` run as
 UID 10002 with `cap_drop: ALL`, read-only root filesystems and only the broker socket volume. They
 mount `./var/work` separately from `./var`: a mount point cannot be renamed, so even the worker cannot
-move the broker-owned work root aside. A CA certificate for a TLS-intercepting proxy is passed to the
+move the broker-owned work root aside. API, worker and broker have memory limits
+(`DFA_API_MEMORY`, `DFA_WORKER_MEMORY`, `DFA_BROKER_MEMORY`) and restart automatically; scans interrupted
+by a restart are re-queued. A CA certificate for a TLS-intercepting proxy is passed to the
 image builds as a BuildKit secret (`DFA_EXTRA_CA_CERT`), never copied into an image layer.
 
 Verified in development with the images built from the published Dockerfiles: an unprivileged worker
@@ -198,8 +212,9 @@ and their tool status then says "NOT container-isolated".
 
 ## Review and tests
 
-An adversarial review of extractor, sandbox runner, API and adapters was done with proof-of-concept
-inputs; verified issues are fixed and covered by `tests/test_extract_security.py`,
+Two independent adversarial reviews (extractor, sandbox runner, API and adapters; later the broker
+hand-back, `safefs`, manifest handling and the new adapters) were done with proof-of-concept inputs;
+verified issues are fixed and covered by `tests/test_extract_security.py`,
 `tests/test_sandbox.py` (profile contract, hardened command, ownership hand-over without following
 links, planted links removed, pinned upload), `tests/test_safefs.py` (no links followed, FIFOs,
 size limits, replacing planted links), `tests/test_auth.py` and `tests/test_api.py`.

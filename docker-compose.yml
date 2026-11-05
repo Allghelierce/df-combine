@@ -30,6 +30,8 @@ services:
       secrets: [extra_ca]
     image: dfa-broker:latest
     network_mode: none
+    restart: unless-stopped
+    mem_limit: ${DFA_BROKER_MEMORY:-1g}
     read_only: true
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]  # hand scan directories to the sandbox UIDs and back
@@ -64,6 +66,8 @@ services:
     image: dfa-app:latest
     ports:
       - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+    mem_limit: ${DFA_API_MEMORY:-2g}  # bounds what a hostile manifest/report can cost
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -90,6 +94,8 @@ services:
   worker:
     image: dfa-app:latest
     command: ["python", "-m", "dfa.worker"]
+    restart: unless-stopped  # interrupted scans are re-queued on start
+    mem_limit: ${DFA_WORKER_MEMORY:-4g}
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

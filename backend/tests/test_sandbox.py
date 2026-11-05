@@ -382,3 +382,79 @@ def test_jobs_refused_when_the_daemon_cannot_enforce_limits(settings, monkeypatc
         ex.run("analyze", str(uuid.uuid4()), {"name": "x", "limits": {}})
     settings.sandbox_runtime = None
     assert DockerJobExecutor(settings).daemon_status()["problems"] == []
+
+
+@pytest.mark.skipif(os.getuid() != 0, reason="ownership hand-over needs root (as the broker runs)")
+def test_hand_back_never_follows_a_link_swapped_in_mid_walk(settings, tmp_path, monkeypatch):
+    """Race from the security review: an entry is replaced by a symlink between the broker's stat and its
+    change of mode/owner. The broker must neither chmod nor chown the link's target."""
+    settings.ensure_dirs()
+    os.chown(settings.data_dir, 12345, 12346)
+    victim = tmp_path / "root-secret"
+    victim.write_text("secret")
+    os.chmod(victim, 0o600)
+    sid = str(uuid.uuid4())
+    (settings.uploads_dir / f"{sid}.bin").write_bytes(b"x")
+    work = settings.work_root / sid
+    (work / "files").mkdir(parents=True)
+    decoy = work / "files" / "decoy"
+    decoy.write_text("x")
+    os.chmod(decoy, 0o662)  # has bits the hand-back clears
+    import dfa.containers as containers
+    real_stat = os.stat
+    swapped = []
+
+    def racing_stat(path, *a, dir_fd=None, follow_symlinks=True):
+        st = real_stat(path, *a, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+        if path == "decoy" and dir_fd is not None and not swapped:  # swap right after the broker looked
+            swapped.append(1)
+            os.unlink("decoy", dir_fd=dir_fd)
+            os.symlink(victim, "decoy", dir_fd=dir_fd)
+        return st
+    monkeypatch.setattr(containers.os, "stat", racing_stat)
+    ex = DockerJobExecutor(settings)
+    ex._restore_owner(sid, containers.PROFILES["analyze"])
+    monkeypatch.setattr(containers.os, "stat", real_stat)
+    assert swapped
+    st = os.stat(victim)
+    assert (oct(st.st_mode & 0o7777), st.st_uid) == ("0o600", 0)
+    assert not os.path.lexists(decoy)  # the swapped-in link was removed
+    assert os.stat(work / "files").st_uid == 12345
+
+
+def test_hostile_manifests_are_rejected_cleanly(settings, tmp_path):
+    """A compromised sandbox controls manifest.json: oversized, deeply nested or malformed manifests give a
+    clear 'unusable manifest' error instead of exhausting memory or crashing on KeyError/RecursionError."""
+    import json as _json
+
+    from dfa.sandbox import load_manifest
+    work = tmp_path / "w"
+    work.mkdir()
+    cases = {
+        "deep": "[" * 200_000 + "]" * 200_000,
+        "not-object": "[1, 2]",
+        "missing-keys": _json.dumps({"identification": {}}),
+        "bad-artifact": _json.dumps({"identification": {}, "components": [], "findings": [], "scanner_runs": [],
+                                     "inventory": {"categories": {}},
+                                     "extraction": {"artifacts": [{"id": "1"}], "filesystems": [], "warnings": [],
+                                                    "limits_hit": [], "stats": {}, "link_count": 0, "rootfs": None}}),
+    }
+    for name, text in cases.items():
+        (work / "manifest.json").write_text(text)
+        with pytest.raises((ValueError, RecursionError)):
+            load_manifest(work, "manifest.json", settings)
+    settings.max_manifest_mb = 1
+    (work / "manifest.json").write_text(" " * (2 * 1024 * 1024))
+    with pytest.raises(OSError):
+        load_manifest(work, "manifest.json", settings)
+
+
+def test_progress_flood_is_bounded(tmp_path):
+    """progress.log is written by the sandbox; ~800k stage-marker lines must not become ~800k DB events."""
+    from dfa.sandbox import PROGRESS_LINES_PER_POLL, _pump_progress
+    work = tmp_path / "w"
+    work.mkdir()
+    (work / "progress.log").write_text("t inventory\n" * 400_000)
+    got = []
+    seen = _pump_progress(work, got.append, 0)
+    assert seen == 400_000 and len(got) == PROGRESS_LINES_PER_POLL
