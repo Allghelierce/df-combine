@@ -372,15 +372,18 @@ def test_jobs_refused_when_the_daemon_cannot_enforce_limits(settings, monkeypatc
             return _sp.CompletedProcess(cmd, 0, _json.dumps(current["info"]).encode(), b"")
         return real_run(cmd, *a, **kw)
     monkeypatch.setattr("dfa.containers.subprocess.run", fake_run)
+    monkeypatch.setattr(DockerJobExecutor, "_daemon_cache", {})
     ex = DockerJobExecutor(settings)
     with pytest.raises(JobRejected, match="cannot enforce MemoryLimit, PidsLimit, CpuCfsQuota.*rootless"):
         ex.run("analyze", str(uuid.uuid4()), {"name": "x", "limits": {}})
     current["info"] = infos["ok"]
+    DockerJobExecutor._daemon_cache.clear()
     settings.sandbox_runtime = "runsc"
     ex = DockerJobExecutor(settings)
     with pytest.raises(JobRejected, match="'runsc'.*not registered"):
         ex.run("analyze", str(uuid.uuid4()), {"name": "x", "limits": {}})
     settings.sandbox_runtime = None
+    DockerJobExecutor._daemon_cache.clear()
     assert DockerJobExecutor(settings).daemon_status()["problems"] == []
 
 
@@ -458,3 +461,18 @@ def test_progress_flood_is_bounded(tmp_path):
     got = []
     seen = _pump_progress(work, got.append, 0)
     assert seen == 400_000 and len(got) == PROGRESS_LINES_PER_POLL
+
+
+def test_sandbox_status_reports_a_daemon_that_cannot_enforce_limits(settings, monkeypatch):
+    """The dashboard's sandbox status (resolve_mode) names the reason instead of letting every scan fail."""
+    from dfa.containers import BrokerRunner
+    settings.broker_socket = Path("/run/dfa/broker.sock")
+    settings.sandbox_mode = "broker"
+    monkeypatch.setattr(BrokerRunner, "capabilities", lambda self: {
+        "images": {settings.sandbox_image: True}, "runtime": "runc",
+        "daemon": {"known": True, "problems": ["the Docker daemon cannot enforce MemoryLimit, PidsLimit"]}})
+    with pytest.raises(SandboxError, match="refuses jobs: the Docker daemon cannot enforce MemoryLimit"):
+        resolve_mode(settings)
+    monkeypatch.setattr(BrokerRunner, "capabilities", lambda self: {
+        "images": {settings.sandbox_image: True}, "runtime": "runc", "daemon": {"known": True, "problems": []}})
+    assert resolve_mode(settings)[0] == "broker"

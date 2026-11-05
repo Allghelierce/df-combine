@@ -66,17 +66,23 @@ def resolve_mode(settings: Settings) -> tuple[str, str]:
         return "local", "configured for local subprocess isolation (rlimits only, no container)"
     if settings.broker_socket:
         caps = BrokerRunner(settings).capabilities()
-        if caps.get("images", {}).get(settings.sandbox_image):
+        refused = (caps.get("daemon") or {}).get("problems") or []
+        if caps.get("images", {}).get(settings.sandbox_image) and not refused:
             rt = caps.get("runtime", "runc")
             return "broker", (f"Docker container '{settings.sandbox_image}' started by the sandbox broker "
                               f"(runtime {rt}; network disabled, read-only rootfs; worker has no Docker access)")
-        problem = caps.get("error") or f"broker reports image '{settings.sandbox_image}' missing"
+        problem = caps.get("error") or ("the broker refuses jobs: " + "; ".join(refused) if refused else
+                                        f"broker reports image '{settings.sandbox_image}' missing")
         if mode in ("docker", "broker") or not settings.allow_unsandboxed:
             raise SandboxError(f"sandbox broker unusable: {problem}")
         return "local", f"sandbox broker unusable ({problem}) - fell back to local subprocess with rlimits"
     if mode == "broker":
         raise SandboxError("sandbox_mode=broker but DFA_BROKER_SOCKET is not configured")
     if docker_available() and docker_image_present(settings.sandbox_image):
+        from .containers import DockerJobExecutor
+        refused = DockerJobExecutor(settings).daemon_status()["problems"]
+        if refused:
+            raise SandboxError("Docker cannot sandbox analysis safely: " + "; ".join(refused))
         rt = f", runtime {settings.sandbox_runtime}" if settings.sandbox_runtime else ""
         return "docker", (f"Docker container '{settings.sandbox_image}' (network disabled, read-only rootfs{rt}; "
                           "worker uses Docker directly)")

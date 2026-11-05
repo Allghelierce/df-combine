@@ -180,7 +180,8 @@ class DockerJobExecutor:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._sem = threading.BoundedSemaphore(max(1, settings.sandbox_max_jobs))
-        self._daemon: tuple[float, dict] | None = None
+
+    _daemon_cache: dict[str | None, tuple[float, dict]] = {}  # per configured runtime, shared by instances
 
     def daemon_status(self, max_age: float = 60.0) -> dict:
         """What the Docker daemon can enforce. A daemon that cannot apply memory, PID or CPU limits drops the
@@ -188,8 +189,9 @@ class DockerJobExecutor:
         unknown OCI runtime (DFA_SANDBOX_RUNTIME, e.g. runsc) would make every job fail; both are reported
         and jobs refused instead. Unknown (``docker info`` failed) does not block: ``docker run`` then fails."""
         now = time.monotonic()
-        if self._daemon and now - self._daemon[0] < max_age:
-            return self._daemon[1]
+        cached = self._daemon_cache.get(self.settings.sandbox_runtime)
+        if cached and now - cached[0] < max_age:
+            return cached[1]
         try:
             out = subprocess.run(["docker", "info", "--format", "{{json .}}"], capture_output=True, timeout=15)
             info = json.loads(out.stdout or b"{}") if out.returncode == 0 else {}
@@ -209,7 +211,7 @@ class DockerJobExecutor:
                 problems.append(f"OCI runtime {rt!r} (DFA_SANDBOX_RUNTIME) is not registered with the Docker daemon")
             status = {"known": True, "problems": problems, "rootless": rootless,
                       "cgroup_version": info.get("CgroupVersion"), "runtime": rt or info.get("DefaultRuntime")}
-        self._daemon = (now, status)
+        self._daemon_cache[self.settings.sandbox_runtime] = (now, status)
         return status
 
     # paths on the docker host
