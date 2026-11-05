@@ -60,9 +60,13 @@ killed when exceeded) and limits concurrent containers (`DFA_SANDBOX_MAX_JOBS`).
 
 Ownership hand-over: before a job the broker gives the job's writable directory to the container
 UID; after the container has exited it gives it back to the owner of the work root (the worker), so
-an unprivileged worker can read and delete results. Both passes use `lchown` and never follow links
-(the tree may contain attacker-chosen symlinks), and they run only while no container uses the
-directory.
+an unprivileged worker can read and delete results. The worker owns these directories and could swap
+any of them for a symlink (for example to the directory holding the Docker socket), so the broker
+never resolves paths there: it opens each component with `O_NOFOLLOW | O_DIRECTORY` relative to the
+work root's file descriptor, walks with `os.fwalk(follow_symlinks=False)` and changes ownership only
+through directory file descriptors (`fchown`, `lchown` with `dir_fd`). A swapped component makes the
+job fail instead of redirecting the broker. Scan directories and uploads that are symlinks are
+refused before any container starts.
 
 **What a compromised API/worker can do now:** run the four analysis profiles on scans in the data
 directory, read and alter scan data. It cannot start arbitrary containers, mount host paths, enable
@@ -161,6 +165,11 @@ links), `tests/test_auth.py` and `tests/test_api.py`.
 
 * The broker is root-equivalent with a rootful Docker daemon; run it on a dedicated analysis host/VM
   or with a rootless daemon / gVisor.
+* Bind-mount sources (`work/<id>`, `uploads/<id>.bin`) are checked with `lstat`, but Docker resolves
+  them again when it creates the container. A compromised worker that wins that race could get a
+  sandbox container (non-root, no capabilities, no network) to mount a different host path. Closing
+  this completely needs a work root that only the broker can write (scan directories created by the
+  broker); until then the data directory should live on a dedicated volume.
 * SQLite and local storage: single node. Put the API behind a TLS-terminating reverse proxy and set
   `DFA_SESSION_COOKIE_SECURE=true`.
 * FACT is a separate service with its own security model; only submit firmware you are allowed to

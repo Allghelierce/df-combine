@@ -142,6 +142,42 @@ def test_job_output_is_handed_back_to_the_worker(settings, monkeypatch):
     assert (after.st_uid, after.st_gid) == (before.st_uid, before.st_gid)
 
 
+@pytest.mark.skipif(os.getuid() != 0, reason="ownership hand-over needs root (as the broker runs)")
+def test_broker_never_chowns_through_symlinks(settings, tmp_path):
+    """A compromised worker owns work/ and tools/ and can swap them for symlinks to host paths
+    (e.g. the Docker socket's directory). The root broker must refuse instead of chowning the target."""
+    settings.ensure_dirs()
+    os.chown(settings.work_root, 12345, 12346)
+    victim = tmp_path / "host-secrets"
+    victim.mkdir()
+    (victim / "docker.sock").write_text("x")
+    before = {p.name: (p.stat().st_uid, p.stat().st_gid) for p in (victim, victim / "docker.sock")}
+
+    sid = str(uuid.uuid4())
+    (settings.uploads_dir / f"{sid}.bin").write_bytes(b"x")
+    work = settings.work_root / sid
+    (work / "tools").mkdir(parents=True)
+    (work / "tools" / "cwe_checker").symlink_to(victim)  # swapped tool directory
+    ex = DockerJobExecutor(settings)
+    with pytest.raises(JobRejected):
+        ex.command("cwe_checker", sid, {"target": "/in/firmware"})
+
+    sid2 = str(uuid.uuid4())
+    (settings.uploads_dir / f"{sid2}.bin").write_bytes(b"x")
+    (settings.work_root / sid2).symlink_to(victim)  # swapped scan directory
+    with pytest.raises(JobRejected):
+        ex.command("analyze", sid2, {"name": "x", "limits": {}})
+
+    sid3 = str(uuid.uuid4())
+    (settings.uploads_dir / f"{sid3}.bin").symlink_to(victim / "docker.sock")  # swapped upload
+    (settings.work_root / sid3).mkdir()
+    with pytest.raises(JobRejected):
+        ex.command("analyze", sid3, {"name": "x", "limits": {}})
+
+    after = {p.name: (p.stat().st_uid, p.stat().st_gid) for p in (victim, victim / "docker.sock")}
+    assert after == before
+
+
 def _with_streams(proc):
     import io
     proc.stdout, proc.stderr = io.BytesIO(), io.BytesIO()

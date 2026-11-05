@@ -24,6 +24,7 @@ import re
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import threading
 import time
@@ -189,49 +190,103 @@ class DockerJobExecutor:
     def _scan_paths(self, scan_id: str) -> tuple[Path, Path]:
         if not _SCAN_ID.match(scan_id or ""):
             raise JobRejected("invalid scan id")
-        work = (self.settings.work_root / scan_id).resolve()
-        upload = (self.settings.uploads_dir / f"{scan_id}.bin").resolve()
-        if not work.is_relative_to(self.settings.work_root.resolve()) or not work.is_dir():
+        root = self.settings.work_root
+        work = root / scan_id
+        upload = self.settings.uploads_dir / f"{scan_id}.bin"
+        # The worker owns these directories, so they may be swapped for symlinks: never follow any.
+        try:
+            wst, ust = os.lstat(work), os.lstat(upload)
+            for parent in (root, self.settings.uploads_dir):
+                if stat.S_ISLNK(os.lstat(parent).st_mode):
+                    raise JobRejected("data directories must not be symbolic links")
+        except FileNotFoundError:
+            raise JobRejected("unknown scan") from None
+        if not stat.S_ISDIR(wst.st_mode):
             raise JobRejected("unknown scan work directory")
-        if not upload.is_file():
+        if not stat.S_ISREG(ust.st_mode):
             raise JobRejected("unknown scan upload")
         return work, upload
 
-    @staticmethod
-    def _writable_target(work: Path, prof: Profile) -> Path | None:
-        return work if prof.writable_subdir == "" else (work / prof.writable_subdir if prof.writable_subdir else None)
+    # ---- ownership hand-over (runs as root; every path below is controlled by the worker) ----------------
+    def _open_work(self, scan_id: str, subdir: str = "", create: bool = False) -> tuple[int, int]:
+        """(fd of work/<id>, fd of work/<id>/<subdir>), opened component by component with O_NOFOLLOW
+        relative to the work root, so a component swapped for a symlink fails instead of redirecting us."""
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        root_fd = os.open(self.settings.work_root, flags)
+        fds: list[int] = []
+        try:
+            fd = os.open(scan_id, flags, dir_fd=root_fd)
+            fds.append(fd)
+            work_fd = fd
+            for part in [p for p in subdir.split("/") if p]:
+                if part in (".", ".."):
+                    raise JobRejected("invalid writable directory")
+                if create:
+                    try:
+                        os.mkdir(part, 0o755, dir_fd=fd)
+                    except FileExistsError:
+                        pass
+                fd = os.open(part, flags, dir_fd=fd)
+                fds.append(fd)
+            for extra in fds[1:-1]:
+                os.close(extra)
+            return work_fd, fd
+        except OSError as exc:
+            for f in fds:
+                os.close(f)
+            raise JobRejected(f"unsafe or missing scan directory ({type(exc).__name__})") from None
+        finally:
+            os.close(root_fd)
 
     @staticmethod
-    def _chown_tree(top: Path, uid: int, gid: int, skip: str | None = None) -> None:
-        """lchown a tree without following links (run only while no container uses the directory)."""
-        for dirpath, dirs, files in os.walk(top):
-            if skip and dirpath == str(top) and skip in dirs:
+    def _chown_tree_fd(top_fd: int, uid: int, gid: int, skip: str | None = None) -> None:
+        """chown a tree through directory fds: never follows a symlink, not even one swapped in mid-walk."""
+        os.fchown(top_fd, uid, gid)
+        for dirpath, dirs, files, dfd in os.fwalk(".", dir_fd=top_fd, follow_symlinks=False):
+            if skip and dirpath == "." and skip in dirs:
                 dirs.remove(skip)
-            os.chown(dirpath, uid, gid, follow_symlinks=False)
-            for name in files + [d for d in dirs if os.path.islink(os.path.join(dirpath, d))]:
-                os.chown(os.path.join(dirpath, name), uid, gid, follow_symlinks=False)
+            for name in dirs + files:
+                os.chown(name, uid, gid, dir_fd=dfd, follow_symlinks=False)
 
-    def _prepare_writable(self, work: Path, prof: Profile) -> None:
-        target = self._writable_target(work, prof)
-        if target is None:
+    @staticmethod
+    def _writable_subdir(prof: Profile) -> str | None:
+        return prof.writable_subdir
+
+    def _prepare_writable(self, scan_id: str, prof: Profile) -> None:
+        sub = self._writable_subdir(prof)
+        if sub is None:
             return
-        target.mkdir(parents=True, exist_ok=True)
-        if os.getuid() == 0:
-            # The tool runs under its own UID; 'tools/' stays with the worker (it writes tool configs there).
-            self._chown_tree(target, prof.user, prof.user, skip="tools" if target == work else None)
-            if prof.writable_subdir:  # tool profiles: parent dirs must be traversable
-                os.chmod(work, 0o755)
-        else:
-            os.chmod(target, 0o777)  # data dir itself is 0700, so this is not exposed to other users
+        work_fd, fd = self._open_work(scan_id, sub, create=True)
+        try:
+            if os.getuid() == 0:
+                # The tool runs under its own UID; 'tools/' stays with the worker (it writes tool configs there).
+                self._chown_tree_fd(fd, prof.user, prof.user, skip="tools" if sub == "" else None)
+                if sub:  # tool profiles: parent dirs must be traversable
+                    os.fchmod(work_fd, 0o755)
+            else:
+                os.fchmod(fd, 0o777)  # data dir itself is 0700, so this is not exposed to other users
+        finally:
+            os.close(fd)
+            if work_fd != fd:
+                os.close(work_fd)
 
-    def _restore_owner(self, work: Path, prof: Profile) -> None:
+    def _restore_owner(self, scan_id: str, prof: Profile) -> None:
         """Give the job's output back to the owner of the work root (the worker's UID), so an unprivileged
         worker can read, post-process and finally delete it."""
-        target = self._writable_target(work, prof)
-        if target is None or os.getuid() != 0 or not target.exists():
+        sub = self._writable_subdir(prof)
+        if sub is None or os.getuid() != 0:
             return
-        st = self.settings.work_root.stat()
-        self._chown_tree(target, st.st_uid, st.st_gid, skip="tools" if target == work else None)
+        try:
+            work_fd, fd = self._open_work(scan_id, sub)
+        except JobRejected:
+            return
+        try:
+            st = os.stat(self.settings.work_root, follow_symlinks=False)
+            self._chown_tree_fd(fd, st.st_uid, st.st_gid, skip="tools" if sub == "" else None)
+        finally:
+            os.close(fd)
+            if work_fd != fd:
+                os.close(work_fd)
 
     def command(self, profile: str, scan_id: str, params: dict) -> tuple[list[str], str, int]:
         if profile not in PROFILES:
@@ -240,7 +295,7 @@ class DockerJobExecutor:
         s = self.settings
         argv = build_argv(profile, params)
         work, upload = self._scan_paths(scan_id)
-        self._prepare_writable(work, prof)
+        self._prepare_writable(scan_id, prof)
         mem = getattr(s, prof.memory_setting)
         name = f"dfa-{profile}-{scan_id[:8]}-{secrets.token_hex(3)}"
         user = prof.user if os.getuid() == 0 or prof.user == TOOL_UID else os.getuid()
@@ -274,7 +329,7 @@ class DockerJobExecutor:
         try:
             return self._run(cmd, name, timeout, work, disk_limit)
         finally:
-            self._restore_owner(work, PROFILES[profile])
+            self._restore_owner(scan_id, PROFILES[profile])
 
     def _run(self, cmd: list[str], name: str, timeout: int, work: Path, disk_limit: int) -> JobResult:
         with self._sem:
