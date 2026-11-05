@@ -5,3 +5,4 @@ frontend/dist
 backend/var
 var
 .git
+fixtures/real

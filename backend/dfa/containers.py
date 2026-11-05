@@ -197,20 +197,41 @@ class DockerJobExecutor:
             raise JobRejected("unknown scan upload")
         return work, upload
 
+    @staticmethod
+    def _writable_target(work: Path, prof: Profile) -> Path | None:
+        return work if prof.writable_subdir == "" else (work / prof.writable_subdir if prof.writable_subdir else None)
+
+    @staticmethod
+    def _chown_tree(top: Path, uid: int, gid: int, skip: str | None = None) -> None:
+        """lchown a tree without following links (run only while no container uses the directory)."""
+        for dirpath, dirs, files in os.walk(top):
+            if skip and dirpath == str(top) and skip in dirs:
+                dirs.remove(skip)
+            os.chown(dirpath, uid, gid, follow_symlinks=False)
+            for name in files + [d for d in dirs if os.path.islink(os.path.join(dirpath, d))]:
+                os.chown(os.path.join(dirpath, name), uid, gid, follow_symlinks=False)
+
     def _prepare_writable(self, work: Path, prof: Profile) -> None:
-        target = work if prof.writable_subdir == "" else (work / prof.writable_subdir if prof.writable_subdir else None)
+        target = self._writable_target(work, prof)
         if target is None:
             return
         target.mkdir(parents=True, exist_ok=True)
         if os.getuid() == 0:
-            for dirpath, _dirs, files in os.walk(target):
-                os.chown(dirpath, prof.user, prof.user)
-                for f in files:
-                    os.chown(os.path.join(dirpath, f), prof.user, prof.user, follow_symlinks=False)
+            # The tool runs under its own UID; 'tools/' stays with the worker (it writes tool configs there).
+            self._chown_tree(target, prof.user, prof.user, skip="tools" if target == work else None)
             if prof.writable_subdir:  # tool profiles: parent dirs must be traversable
                 os.chmod(work, 0o755)
         else:
             os.chmod(target, 0o777)  # data dir itself is 0700, so this is not exposed to other users
+
+    def _restore_owner(self, work: Path, prof: Profile) -> None:
+        """Give the job's output back to the owner of the work root (the worker's UID), so an unprivileged
+        worker can read, post-process and finally delete it."""
+        target = self._writable_target(work, prof)
+        if target is None or os.getuid() != 0 or not target.exists():
+            return
+        st = self.settings.work_root.stat()
+        self._chown_tree(target, st.st_uid, st.st_gid, skip="tools" if target == work else None)
 
     def command(self, profile: str, scan_id: str, params: dict) -> tuple[list[str], str, int]:
         if profile not in PROFILES:
@@ -235,7 +256,8 @@ class DockerJobExecutor:
             cmd += ["--tmpfs", t]
         cmd += ["-v", f"{self._host(upload)}:/in/firmware:ro", "-v", f"{self._host(work)}:/work:rw"]
         if profile == "ghidra":
-            cmd += ["-v", f"{GHIDRA_SCRIPTS}:/dfa_scripts:ro", "--entrypoint", argv[0]]
+            scripts = s.ghidra_scripts_host_dir or GHIDRA_SCRIPTS
+            cmd += ["-v", f"{scripts}:/dfa_scripts:ro", "--entrypoint", argv[0]]
             argv = argv[1:]
         elif profile == "cwe_checker":
             cmd += ["--entrypoint", argv[0]]
@@ -249,6 +271,12 @@ class DockerJobExecutor:
         cmd, name, timeout = self.command(profile, scan_id, params)
         work, _ = self._scan_paths(scan_id)
         disk_limit = self.settings.max_work_dir_mb * 1024 * 1024
+        try:
+            return self._run(cmd, name, timeout, work, disk_limit)
+        finally:
+            self._restore_owner(work, PROFILES[profile])
+
+    def _run(self, cmd: list[str], name: str, timeout: int, work: Path, disk_limit: int) -> JobResult:
         with self._sem:
             t0 = time.monotonic()
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)

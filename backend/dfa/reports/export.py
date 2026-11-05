@@ -59,7 +59,7 @@ def finding_to_dict(f) -> dict:
             "severity": f.severity, "classification": f.classification, "confidence": f.confidence,
             "source_tool": f.source_tool, "rule_id": f.rule_id, "affected_component": f.affected_component,
             "remediation": f.remediation, "evidence": f.evidence, "cwe": f.cwe, "references": f.references,
-            "tags": f.tags}
+            "tags": f.tags, "package": getattr(f, "package", None)}
 
 
 def tool_run_to_dict(t) -> dict:
@@ -145,15 +145,67 @@ def pdf_report(scan: Scan) -> bytes:
                             ("VALIGN", (0, 0), (-1, -1), "TOP")]))
     story.append(tt)
 
+    grid = TableStyle([("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#c5ced8")),
+                       ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef2f6")), ("VALIGN", (0, 0), (-1, -1), "TOP")])
     if scan.components:
         story += [_p("Identified software components", h2)]
-        crow = [[_p("Component", small), _p("Version", small), _p("Source", small)]]
+        crow = [[_p("Component", small), _p("Version", small), _p("Identified by / found in", small),
+                 _p("Known vulnerabilities (version match, unverified)", small)]]
         for c in scan.components[:80]:
-            crow.append([_p(c["name"], small), _p(c["version"], small), _p("; ".join(c.get("sources", []))[:200], small)])
-        ct = Table(crow, colWidths=[35 * mm, 30 * mm, 113 * mm], repeatRows=1)
-        ct.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#c5ced8")),
-                                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef2f6"))]))
+            vulns = c.get("vulnerabilities") or []
+            vtxt = (f"{len(vulns)}: " + ", ".join(v["id"] for v in vulns[:8]) + (" ..." if len(vulns) > 8 else "")
+                    if vulns else c.get("vulnerabilities_note") or ("none listed" if "vulnerabilities" in c else "-"))
+            crow.append([_p(c["name"] + (f" ({c['variant']})" if c.get("variant") else ""), small),
+                         _p(c["version"], small),
+                         _p(f"{c.get('method', '')}: " + "; ".join(c.get("sources", []))[:180], small), _p(vtxt, small)])
+        ct = Table(crow, colWidths=[30 * mm, 28 * mm, 65 * mm, 55 * mm], repeatRows=1)
+        ct.setStyle(grid)
         story.append(ct)
+
+    inv = scan.packages or {}
+    vulnerable = [p for p in inv.get("packages", []) if p.get("vulnerabilities")]
+    if inv.get("packages"):
+        distro = inv.get("distro") or {}
+        story += [_p("Installed packages with known vulnerabilities", h2),
+                  _p(f"{len(inv['packages'])} packages were read from the package manager database"
+                     + (f" ({distro.get('name') or distro.get('id', '')})" if distro else "")
+                     + f"; {len(vulnerable)} are listed as affected in the distribution's security data (OSV). "
+                     "Fixed versions are compared with the exact installed version, so backported fixes are "
+                     "accounted for. Exploitability in this firmware was not verified.", body)]
+        if vulnerable:
+            prow = [[_p("Package", small), _p("Installed version", small), _p("Advisories", small),
+                     _p("Fixed in (highest)", small)]]
+            for pk in sorted(vulnerable, key=lambda x: -len(x["vulnerabilities"]))[:60]:
+                vs = pk["vulnerabilities"]
+                fixed = sorted({v["fixed"] for v in vs if v.get("fixed")})
+                prow.append([_p(pk["name"], small), _p(pk["version"], small),
+                             _p(f"{len(vs)}: " + ", ".join(f"{v['id']} ({v.get('severity') or 'n/a'})" for v in vs[:6])
+                                + (" ..." if len(vs) > 6 else ""), small),
+                             _p(fixed[-1] if fixed else "no fix listed", small)])
+            pt = Table(prow, colWidths=[35 * mm, 35 * mm, 80 * mm, 28 * mm], repeatRows=1)
+            pt.setStyle(grid)
+            story.append(pt)
+
+    ghidra = next((t for t in scan.tool_runs if t.tool == "ghidra" and t.status == "completed"), None)
+    bins = ((ghidra.details or {}).get("binaries") or []) if ghidra else []
+    if bins:
+        story += [_p("Binary analysis (Ghidra headless)", h2),
+                  _p("Disassembly and function recovery of the analysed binaries. Call sites of risky library "
+                     "functions are static-analysis observations, not confirmed vulnerabilities.", body)]
+        brow = [[_p("Binary", small), _p("Functions", small), _p("Instructions", small), _p("Risky call sites", small)]]
+        for b in bins[:10]:
+            if b.get("status") != "completed":
+                brow.append([_p(b.get("binary", ""), small), _p("failed", small), _p("-", small),
+                             _p(str(b.get("error", ""))[:200], small)])
+                continue
+            risky = b.get("risky_call_sites") or {}
+            rtxt = ", ".join(f"{k} x{v}" for k, v in sorted(risky.items(), key=lambda kv: -kv[1])[:8]) \
+                if isinstance(risky, dict) else str(risky)[:200]
+            brow.append([_p(b.get("binary", ""), small), _p(b.get("function_count", "-"), small),
+                         _p(b.get("instruction_count", "-"), small), _p(rtxt or "none", small)])
+        bt = Table(brow, colWidths=[70 * mm, 22 * mm, 26 * mm, 60 * mm], repeatRows=1)
+        bt.setStyle(grid)
+        story.append(bt)
 
     story += [PageBreak(), _p("Findings", h2)]
     findings = sorted(scan.findings, key=lambda f: (f.severity_rank, f.title))
@@ -173,7 +225,8 @@ def pdf_report(scan: Scan) -> bytes:
              + "".join(f"; corroborated by {t.split(':', 1)[1]}" for t in (f.tags or [])
                        if t.startswith("corroborated-by:"))),
             ("Source", f"{f.source_tool} ({f.rule_id})" + (f" - {f.cwe}" if f.cwe else "")),
-            ("Component", f.affected_component), ("Description", f.description), ("Remediation", f.remediation),
+            ("Component", f.affected_component), *([("Package", f.package)] if getattr(f, "package", None) else []),
+            ("Description", f.description), ("Remediation", f.remediation),
         ]
         dt = Table([[_p(k, small), _p(v, small)] for k, v in rows] + [[_p("Evidence", small),
                     Paragraph(ev or "-", mono)]], colWidths=[25 * mm, 153 * mm])

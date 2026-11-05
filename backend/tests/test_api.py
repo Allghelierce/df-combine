@@ -60,6 +60,18 @@ def test_end_to_end_companion(client, settings, fixtures):
     rp = client.get(f"/api/scans/{scan['id']}/report.pdf")
     assert rp.status_code == 200 and rp.content.startswith(b"%PDF") and len(rp.content) > 3000
 
+    rs = client.get(f"/api/scans/{scan['id']}/report.sarif")
+    assert rs.status_code == 200 and rs.headers["content-type"].startswith("application/sarif+json")
+    sar = rs.json()
+    assert sar["version"] == "2.1.0" and len(sar["runs"][0]["results"]) == len(f)
+    res0 = sar["runs"][0]["results"][0]
+    assert res0["ruleId"] in {r["id"] for r in sar["runs"][0]["tool"]["driver"]["rules"]}
+    assert res0["properties"]["classification"] in ("detected", "suspicious", "unverified", "info")
+    assert all(r["kind"] == "review" for r in sar["runs"][0]["results"] if r["properties"]["classification"] != "detected")
+
+    pk = client.get(f"/api/scans/{scan['id']}/packages").json()
+    assert set(pk) >= {"distro", "managers", "total", "items"}
+
 
 @pytest.mark.parametrize("key,platform", [("px4", "PX4"), ("apj", "ArduPilot"), ("hex", "ArduPilot")])
 def test_end_to_end_flight_controllers(client, settings, fixtures, key, platform):

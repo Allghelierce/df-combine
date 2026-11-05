@@ -12,7 +12,7 @@ from sqlalchemy import delete
 from .adapters.base import AdapterContext
 from .adapters.registry import get_adapters
 from .config import Settings
-from .core.findings import SEVERITY_ORDER, Finding, aggregate, correlate, dedupe
+from .core.findings import SEVERITY_ORDER, Finding, aggregate, attribute_packages, correlate, dedupe
 from .db import session_scope
 from .models import FindingRow, Scan, ScanEvent, ToolRun
 from .sandbox import SandboxError, run_analysis
@@ -171,6 +171,9 @@ def process_scan(scan_id: str, settings: Settings) -> None:
         log_event(scan_id, f"tool:{ad.name}", f"{ad.display_name}: {r.status} - {r.message}", level, progress=pct)
 
     # ---- stage 3: normalise + persist ----
+    attributed = attribute_packages(findings, manifest.get("packages"))
+    if attributed:
+        log_event(scan_id, "packages", f"{attributed} finding(s) attributed to the installed package owning the file")
     final = [f.to_dict() for f in dedupe(aggregate(correlate(findings)))]
     sev = Counter(f["severity"] for f in final)
     cls = Counter(f["classification"] for f in final)
@@ -181,7 +184,8 @@ def process_scan(scan_id: str, settings: Settings) -> None:
                              severity_rank=SEVERITY_ORDER.index(f["severity"]), classification=f["classification"],
                              confidence=f["confidence"], source_tool=f["source_tool"], rule_id=f["rule_id"],
                              affected_component=f["affected_component"], remediation=f["remediation"],
-                             evidence=f["evidence"], cwe=f["cwe"], references=f["references"], tags=f["tags"]))
+                             evidence=f["evidence"], cwe=f["cwe"], references=f["references"], tags=f["tags"],
+                             package=f.get("package")))
         scan = s.get(Scan, scan_id)
         scan.severity_counts = {k: sev.get(k, 0) for k in SEVERITY_ORDER}
         scan.classification_counts = {k: cls.get(k, 0) for k in ("detected", "suspicious", "unverified", "info")}

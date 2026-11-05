@@ -73,6 +73,7 @@ class FindingRow(Base):
     cwe: Mapped[str | None] = mapped_column(String(32))
     references: Mapped[list] = mapped_column(JSON, default=list)
     tags: Mapped[list] = mapped_column(JSON, default=list)
+    package: Mapped[str | None] = mapped_column(String(256))
 
     scan: Mapped[Scan] = relationship(back_populates="findings")
 

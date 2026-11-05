@@ -20,6 +20,7 @@ from urllib.parse import quote
 from .base import ScanContext
 
 MAX_PACKAGES = 20000
+MAX_OWNED_FILES = 200_000
 
 
 def _stanzas(text: str):
@@ -78,6 +79,30 @@ def parse_apk(text: str) -> list[dict]:
     return pkgs
 
 
+def apk_files(text: str) -> dict[str, str]:
+    """File ownership from Alpine's installed database: P: package, F: directory, R: file in that directory."""
+    owners: dict[str, str] = {}
+    pkg = directory = None
+    for line in text.splitlines():
+        if line.startswith("P:"):
+            pkg, directory = line[2:].strip(), None
+        elif line.startswith("F:"):
+            directory = line[2:].strip()
+        elif line.startswith("R:") and pkg and directory is not None:
+            owners[f"/{directory}/{line[2:].strip()}".replace("//", "/")] = pkg
+        elif not line.strip():
+            pkg = directory = None
+    return owners
+
+
+def list_files(text: str) -> list[str]:
+    """dpkg/opkg '<package>.list': one owned path per line (opkg may append a tab and a mode)."""
+    return [ln.split("\t", 1)[0].strip() for ln in text.splitlines() if ln.startswith("/")]
+
+
+_LIST_FILE = re.compile(r"/(?:var/lib/dpkg/info|usr/lib/opkg/info|var/lib/opkg/info)/([^/]+?)(?::[a-z0-9_-]+)?\.list$")
+
+
 def parse_opkg(text: str) -> list[dict]:
     pkgs = []
     for st in _stanzas(text):
@@ -123,9 +148,10 @@ def inventory(ctx: ScanContext) -> dict:
     managers = []
     packages: list[dict] = []
     seen = set()
+    owned: dict[tuple[int | None, str], str] = {}  # (filesystem artifact, path) -> package name
     for art in ctx.artifacts:
         path = ctx.fs_path(art)
-        if art.format != "text" and not path.endswith(("/status", "/installed", "METADATA", "PKG-INFO")):
+        if art.format != "text" and not path.endswith(("/status", "/installed", "METADATA", "PKG-INFO", ".list")):
             continue
         def load(aid: int = art.id) -> str:
             try:
@@ -134,6 +160,12 @@ def inventory(ctx: ScanContext) -> dict:
                 return ""
 
         found: list[dict] = []
+        m = _LIST_FILE.search(path)
+        if m:
+            if len(owned) < MAX_OWNED_FILES:
+                for f in list_files(load()):
+                    owned[(art.parent_id, f)] = m.group(1)
+            continue
         if path.endswith(("/etc/os-release", "/usr/lib/os-release")) and distro is None:
             osr = parse_os_release(load())
             if osr.get("ID"):
@@ -149,7 +181,10 @@ def inventory(ctx: ScanContext) -> dict:
         if path.endswith("/var/lib/dpkg/status") or "/var/lib/dpkg/status.d/" in path:
             found = parse_dpkg(load())
         elif path.endswith("/lib/apk/db/installed"):
-            found = parse_apk(load())
+            text = load()
+            found = parse_apk(text)
+            for f, name in list(apk_files(text).items())[:MAX_OWNED_FILES]:
+                owned[(art.parent_id, f)] = name
         elif path.endswith(("/usr/lib/opkg/status", "/var/lib/opkg/status")):
             found = parse_opkg(load())
         elif re.search(r"\.(dist-info/METADATA|egg-info/PKG-INFO)$", path):
@@ -167,4 +202,11 @@ def inventory(ctx: ScanContext) -> dict:
             packages.append(p)
     for p in packages:
         p["purl"] = purl(p, distro)
-    return {"distro": distro, "managers": managers, "packages": packages}
+    names = {p["name"] for p in packages}
+    owners = {}  # display path of each extracted file -> owning package (only files that were extracted)
+    if owned:
+        for art in ctx.artifacts:
+            name = owned.get((art.parent_id, ctx.fs_path(art)))
+            if name in names:
+                owners[ctx.where(art)] = name
+    return {"distro": distro, "managers": managers, "packages": packages, "owners": owners}

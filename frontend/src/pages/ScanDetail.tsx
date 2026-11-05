@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { RiskGauge, SeverityDonut, StackedBar } from "../components/charts";
 import { FindingsTable } from "../components/FindingsTable";
 import { CopyText, Empty, ErrorBox, Icon, Panel, StatusBadge, usePolling } from "../components/ui";
-import { api, Artifact, Finding, Scan, ToolRun } from "../lib/api";
+import { api, Artifact, ExportKind, EXPORTS, Finding, PackageInventory, PackageItem, Scan, ToolRun, VulnRef } from "../lib/api";
 import { formatBytes, formatDate, formatDuration, toolStatusTone } from "../lib/format";
 
 type Tab = "overview" | "findings" | "inventory" | "components" | "log";
@@ -38,8 +38,10 @@ export function pipelineSteps(scan: Scan): Step[] {
     },
   ];
   for (const [tool, label] of [
+    ["osv", "Vulnerability DB"],
     ["fwanalyzer", "FwAnalyzer"],
     ["cwe_checker", "cwe_checker"],
+    ["ghidra", "Ghidra"],
     ["fact", "FACT"],
   ] as const) {
     const r = byTool(tool);
@@ -90,10 +92,10 @@ export default function ScanDetail() {
   }, [load]);
   usePolling(load, 1500, running);
 
-  async function act(kind: "json" | "pdf" | "rescan" | "delete") {
+  async function act(kind: ExportKind | "rescan" | "delete") {
     setBusy(kind);
     try {
-      if (kind === "json" || kind === "pdf") await api.download(id, kind);
+      if (kind in EXPORTS) await api.download(id, kind as ExportKind);
       if (kind === "rescan") {
         await api.rescan(id);
         setFindings(null);
@@ -143,7 +145,13 @@ export default function ScanDetail() {
             {busy === "pdf" ? "Generating…" : "Export PDF"}
           </button>
           <button className="btn ghost" disabled={!!busy || running} onClick={() => act("json")}>
-            Export JSON
+            JSON
+          </button>
+          <button className="btn ghost" disabled={scan.status !== "completed" || !!busy} onClick={() => act("sarif")} title="SARIF 2.1.0 for code-scanning tools">
+            SARIF
+          </button>
+          <button className="btn ghost" disabled={scan.status !== "completed" || !!busy} onClick={() => act("sbom")} title="CycloneDX 1.5 software bill of materials">
+            SBOM
           </button>
           {scan.can_modify !== false && (
             <>
@@ -188,7 +196,7 @@ export default function ScanDetail() {
             ["overview", "Overview"],
             ["findings", `Findings${findings ? ` (${findings.length})` : ""}`],
             ["inventory", `Inventory${artifacts ? ` (${artifacts.total})` : ""}`],
-            ["components", `Components (${scan.components?.length ?? 0})`],
+            ["components", `Components & packages (${(scan.components?.length ?? 0) + (scan.packages?.count ?? 0)})`],
             ["log", "Activity log"],
           ] as [Tab, string][]
         ).map(([k, label]) => (
@@ -499,32 +507,143 @@ function Inventory({ data, running }: { data: Awaited<ReturnType<typeof api.arti
   );
 }
 
-function Components({ scan }: { scan: Scan }) {
-  const comps = scan.components ?? [];
-  if (!comps.length) return <Empty>No software components with recognisable version strings were found.</Empty>;
+const SEV_ORDER = ["critical", "high", "medium", "low"];
+
+function worst(v: VulnRef[] | undefined): string | null {
+  const sevs = (v ?? []).map((x) => x.severity ?? "medium");
+  return SEV_ORDER.find((s) => sevs.includes(s)) ?? (sevs.length ? "medium" : null);
+}
+
+function VulnList({ vulns }: { vulns: VulnRef[] }) {
   return (
-    <Panel title="Software components" actions={<span className="muted small">Identified from version strings — verify before relying on them.</span>}>
-      <table className="table">
-        <thead>
-          <tr>
-            <th>Component</th>
-            <th>Version</th>
-            <th>Method</th>
-            <th>Found in</th>
-          </tr>
-        </thead>
+    <details>
+      <summary className="small">
+        <span className={`pill sev-${worst(vulns)}`}>{vulns.length}</span> {vulns.slice(0, 3).map((v) => v.id).join(", ")}
+        {vulns.length > 3 ? "…" : ""}
+      </summary>
+      <table className="table compact">
         <tbody>
-          {comps.map((c) => (
-            <tr key={`${c.name}-${c.version}`}>
-              <td className="strong">{c.name}</td>
-              <td className="mono">{c.version}</td>
-              <td className="small muted">{c.method}</td>
-              <td className="mono small">{c.sources.join(" · ")}</td>
+          {vulns.slice(0, 200).map((v) => (
+            <tr key={v.id}>
+              <td className="mono small">
+                <a href={`https://osv.dev/vulnerability/${encodeURIComponent(v.id)}`} target="_blank" rel="noreferrer noopener">
+                  {v.id}
+                </a>
+              </td>
+              <td className="small">
+                {v.severity ?? "n/a"}
+                {v.score ? ` (${v.score})` : ""}
+              </td>
+              <td className="small mono">{v.fixed ? `fixed in ${v.fixed}` : "no fix listed"}</td>
+              <td className="small muted mono">{v.aliases.slice(0, 2).join(", ")}</td>
             </tr>
           ))}
         </tbody>
       </table>
-    </Panel>
+    </details>
+  );
+}
+
+function Components({ scan }: { scan: Scan }) {
+  const comps = scan.components ?? [];
+  const [inv, setInv] = useState<PackageInventory | null>(null);
+  const [onlyVuln, setOnlyVuln] = useState(false);
+  const [q, setQ] = useState("");
+  const [err, setErr] = useState<unknown>(null);
+  useEffect(() => {
+    if (scan.packages?.count) api.packages(scan.id).then(setInv).catch(setErr);
+  }, [scan.id, scan.packages?.count]);
+  const pk = (inv?.items ?? []).filter(
+    (p: PackageItem) => (!onlyVuln || (p.vulnerabilities?.length ?? 0) > 0) && (!q || `${p.name} ${p.source ?? ""}`.toLowerCase().includes(q.toLowerCase())),
+  );
+  return (
+    <div className="stack">
+      {scan.packages?.count ? (
+        <Panel
+          title="Installed packages"
+          actions={
+            <span className="muted small">
+              From the package manager database{scan.packages.distro ? ` · ${scan.packages.distro.name || `${scan.packages.distro.id} ${scan.packages.distro.version_id}`}` : ""} ·{" "}
+              {scan.packages.vulnerable} with known vulnerabilities (OSV, backport-aware)
+            </span>
+          }
+        >
+          <ErrorBox error={err} />
+          <div className="filter-row">
+            <label className="small">
+              <input type="checkbox" checked={onlyVuln} onChange={(e) => setOnlyVuln(e.target.checked)} /> only packages with known vulnerabilities
+            </label>
+            <input type="search" placeholder="Filter package…" value={q} onChange={(e) => setQ(e.target.value)} />
+            <span className="muted small">
+              {pk.length} / {inv?.total ?? scan.packages.count}
+            </span>
+          </div>
+          <div className="table-scroll">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Package</th>
+                  <th>Version</th>
+                  <th>Source package</th>
+                  <th>Files</th>
+                  <th>Known vulnerabilities</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pk.slice(0, 2000).map((p) => (
+                  <tr key={`${p.manager}-${p.name}-${p.version}`}>
+                    <td className="strong">
+                      {p.name} <span className="tag">{p.manager}</span>
+                    </td>
+                    <td className="mono small">{p.version}</td>
+                    <td className="mono small muted">{p.source && p.source !== p.name ? `${p.source} ${p.source_version ?? ""}` : "–"}</td>
+                    <td className="small">{p.owned_files ?? 0}</td>
+                    <td>{p.vulnerabilities?.length ? <VulnList vulns={p.vulnerabilities} /> : <span className="muted small">none listed</span>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      ) : null}
+      <Panel title="Software components" actions={<span className="muted small">Identified from version strings and descriptors — verify before relying on them.</span>}>
+        {comps.length === 0 ? (
+          <Empty>No software components with recognisable version strings were found.</Empty>
+        ) : (
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Component</th>
+                <th>Version</th>
+                <th>Method</th>
+                <th>Found in</th>
+                <th>Known vulnerabilities (version match)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {comps.map((c) => (
+                <tr key={`${c.name}-${c.version}`}>
+                  <td className="strong">
+                    {c.name}
+                    {c.variant ? <span className="tag">{c.variant}</span> : null}
+                  </td>
+                  <td className="mono">{c.version}</td>
+                  <td className="small muted">{c.method}</td>
+                  <td className="mono small">{c.sources.join(" · ")}</td>
+                  <td>
+                    {c.vulnerabilities?.length ? (
+                      <VulnList vulns={c.vulnerabilities} />
+                    ) : (
+                      <span className="muted small">{c.vulnerabilities_note ?? (c.vulnerabilities ? "none listed" : "not checked")}</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Panel>
+    </div>
   );
 }
 

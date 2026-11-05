@@ -1,4 +1,5 @@
 """Sandbox runner tests. Docker-mode tests run only when Docker and the dfa-sandbox image exist."""
+import os
 import shutil
 import subprocess
 import uuid
@@ -94,6 +95,57 @@ def test_profile_command_is_hardened(settings):
         ex.command("analyze", "../../etc", {})
     with pytest.raises(JobRejected):
         ex.command("analyze", str(uuid.uuid4()), {})  # unknown scan
+
+
+@pytest.mark.skipif(os.getuid() != 0, reason="ownership hand-over needs root (as the broker runs)")
+def test_job_output_is_handed_back_to_the_worker(settings, monkeypatch):
+    """The broker chowns the writable tree to the tool UID for the job and back to the worker afterwards."""
+    settings.ensure_dirs()
+    os.chown(settings.work_root, 12345, 12346)  # the (unprivileged) worker owns the work root
+    sid = str(uuid.uuid4())
+    (settings.uploads_dir / f"{sid}.bin").write_bytes(b"x")
+    work = settings.work_root / sid
+    (work / "tools" / "fwanalyzer").mkdir(parents=True)
+    (work / "tools" / "fwanalyzer" / "cfg.toml").write_text("x")
+    for dirpath, _d, files in os.walk(work):  # as if the worker had created them
+        os.chown(dirpath, 12345, 12346)
+        for f in files:
+            os.chown(os.path.join(dirpath, f), 12345, 12346)
+    seen = {}
+
+    class FakeProc:
+        returncode = 0
+        stdout = stderr = None
+
+        def __init__(self, cmd, **kw):
+            seen["during_analyze_work"] = work.stat().st_uid
+            seen["during_tools"] = (work / "tools").stat().st_uid
+            (work / "files").mkdir(exist_ok=True)
+            (work / "files" / "out.bin").write_bytes(b"y")
+            os.chown(work / "files" / "out.bin", 10001, 10001)  # written by the sandbox user
+            (work / "evil").symlink_to("/etc/passwd")
+
+        def poll(self):
+            return 0
+
+    import io
+    FakeProc.stdout = io.BytesIO()
+    FakeProc.stderr = io.BytesIO()
+    monkeypatch.setattr("dfa.containers.subprocess.Popen", lambda cmd, **kw: _with_streams(FakeProc(cmd, **kw)))
+    before = os.stat("/etc/passwd")
+    DockerJobExecutor(settings).run("analyze", sid, {"name": "x", "limits": {}})
+    assert seen["during_analyze_work"] == 10001 and seen["during_tools"] == 12345
+    for p in (work, work / "files", work / "files" / "out.bin", work / "tools" / "fwanalyzer" / "cfg.toml"):
+        assert (p.stat().st_uid, p.stat().st_gid) == (12345, 12346), p
+    assert os.lstat(work / "evil").st_uid == 12345  # the link itself, never its target
+    after = os.stat("/etc/passwd")
+    assert (after.st_uid, after.st_gid) == (before.st_uid, before.st_gid)
+
+
+def _with_streams(proc):
+    import io
+    proc.stdout, proc.stderr = io.BytesIO(), io.BytesIO()
+    return proc
 
 
 # --------------------------------------------------------------- real Docker runs

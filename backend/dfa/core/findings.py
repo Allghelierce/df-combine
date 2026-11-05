@@ -86,6 +86,7 @@ class Finding:
     cwe: str | None = None
     references: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
+    package: str | None = None  # installed package that owns the affected file ("openssh-server 1:8.4p1-5")
 
     @property
     def fingerprint(self) -> str:
@@ -115,6 +116,7 @@ class Finding:
             "cwe": self.cwe,
             "references": list(self.references),
             "tags": list(self.tags),
+            "package": self.package,
         }
 
     @classmethod
@@ -133,6 +135,7 @@ class Finding:
             cwe=d.get("cwe"),
             references=list(d.get("references", [])),
             tags=list(d.get("tags", [])),
+            package=d.get("package"),
         )
 
 
@@ -254,11 +257,39 @@ def aggregate(findings: list[Finding], threshold: int = 3) -> list[Finding]:
             for e in i.evidence[:2]:
                 evidence.append(Evidence(e.kind, e.value, e.location or " > ".join(loc)))
         tags = sorted({t for i in items for t in i.tags})
+        pkgs = {i.package for i in items}
         out.append(Finding(
             title=f"{title} ({len(items)} files)", description=first.description,
             severity=min((i.severity for i in items), key=lambda s: Severity(s).rank),
             classification=first.classification, confidence=first.confidence, source_tool=first.source_tool,
             rule_id=first.rule_id, affected_component=(" > ".join(common) or "multiple files") + f" ({len(items)} files)",
             remediation=first.remediation, evidence=evidence[:60], cwe=first.cwe, references=first.references,
-            tags=tags + ["aggregated"]))
+            tags=tags + ["aggregated"], package=pkgs.pop() if len(pkgs) == 1 else None))
     return out
+
+
+def attribute_packages(findings: list[Finding], inventory: dict | None) -> int:
+    """Name the installed package that owns each finding's file (from dpkg/apk/opkg file lists).
+
+    Ownership comes from the package manager's own records, so a finding in /usr/sbin/sshd is tied to
+    e.g. 'openssh-server 1:8.4p1-5+deb11u1' and can be triaged together with that package's advisories.
+    """
+    inv = inventory or {}
+    owners: dict[str, str] = inv.get("owners") or {}
+    if not owners:
+        return 0
+    versions = {p["name"]: p["version"] for p in inv.get("packages", [])}
+    n = 0
+    for f in findings:
+        if f.package:
+            continue
+        cands = [f.affected_component] + [e.location for e in f.evidence if e.location]
+        cands += [e.value for e in f.evidence if e.kind == "path"]
+        for c in cands:
+            name = owners.get(c)
+            if name:
+                f.package = f"{name} {versions.get(name, '')}".strip()
+                f.tags.append(f"package:{name}")
+                n += 1
+                break
+    return n

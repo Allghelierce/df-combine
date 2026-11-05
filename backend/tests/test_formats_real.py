@@ -245,3 +245,41 @@ def test_real_esp_flash_layout_pipeline(tmp_path, run_analysis):
     assert ("esp-idf", "5.0-beta1-427-g4532e6e0b2-dirt") in {(c["name"], c["version"]) for c in m["components"]}
     code = [a for a in m["extraction"]["artifacts"] if (a["details"].get("arch_guess") or {}).get("architecture")]
     assert code and all(a["details"]["arch_guess"]["architecture"] == "Xtensa" for a in code)
+
+
+def test_package_file_ownership_parsers():
+    from dfa.core.scanners.packages import apk_files, list_files
+    apk = "P:busybox\nV:1.34.1-r3\nF:bin\nR:busybox\nF:etc\nR:securetty\n\nP:musl\nV:1.2.2-r7\nF:lib\nR:ld-musl-aarch64.so.1\n"
+    assert apk_files(apk) == {"/bin/busybox": "busybox", "/etc/securetty": "busybox",
+                              "/lib/ld-musl-aarch64.so.1": "musl"}
+    assert list_files("/.\n/usr\n/usr/sbin/sshd\n/usr/bin/x\t0755\n") == ["/.", "/usr", "/usr/sbin/sshd", "/usr/bin/x"]
+
+
+def test_findings_are_attributed_to_owning_packages():
+    from dfa.core.findings import Classification, Confidence, Evidence, Finding, Severity, aggregate, attribute_packages
+    inv = {"packages": [{"name": "openssh-server", "version": "1:8.4p1-5"}, {"name": "busybox", "version": "1.34"}],
+           "owners": {"fw > rootfs > /usr/sbin/sshd": "openssh-server", "fw > rootfs > /bin/busybox": "busybox"}}
+
+    def f(comp, ev=()):
+        return Finding("t", "d", Severity.medium, Classification.suspicious, Confidence.medium, "builtin:binary",
+                       "elf-nx", comp, "r", evidence=list(ev))
+    fs = [f("fw > rootfs > /usr/sbin/sshd"), f("multiple", [Evidence("path", "x", "fw > rootfs > /bin/busybox")]),
+          f("fw > rootfs > /usr/bin/unowned")]
+    assert attribute_packages(fs, inv) == 2
+    assert [x.package for x in fs] == ["openssh-server 1:8.4p1-5", "busybox 1.34", None]
+    assert "package:openssh-server" in fs[0].tags
+    merged = aggregate([f("fw > rootfs > /a"), f("fw > rootfs > /b"), f("fw > rootfs > /c")])
+    assert merged[0].package is None
+
+
+@pytest.mark.skipif(not (REAL / "debian11-armhf-rootfs-20210816.tar.gz").exists(), reason="real Debian rootfs absent")
+def test_real_debian_binary_findings_name_their_package(run_analysis):
+    from dfa.core.findings import Finding, attribute_packages
+    m = run_analysis(REAL / "debian11-armhf-rootfs-20210816.tar.gz")
+    fs = [Finding.from_dict(d) for d in m["findings"]]
+    attribute_packages(fs, m["packages"])
+    binary = [f for f in fs if f.source_tool == "builtin:binary"]
+    assert binary and sum(1 for f in binary if f.package) >= len(binary) // 2, [(f.affected_component, f.package)
+                                                                                 for f in binary][:5]
+    owners = m["packages"]["owners"]
+    assert owners[next(k for k in owners if k.endswith("/sbin/killall5"))] == "sysvinit-utils"

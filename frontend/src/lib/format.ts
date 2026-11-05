@@ -1,3 +1,5 @@
+import type { Finding } from "./api";
+
 export function formatBytes(n: number | null | undefined): string {
   if (n === null || n === undefined) return "-";
   if (n < 1024) return `${n} B`;
@@ -54,6 +56,38 @@ export function toolStatusTone(status: string): string {
       return "bad";
     default:
       return "muted";
+  }
+}
+
+/** What a finding rests on, so static-analysis warnings and version matches are never read as confirmed vulnerabilities. */
+export function findingBasis(f: Pick<Finding, "source_tool" | "rule_id" | "classification" | "tags">): { label: string; text: string } {
+  if (f.source_tool === "cwe_checker" || f.source_tool === "ghidra" || f.tags.includes("static-analysis")) {
+    return {
+      label: "Static-analysis warning",
+      text: "Automated analysis of the machine code found this pattern. Reachability and exploitability were not established; it is not a confirmed vulnerability.",
+    };
+  }
+  if (f.rule_id === "osv-distro-package") {
+    return {
+      label: "Distribution security advisory",
+      text: "The installed package version is listed as affected in the distribution's own security data (backported fixes are taken into account). Whether the vulnerable code is used in this firmware was not verified.",
+    };
+  }
+  if (f.rule_id.startsWith("osv-upstream-") || f.rule_id.startsWith("outdated-")) {
+    return {
+      label: "Version-based match",
+      text: "A version string matches affected upstream releases. Vendor backports are invisible to this check, so each entry needs manual confirmation.",
+    };
+  }
+  switch (f.classification) {
+    case "detected":
+      return { label: "Direct evidence", text: "Concrete evidence is present in the firmware image (file, key, configuration line). Exploitability is not verified." };
+    case "suspicious":
+      return { label: "Heuristic pattern", text: "Pattern-based detection; it may be a false positive." };
+    case "unverified":
+      return { label: "Needs verification", text: "Reported by a tool without direct evidence; confirm manually." };
+    default:
+      return { label: "Context", text: "Informational." };
   }
 }
 

@@ -1,16 +1,18 @@
 import { useMemo, useState } from "react";
 import { CLASSIFICATIONS, Classification, Finding, SEVERITIES, Severity } from "../lib/api";
-import { CLASSIFICATION_HELP } from "../lib/format";
+import { CLASSIFICATION_HELP, findingBasis } from "../lib/format";
 import { ClassBadge, Empty, SeverityBadge } from "./ui";
 
 export function FindingsTable({ findings }: { findings: Finding[] }) {
   const [sev, setSev] = useState<Set<Severity>>(new Set());
   const [cls, setCls] = useState<Set<Classification>>(new Set());
   const [tool, setTool] = useState("");
+  const [pkg, setPkg] = useState("");
   const [q, setQ] = useState("");
   const [open, setOpen] = useState<number | null>(null);
 
   const tools = useMemo(() => Array.from(new Set(findings.map((f) => f.source_tool))).sort(), [findings]);
+  const packages = useMemo(() => Array.from(new Set(findings.map((f) => f.package).filter((p): p is string => !!p))).sort(), [findings]);
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return findings.filter(
@@ -18,12 +20,14 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
         (!sev.size || sev.has(f.severity)) &&
         (!cls.size || cls.has(f.classification)) &&
         (!tool || f.source_tool === tool) &&
+        (!pkg || f.package === pkg) &&
         (!needle ||
           f.title.toLowerCase().includes(needle) ||
           f.affected_component.toLowerCase().includes(needle) ||
+          (f.package ?? "").toLowerCase().includes(needle) ||
           (f.cwe ?? "").toLowerCase().includes(needle)),
     );
-  }, [findings, sev, cls, tool, q]);
+  }, [findings, sev, cls, tool, pkg, q]);
 
   function toggle<T>(set: Set<T>, v: T, update: (s: Set<T>) => void) {
     const n = new Set(set);
@@ -74,7 +78,17 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
               </option>
             ))}
           </select>
-          <input type="search" placeholder="Search title, component, CWE…" value={q} onChange={(e) => setQ(e.target.value)} />
+          {packages.length > 0 && (
+            <select value={pkg} onChange={(e) => setPkg(e.target.value)} aria-label="Filter by package">
+              <option value="">All packages</option>
+              {packages.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+          )}
+          <input type="search" placeholder="Search title, component, package, CWE…" value={q} onChange={(e) => setQ(e.target.value)} />
           <span className="muted small">
             {filtered.length} / {findings.length}
           </span>
@@ -100,6 +114,11 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
                         ✓ {t.replace("corroborated-by:", "")}
                       </span>
                     ))}
+                  {f.package && (
+                    <span className="pill pkg" title="Installed package that owns the affected file">
+                      {f.package}
+                    </span>
+                  )}
                   <span className="finding-meta mono">{f.source_tool}</span>
                   <span className="chev">{isOpen ? "▾" : "▸"}</span>
                 </button>
@@ -110,6 +129,16 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
                   <div className="finding-body">
                     <p>{f.description}</p>
                     <dl className="kv">
+                      <dt>Basis</dt>
+                      <dd>
+                        <b>{findingBasis(f).label}.</b> {findingBasis(f).text}
+                      </dd>
+                      {f.package && (
+                        <>
+                          <dt>Package</dt>
+                          <dd className="mono">{f.package}</dd>
+                        </>
+                      )}
                       <dt>Classification</dt>
                       <dd>
                         {f.classification} — {CLASSIFICATION_HELP[f.classification]} Confidence: <b>{f.confidence}</b>.

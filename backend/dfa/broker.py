@@ -113,14 +113,15 @@ def serve(socket_path: Path, settings: Settings, mode: int = 0o660, group: str |
     server = ThreadingUnixServer(str(socket_path), handler)
     os.chmod(socket_path, mode)
     if group:
-        os.chown(socket_path, -1, grp.getgrnam(group).gr_gid)
+        os.chown(socket_path, -1, int(group) if group.isdigit() else grp.getgrnam(group).gr_gid)
     return server
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Drone Firmware Analyzer sandbox broker")
     ap.add_argument("--socket", default=os.environ.get("DFA_BROKER_SOCKET", "/run/dfa/broker.sock"))
-    ap.add_argument("--group", default=None, help="group allowed to use the socket")
+    ap.add_argument("--group", default=os.environ.get("DFA_BROKER_GROUP"),
+                    help="group (name or numeric GID) allowed to use the socket")
     ap.add_argument("--mode", default="660", help="socket permissions (octal)")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")

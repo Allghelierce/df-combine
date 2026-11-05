@@ -58,8 +58,12 @@ class FactAdapter(ToolAdapter):
         headers = {"Accept": "application/json"}
         if self.settings.fact_api_key:
             headers["Authorization"] = self.settings.fact_api_key
+        # No keep-alive: FACT's uWSGI closes idle connections while we poll, and a reused stale connection
+        # surfaces as "connection reset by peer" on the next request. Connection failures are retried.
+        transport = httpx.HTTPTransport(retries=2, verify=self.settings.fact_verify_tls,
+                                        limits=httpx.Limits(max_keepalive_connections=0))
         return httpx.Client(base_url=self.settings.fact_url.rstrip("/"), headers=headers, timeout=60,
-                            verify=self.settings.fact_verify_tls)
+                            transport=transport)
 
     def status(self):
         if not self.settings.fact_url:
@@ -109,7 +113,7 @@ class FactAdapter(ToolAdapter):
                     "release_date": "1970-01-01", "tags": "drone-firmware-analyzer",
                     "requested_analysis_systems": REQUESTED_PLUGINS,
                 }
-                r = c.put("/rest/firmware", json=payload)
+                r = self._put_once_more_on_reset(c, payload)
                 if r.status_code not in (200, 201) or not r.json().get("uid"):
                     failed += 1
                     submissions.append({"target": t["label"], "status": "failed",
@@ -151,6 +155,15 @@ class FactAdapter(ToolAdapter):
                                                      else "failed"),
                              msg, findings, str(out_dir), {"submissions": submissions, "fact_url": self.settings.fact_url,
                                                            "components": components})
+
+    @staticmethod
+    def _put_once_more_on_reset(c: httpx.Client, payload: dict) -> httpx.Response:
+        """FACT derives the UID from the content, so repeating an upload after a dropped connection is safe."""
+        try:
+            return c.put("/rest/firmware", json=payload)
+        except (httpx.ReadError, httpx.RemoteProtocolError, httpx.WriteError):
+            time.sleep(2)
+            return c.put("/rest/firmware", json=payload)
 
     def _wait(self, c: httpx.Client, uid: str) -> dict | None:
         deadline = time.monotonic() + self.settings.fact_timeout_s

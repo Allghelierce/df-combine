@@ -469,6 +469,33 @@ def create_app(settings: Settings | None = None, start_worker: bool | None = Non
         return Response(json.dumps(cyclonedx(scan), indent=1), media_type="application/vnd.cyclonedx+json",
                         headers={"Content-Disposition": f'attachment; filename="dfa-sbom-{scan_id[:8]}.cdx.json"'})
 
+    @app.get("/api/scans/{scan_id}/report.sarif")
+    def report_sarif(scan_id: str, p: Principal = Depends(current_principal), db: Session = Depends(get_session)):
+        from .reports.sarif import sarif
+        scan = _get(db, scan_id, p)
+        if scan.status != "completed":
+            raise HTTPException(409, "the SARIF report is available once the scan has completed")
+        return Response(json.dumps(sarif(scan), indent=1), media_type="application/sarif+json",
+                        headers={"Content-Disposition": f'attachment; filename="dfa-{scan_id[:8]}.sarif"'})
+
+    @app.get("/api/scans/{scan_id}/packages")
+    def get_packages(scan_id: str, vulnerable: bool = False, q: str | None = None,
+                     limit: int = Query(1000, ge=1, le=20000), offset: int = Query(0, ge=0),
+                     p: Principal = Depends(current_principal), db: Session = Depends(get_session)):
+        inv = _get(db, scan_id, p).packages or {}
+        pk = inv.get("packages", [])
+        if vulnerable:
+            pk = [x for x in pk if x.get("vulnerabilities")]
+        if q:
+            needle = q.lower()
+            pk = [x for x in pk if needle in x["name"].lower() or needle in (x.get("source") or "").lower()]
+        owners = inv.get("owners") or {}
+        from collections import Counter
+        files = Counter(owners.values())
+        items = [{**x, "owned_files": files.get(x["name"], 0)} for x in pk[offset:offset + limit]]
+        return {"distro": inv.get("distro"), "managers": inv.get("managers", []), "total": len(pk),
+                "items": items}
+
     @app.get("/api/scans/{scan_id}/report.pdf")
     def report_pdf(scan_id: str, p: Principal = Depends(current_principal), db: Session = Depends(get_session)):
         scan = _get(db, scan_id, p)

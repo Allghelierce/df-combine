@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     ghidra_memory: str = "6g"
     ghidra_timeout_s: int = 1800
     ghidra_max_binaries: int = 3
+    # Host path of dfa/ghidra_scripts when the broker itself runs in a container (bind mounts are resolved
+    # by the host daemon); default: the package directory.
+    ghidra_scripts_host_dir: Path | None = None
 
     # FwAnalyzer
     fwanalyzer_enabled: bool = True

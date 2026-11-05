@@ -42,6 +42,7 @@ def init_engine(url: str) -> Engine:
 MIGRATIONS: list[tuple[str, str, str]] = [
     ("scans", "owner_id", "ALTER TABLE scans ADD COLUMN owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL"),
     ("scans", "packages", "ALTER TABLE scans ADD COLUMN packages JSON"),
+    ("findings", "package", "ALTER TABLE findings ADD COLUMN package VARCHAR(256)"),
 ]
 
 

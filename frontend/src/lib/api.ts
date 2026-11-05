@@ -27,6 +27,37 @@ export interface Finding {
   cwe: string | null;
   references: string[];
   tags: string[];
+  /** Installed package owning the affected file (from the package manager's file lists), e.g. "openssh-server 1:8.4p1-5". */
+  package?: string | null;
+}
+
+export interface VulnRef {
+  id: string;
+  severity: string | null;
+  score: number | null;
+  fixed: string | null;
+  aliases: string[];
+  source: string;
+}
+
+export interface PackageItem {
+  name: string;
+  version: string;
+  manager: string;
+  source?: string | null;
+  source_version?: string | null;
+  arch?: string | null;
+  database?: string;
+  purl?: string;
+  owned_files?: number;
+  vulnerabilities?: VulnRef[];
+}
+
+export interface PackageInventory {
+  distro: { id: string; version_id: string; codename?: string; name?: string } | null;
+  managers: { type: string; database: string; count: number }[];
+  total: number;
+  items: PackageItem[];
 }
 
 export interface PlatformCandidate {
@@ -86,6 +117,9 @@ export interface Component {
   version: string;
   sources: string[];
   method: string;
+  variant?: string | null;
+  vulnerabilities?: VulnRef[];
+  vulnerabilities_note?: string;
 }
 
 export interface ExtractionSummary {
@@ -116,6 +150,7 @@ export interface Scan {
   identification: Identification | null;
   extraction_summary: ExtractionSummary | null;
   components: Component[];
+  packages?: { distro: PackageInventory["distro"]; managers: PackageInventory["managers"]; count: number; vulnerable: number } | null;
   severity_counts: Record<Severity, number> | null;
   classification_counts: Record<Classification, number> | null;
   risk_score: number | null;
@@ -173,6 +208,14 @@ export interface Stats {
   findings_by_classification: Record<string, number>;
   platforms: Record<string, number>;
 }
+
+export type ExportKind = "json" | "pdf" | "sarif" | "sbom";
+export const EXPORTS: Record<ExportKind, { path: string; suffix: string; label: string }> = {
+  pdf: { path: "report.pdf", suffix: "-report.pdf", label: "PDF report" },
+  json: { path: "report.json", suffix: "-report.json", label: "JSON" },
+  sarif: { path: "report.sarif", suffix: ".sarif", label: "SARIF" },
+  sbom: { path: "sbom.cdx.json", suffix: "-sbom.cdx.json", label: "SBOM (CycloneDX)" },
+};
 
 /** Session auth uses an HttpOnly cookie; state-changing requests carry this header (CSRF protection). */
 const CSRF = { "X-DFA-CSRF": "1" };
@@ -274,6 +317,12 @@ export const api = {
     request<{ total: number; items: Artifact[]; links: { path: string; kind: string; target: string | null }[]; link_count: number }>(
       `/api/scans/${encodeURIComponent(id)}/artifacts?limit=5000`,
     ),
+  packages: (id: string, params: { vulnerable?: boolean; q?: string } = {}) => {
+    const qs = new URLSearchParams({ limit: "20000" });
+    if (params.vulnerable) qs.set("vulnerable", "true");
+    if (params.q) qs.set("q", params.q);
+    return request<PackageInventory>(`/api/scans/${encodeURIComponent(id)}/packages?${qs}`);
+  },
   rescan: (id: string) => request<{ status: string }>(`/api/scans/${encodeURIComponent(id)}/rescan`, { method: "POST" }),
   remove: (id: string) => request<void>(`/api/scans/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
@@ -301,14 +350,14 @@ export const api = {
     });
   },
 
-  async download(id: string, kind: "json" | "pdf"): Promise<void> {
-    const res = await fetch(`/api/scans/${encodeURIComponent(id)}/report.${kind}`, { credentials: "same-origin" });
+  async download(id: string, kind: ExportKind): Promise<void> {
+    const res = await fetch(`/api/scans/${encodeURIComponent(id)}/${EXPORTS[kind].path}`, { credentials: "same-origin" });
     if (!res.ok) throw new ApiError(res.status, `Report download failed (HTTP ${res.status})`);
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `dfa-report-${id.slice(0, 8)}.${kind}`;
+    a.download = `dfa-${id.slice(0, 8)}${EXPORTS[kind].suffix}`;
     document.body.appendChild(a);
     a.click();
     a.remove();
