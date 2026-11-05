@@ -633,3 +633,56 @@ def test_tar_members_after_an_end_marker_or_a_damaged_header_are_not_hidden(tmp_
         res = Extractor(tmp_path / f"w_{name}", Limits()).run(src, name)
         assert {a.name for a in res.artifacts if a.origin == "extracted"} == expected, name
         assert any("skipped between members" in w for w in res.warnings) == warned, (name, res.warnings)
+
+
+def test_compressed_streams_followed_by_padding_or_other_data(tmp_path):
+    """gzip.open/lzma failed on data after the last stream that is not another one, and the whole content went
+    unanalysed: 0xFF padding of an erased flash block was enough. Padding is now ignored, several members
+    (with zero padding between them) are decoded, and other trailing data is analysed as an artifact of its
+    own instead of being dropped. A damaged first stream still fails."""
+    import gzip
+    import lzma
+    import subprocess
+
+    def tar(members: list[tuple[str, bytes]]) -> bytes:
+        b = io.BytesIO()
+        with tarfile.open(fileobj=b, mode="w") as tf:
+            for name, data in members:
+                ti = tarfile.TarInfo(name)
+                ti.size = len(data)
+                tf.addfile(ti, io.BytesIO(data))
+        return b.getvalue()
+
+    rootfs = tar([("etc/passwd", b"root::0:0::/root:/bin/sh\n"), ("etc/shadow", b"root::1:0:99999:7:::\n")])
+    half = len(rootfs) // 2
+    cases: dict[str, tuple[bytes, set[str]]] = {
+        "ff.tar.gz": (gzip.compress(rootfs, mtime=0) + b"\xff" * 4096, {"/etc/passwd", "/etc/shadow"}),
+        "ff.tar.xz": (lzma.compress(rootfs) + b"\xff" * 4096, {"/etc/passwd", "/etc/shadow"}),
+        "members.tar.gz": (gzip.compress(rootfs[:half], mtime=0) + b"\0" * 1000 + gzip.compress(rootfs[half:], mtime=0),
+                           {"/etc/passwd", "/etc/shadow"}),
+        "fake-member.tar.gz": (gzip.compress(rootfs, mtime=0) + b"\x1f\x8b" + b"not a member" * 50,
+                               {"/etc/passwd", "/etc/shadow"}),
+    }
+    if shutil.which("mksquashfs"):
+        tree = tmp_path / "hidden"
+        (tree / "etc").mkdir(parents=True)
+        (tree / "etc" / "hidden.conf").write_text("telnetd=1\n")
+        img = tmp_path / "hidden.squashfs"
+        subprocess.run(["mksquashfs", str(tree), str(img), "-noappend", "-quiet"], check=True, capture_output=True)
+        cases["hidden.tar.gz"] = (gzip.compress(rootfs, mtime=0) + b"\xff" * 8192 + img.read_bytes(),
+                                  {"/etc/passwd", "/etc/shadow", "/etc/hidden.conf"})
+    for name, (data, expected) in cases.items():
+        src = tmp_path / name
+        src.write_bytes(data)
+        res = Extractor(tmp_path / f"w_{name}", Limits()).run(src, name)
+        assert res.artifacts[0].extraction != "failed", (name, res.artifacts[0].extraction_note)
+        assert {a.name for a in res.artifacts if a.origin == "extracted"} == expected, name
+        trailing = [a for a in res.artifacts if a.name.startswith("trailing_")]
+        assert bool(trailing) == (name in ("fake-member.tar.gz", "hidden.tar.gz")), (name, res.warnings)
+        if name.startswith("ff."):
+            assert res.artifacts[0].details["trailing_padding_bytes"] == 4096
+    bad = bytearray(gzip.compress(rootfs, mtime=0))
+    bad[20:40] = b"\x00" * 20  # damaged deflate data in the (only) member
+    (tmp_path / "bad.tar.gz").write_bytes(bytes(bad))
+    res = Extractor(tmp_path / "w_bad", Limits()).run(tmp_path / "bad.tar.gz", "bad.tar.gz")
+    assert res.artifacts[0].extraction == "failed"

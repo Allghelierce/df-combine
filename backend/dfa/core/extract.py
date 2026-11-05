@@ -565,17 +565,44 @@ class Extractor:
         dest = out / _sanitize_component(base)
         with opener(src) as stream:
             self._write_stream(stream, dest, compressed_size=art.size, label=art.name)
-        return [self._child(art, dest, base, "decoded")]
+            trailing = getattr(stream, "trailing_offset", None)
+        children = [self._child(art, dest, base, "decoded")]
+        if trailing is not None:
+            children += self._trailing_data(art, src, trailing, out)
+        return children
+
+    def _trailing_data(self, art: Artifact, src: Path, off: int, out: Path) -> list[Artifact]:
+        """Data after the last compressed stream: flash padding (0xFF/0x00) is ignored, anything else is
+        analysed as an artifact of its own instead of being dropped (it may be another image)."""
+        size = art.size - off
+        with src.open("rb") as fp:
+            fp.seek(off)
+            while chunk := fp.read(COPY_CHUNK):
+                if chunk.translate(None, b"\x00\xff"):
+                    break
+            else:
+                art.details["trailing_padding_bytes"] = size
+                return []
+            name = f"trailing_{off:08x}.bin"
+            dest = out / name
+            fp.seek(off)
+            self._write_stream(_Bounded(fp, size), dest, label=name)
+        self.result.warnings.append(f"{art.name}: {size} bytes after the compressed data are not padding; "
+                                    f"analysed separately as {name}")
+        child = self._child(art, dest, name, "carved")
+        child.details["carved_offset"] = hex(off)
+        return [child]
 
     def h_gzip(self, art: Artifact) -> list[Artifact]:
-        import gzip
-        return self._decompress(art, lambda p: gzip.open(p, "rb"), (".gz", ".tgz"))
+        return self._decompress(art, lambda p: _ConcatenatedStreams(p, b"\x1f\x8b", _GzipMemberReader),
+                                (".gz", ".tgz"))
 
     def h_bzip2(self, art: Artifact) -> list[Artifact]:
         return self._decompress(art, lambda p: bz2.open(p, "rb"), (".bz2", ".tbz2"))
 
     def h_xz(self, art: Artifact) -> list[Artifact]:
-        return self._decompress(art, lambda p: _LzmaReader(p, lzma.FORMAT_XZ), (".xz", ".txz"))
+        return self._decompress(art, lambda p: _ConcatenatedStreams(p, b"\xfd7zXZ\x00", _XzStreamReader),
+                                (".xz", ".txz"))
 
     def h_lzma(self, art: Artifact) -> list[Artifact]:
         return self._decompress(art, lambda p: _LzmaReader(p, lzma.FORMAT_ALONE), (".lzma", ".lz"))
@@ -1436,6 +1463,60 @@ class _XzStreamReader:
                 return out
         return b""
 
+    def end_offset(self) -> int:
+        """File offset just after the stream (valid once read() returned b"")."""
+        return self.fp.tell() - len(self.d.unused_data)
+
+
+class _ConcatenatedStreams:
+    """Consecutive gzip members or xz streams in a file (both formats allow several), decoded one by one.
+
+    gzip.open and lzma failed on anything after the last stream that is not another one, such as the 0xFF
+    padding of an erased flash block, and the whole content went unanalysed. Here zero padding is skipped
+    and other data ends the output; ``trailing_offset`` says where it starts so the caller can look at it.
+    Damage inside the first stream, or inside a later one after it produced output, still raises."""
+
+    def __init__(self, path: Path, magic: bytes, member: Callable[[BinaryIO], _GzipMemberReader | _XzStreamReader]):
+        self.fp = path.open("rb")
+        self.magic, self.member = magic, member
+        self.cur: _GzipMemberReader | _XzStreamReader | None = member(self.fp)
+        self.start, self.first, self.started = 0, True, False
+        self.trailing_offset: int | None = None
+
+    def __enter__(self):  # noqa: ANN204
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.fp.close()
+
+    def read(self, size: int = -1) -> bytes:
+        while self.cur is not None:
+            try:
+                out = self.cur.read(size)
+            except (zlib.error, lzma.LZMAError, EOFError):
+                if self.first or self.started:
+                    raise
+                self.trailing_offset, self.cur = self.start, None  # began like a stream, but is not one
+                break
+            if out:
+                self.started = True
+                return out
+            pos = self.cur.end_offset()
+            self.fp.seek(pos)
+            while (chunk := self.fp.read(64 * 1024)) and not chunk.strip(b"\x00"):
+                pos += len(chunk)  # zero padding (xz stream padding, dd'ed images)
+            pos += len(chunk) - len(chunk.lstrip(b"\x00"))
+            self.fp.seek(pos)
+            if not chunk:
+                self.cur = None
+            elif self.fp.read(len(self.magic)) == self.magic:
+                self.fp.seek(pos)
+                self.start, self.first, self.started = pos, False, False
+                self.cur = self.member(self.fp)
+            else:
+                self.trailing_offset, self.cur = pos, None
+        return b""
+
 
 def _stream_length(fp: BinaryIO, off: int, kind: str, max_out: int) -> int | None:
     """Compressed length of the gzip/xz stream at ``off`` (test-decode, output discarded and capped)."""
@@ -1490,6 +1571,10 @@ class _GzipMemberReader:
             if out:
                 return out
         return b""
+
+    def end_offset(self) -> int:
+        """File offset just after the member (valid once read() returned b"")."""
+        return self.fp.tell() - len(self.d.unused_data) - len(self.tail)
 
 
 CARVE_MAGICS = {
