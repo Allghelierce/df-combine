@@ -45,8 +45,9 @@ not mocks.
 | FACT | Alpine 3.15 rootfs | with the current plug-in set: completed in 21 s; results from 8 plug-ins (15 findings after the corrected mapping) |
 
 Opt-in real integration tests (`DFA_REAL_TOOLS=1 pytest tests/test_real_tools.py`) cover FwAnalyzer
-(Alpine, PX4 CROMFS), cwe_checker (ARM ELF, bare-metal), Ghidra (bare-metal) and FACT; all six pass
-against the real tools. Mock-based tests in `tests/test_adapters.py` remain for unit coverage of
+(Alpine and Debian with the permission image, PX4 CROMFS), cwe_checker (ARM ELF, bare-metal), Ghidra
+(bare-metal) and FACT (PX4 CAN bootloader, files extracted from PX4's CROMFS); all eight pass against
+the real tools. Mock-based tests in `tests/test_adapters.py` remain for unit coverage of
 parsing and error handling.
 
 ## FwAnalyzer
