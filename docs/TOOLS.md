@@ -63,17 +63,19 @@ parsing and error handling.
   (`CBRK_IO_SAFETY 22027`, `CBRK_SUPPLY_CHK 894281`, `CBRK_USB_CHK 197848`, `CBRK_AIRSPD_CHK 162128`),
   MAVLink broadcast and safety-related settings.
 * **Permission image:** extraction never applies setuid bits or owners, so a `dirfs` run cannot check
-  permissions. For tar and ext root filesystems the sandbox therefore writes a cpio (newc) archive whose
-  headers carry the original modes, owners, empty directories and symlinks from the archive metadata
-  (`<root>.modes.cpio`); FwAnalyzer reads it in `cpiofs` image mode. FwAnalyzer's cpio backend needs a
+  permissions. For tar, ext, SquashFS and Unix-made zip root filesystems the sandbox therefore writes a
+  cpio (newc) archive whose headers carry the original modes, owners, empty directories and symlinks from
+  the archive metadata (`<root>.modes.cpio`); FwAnalyzer reads it in `cpiofs` image mode. SquashFS
+  metadata comes from `unsquashfs -lln`, because `unsquashfs` run unprivileged (as in the sandbox) drops
+  setuid/setgid bits and owners from the files it writes. FwAnalyzer's cpio backend needs a
   root `.` entry and cannot parse names containing whitespace (such entries are left out and counted).
 * **Verified behaviour:** SquashFS image mode preserves setuid/world-writable bits; `Match = true`
   reports *matching* lines; ext2/3/4 image mode panics with stock e2tools (upstream needs a patched
   fork), so ext images use the permission image instead; FwAnalyzer omits empty
   `offenders`/`informational` keys from its JSON report; its `Suid` check reports setuid **and**
   setgid entries as "File is SUID" - the adapter names the real bit from the archive metadata.
-* **Limitation:** other directory-mode runs (zip, ROMFS, NuttX) have no permission data; the built-in
-  scanner checks setuid/world-writable bits from archive metadata.
+* **Limitation:** other directory-mode runs (zips without Unix modes, ROMFS, NuttX) have no permission
+  data; the built-in scanner checks setuid/world-writable bits from archive metadata.
 
 ## cwe_checker
 
