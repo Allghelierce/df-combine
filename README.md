@@ -34,7 +34,11 @@ Nothing is labelled a "confirmed vulnerability". Static-analysis warnings and ve
 never promoted to `detected`. Tools that are missing, not configured, not applicable or failing are
 shown as such on every scan.
 
-![Scan detail](docs/img/scan.png)
+![Scan detail: official PX4 v1.17.0 build, every engine completed](docs/img/scan.png)
+
+![Findings with their basis (static-analysis warning, advisory, version match, direct evidence)](docs/img/findings.png)
+
+![Installed packages with distribution advisories (Debian 11 root filesystem)](docs/img/packages.png)
 
 ## Quick start (development)
 
