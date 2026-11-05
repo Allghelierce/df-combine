@@ -38,7 +38,10 @@ def _kind_from_mode(mode: int) -> str:
     return {0o100000: "file", 0o040000: "dir", 0o120000: "symlink"}.get(fmt, "other")
 
 
-def iter_cpio(fp: BinaryIO, total_size: int, max_entries: int) -> Iterator[Entry]:
+def iter_cpio(fp: BinaryIO, total_size: int, max_entries: int, state: dict | None = None) -> Iterator[Entry]:
+    """Entries of a cpio archive and of archives concatenated to it (after zero padding), as the kernel reads an
+    initramfs; where other data follows the last trailer (e.g. a compressed archive), its offset is put in
+    ``state["trailing_offset"]``."""
     pos = 0
     count = 0
     while pos < total_size:
@@ -78,6 +81,21 @@ def iter_cpio(fp: BinaryIO, total_size: int, max_entries: int) -> Iterator[Entry
         fp.seek(name_off)
         name = fp.read(namesize).split(b"\x00", 1)[0].decode("utf-8", "replace")
         if name == "TRAILER!!!":
+            pos = next_pos
+            fp.seek(pos)
+            while pos < total_size:  # zero padding, then possibly another archive
+                chunk = fp.read(min(64 * 1024, total_size - pos))
+                rest = chunk.lstrip(b"\x00")
+                pos += len(chunk) - len(rest)
+                if rest or not chunk:
+                    break
+            if pos >= total_size:
+                return
+            fp.seek(pos)
+            if fp.read(6) in (b"070701", b"070702", b"070707"):
+                continue
+            if state is not None:
+                state["trailing_offset"] = pos
             return
         kind = _kind_from_mode(mode)
         link = None

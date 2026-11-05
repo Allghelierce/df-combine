@@ -568,12 +568,13 @@ class Extractor:
             trailing = getattr(stream, "trailing_offset", None)
         children = [self._child(art, dest, base, "decoded")]
         if trailing is not None:
-            children += self._trailing_data(art, src, trailing, out)
+            children += self._trailing_data(art, src, trailing, "the compressed data")
         return children
 
-    def _trailing_data(self, art: Artifact, src: Path, off: int, out: Path) -> list[Artifact]:
-        """Data after the last compressed stream: flash padding (0xFF/0x00) is ignored, anything else is
-        analysed as an artifact of its own instead of being dropped (it may be another image)."""
+    def _trailing_data(self, art: Artifact, src: Path, off: int, what: str) -> list[Artifact]:
+        """Data after the last stream or archive: flash padding (0xFF/0x00) is ignored, anything else is
+        analysed as an artifact of its own instead of being dropped (it may be another image). It is written
+        to a directory of its own, so it never appears inside an extracted root filesystem."""
         size = art.size - off
         with src.open("rb") as fp:
             fp.seek(off)
@@ -584,10 +585,12 @@ class Extractor:
                 art.details["trailing_padding_bytes"] = size
                 return []
             name = f"trailing_{off:08x}.bin"
-            dest = out / name
+            tdir = self.root / f"{art.id:05d}_trailing.d"
+            tdir.mkdir()
+            dest = tdir / name
             fp.seek(off)
             self._write_stream(_Bounded(fp, size), dest, label=name)
-        self.result.warnings.append(f"{art.name}: {size} bytes after the compressed data are not padding; "
+        self.result.warnings.append(f"{art.name}: {size} bytes after {what} are not padding; "
                                     f"analysed separately as {name}")
         child = self._child(art, dest, name, "carved")
         child.details["carved_offset"] = hex(off)
@@ -921,12 +924,16 @@ class Extractor:
     def h_cpio(self, art: Artifact) -> list[Artifact]:
         src = self.path_of(art.id)
         out = self._out_dir(art)
+        state: dict = {}
         with src.open("rb") as fp:
-            entries = list(iter_cpio(fp, art.size, self.limits.max_files))
+            entries = list(iter_cpio(fp, art.size, self.limits.max_files, state))
             for e in entries:
                 self._materialize_entry(art, out, fp, e)
         self._record_fs(art, "cpio", out)
-        return self._register_tree(art, out)
+        children = self._register_tree(art, out)
+        if state.get("trailing_offset") is not None:  # e.g. the compressed main archive of an initramfs
+            children += self._trailing_data(art, src, state["trailing_offset"], "the cpio archive")
+        return children
 
     def h_romfs(self, art: Artifact, base: int = 0) -> list[Artifact]:
         src = self.path_of(art.id)

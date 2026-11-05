@@ -713,3 +713,38 @@ def test_zstd_frames_followed_by_padding_or_other_data(tmp_path):
     (tmp_path / "bad.tar.zst").write_bytes(c.compress(raw)[:8] + b"\x00" * 40)
     res = Extractor(tmp_path / "w_bad", Limits()).run(tmp_path / "bad.tar.zst", "bad.tar.zst")
     assert res.artifacts[0].extraction == "failed"
+
+
+def _newc(members: list[tuple[str, bytes, int]]) -> bytes:
+    """A newc cpio archive: (name, data, mode) members and the trailer."""
+    out = bytearray()
+    for ino, (name, data, mode) in enumerate([*members, ("TRAILER!!!", b"", 0)], 1):
+        raw = name.encode() + b"\x00"
+        out += b"070701" + b"".join(b"%08X" % v for v in (ino, mode, 0, 0, 1, 0, len(data), 0, 0, 0, 0, len(raw), 0))
+        out += raw + b"\x00" * (-(110 + len(raw)) % 4) + data + b"\x00" * (-len(data) % 4)
+    return bytes(out + b"\x00" * (-len(out) % 512))
+
+
+def test_cpio_archives_concatenated_like_an_initramfs_are_all_analysed(tmp_path):
+    """The kernel unpacks every archive of an initramfs (e.g. an uncompressed early-microcode cpio followed by the
+    compressed main one); extraction stopped at the first TRAILER!!!, so the root filesystem went unanalysed."""
+    import gzip
+    early = _newc([("kernel/x86/microcode/GenuineIntel.bin", b"ucode", 0o100644)])
+    main = _newc([("etc/passwd", b"root::0:0::/root:/bin/sh\n", 0o100644), ("init", b"#!/bin/sh\n", 0o100755)])
+    cases = {
+        "initrd.img": (early + gzip.compress(main, mtime=0), True),
+        "two.cpio": (early + b"\x00" * 1024 + main, False),
+        "padded.cpio": (early + b"\x00" * 4096, False),
+    }
+    expected = {"initrd.img": {"/kernel/x86/microcode/GenuineIntel.bin", "/etc/passwd", "/init"},
+                "two.cpio": {"/kernel/x86/microcode/GenuineIntel.bin", "/etc/passwd", "/init"},
+                "padded.cpio": {"/kernel/x86/microcode/GenuineIntel.bin"}}
+    for name, (data, trailing) in cases.items():
+        src = tmp_path / name
+        src.write_bytes(data)
+        ex = Extractor(tmp_path / f"w_{name}", Limits())
+        res = ex.run(src, name)
+        assert {a.name for a in res.artifacts if a.origin == "extracted"} == expected[name], (name, res.warnings)
+        assert any(a.name.startswith("trailing_") for a in res.artifacts) == trailing, name
+        fs_roots = [tmp_path / f"w_{name}" / fs["root"] for fs in res.filesystems if fs["type"] == "cpio"]
+        assert fs_roots and not any(p.name.startswith("trailing_") for r in fs_roots for p in r.rglob("*"))
