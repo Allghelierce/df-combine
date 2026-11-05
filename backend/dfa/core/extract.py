@@ -609,9 +609,8 @@ class Extractor:
             c.details["arch_hint"] = info["architecture"]
             children.append(c)
         # Images can be followed by further images (e.g. ESP8266 Arduino builds: eboot, then the app at 0x1000).
-        rest = info["image_size"]
-        while rest < len(data) and data[rest] in (0xFF, 0xAA, 0x00):
-            rest += 1
+        tail = data[info["image_size"]:]
+        rest = info["image_size"] + len(tail) - len(tail.lstrip(b"\xff\xaa\x00"))  # skip flash padding
         rest -= rest % 16
         if len(data) - rest >= 64:
             name = f"trailing@{rest:#x}.bin"
