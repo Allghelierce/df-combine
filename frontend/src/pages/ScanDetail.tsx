@@ -4,7 +4,7 @@ import { RiskGauge, SeverityDonut, StackedBar } from "../components/charts";
 import { FindingsTable } from "../components/FindingsTable";
 import { CopyText, Empty, ErrorBox, Icon, Panel, StatusBadge, usePolling } from "../components/ui";
 import { api, Artifact, ExportKind, EXPORTS, Finding, PackageInventory, PackageItem, Scan, ToolRun, VulnRef } from "../lib/api";
-import { formatBytes, formatDate, formatDuration, toolStatusTone } from "../lib/format";
+import { buildLine, formatBytes, formatDate, formatDuration, imageSummary, toolStatusTone } from "../lib/format";
 
 type Tab = "overview" | "findings" | "inventory" | "components" | "log";
 
@@ -262,6 +262,18 @@ function Overview({ scan }: { scan: Scan }) {
                   </dd>
                 </>
               )}
+              {ident.board_name && (
+                <>
+                  <dt>Board / target</dt>
+                  <dd className="mono">{ident.board_name}</dd>
+                </>
+              )}
+              {buildLine(ident.build) && (
+                <>
+                  <dt>Build</dt>
+                  <dd className="mono small">{buildLine(ident.build)}</dd>
+                </>
+              )}
               <dt>Entropy</dt>
               <dd>{ident.entropy.toFixed(2)} bits/byte</dd>
               <dt>Isolation</dt>
@@ -477,6 +489,8 @@ function Inventory({ data, running }: { data: Awaited<ReturnType<typeof api.arti
                           </span>
                         ) : null}
                       </>
+                    ) : imageSummary(a.image) ? (
+                      <span className="mono small">{imageSummary(a.image)}</span>
                     ) : (
                       "–"
                     )}

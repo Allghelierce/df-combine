@@ -109,6 +109,10 @@ def _bootstrap_admin(settings: Settings) -> None:
             log.warning("no user accounts exist; create one with: python -m dfa.cli create-user <name> --role admin")
 
 
+# raw MCU image facts shown in the inventory (load address, symbols borrowed from the build's ELF)
+IMAGE_KEYS = ("flash_base", "flash_base_source", "derived_from_elf", "symbol_count", "symbols_from", "identical_to")
+
+
 def create_app(settings: Settings | None = None, start_worker: bool | None = None) -> FastAPI:
     settings = settings or get_settings()
     settings.ensure_dirs()
@@ -433,6 +437,11 @@ def create_app(settings: Settings | None = None, start_worker: bool | None = Non
         keep = ("id", "name", "display_path", "size", "sha256", "format", "format_description", "category",
                 "parent_id", "depth", "origin", "mode", "extraction", "extraction_note", "elf")
         items = [{k: a.get(k) for k in keep} for a in arts[offset:offset + limit]]
+        for item, a in zip(items, arts[offset:offset + limit], strict=True):
+            d = a.get("details") if isinstance(a.get("details"), dict) else {}
+            image = {k: d[k] for k in IMAGE_KEYS if isinstance(d.get(k), str | int | bool)}
+            if image:
+                item["image"] = image
         return {"total": len(arts), "items": items, "links": man["extraction"]["links"][:500],
                 "link_count": man["extraction"].get("link_count", 0)}
 

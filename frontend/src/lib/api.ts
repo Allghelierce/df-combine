@@ -88,6 +88,8 @@ export interface Identification {
   platform_candidates: PlatformCandidate[];
   board_id: number | null;
   board_hint: string | null;
+  board_name?: string | null;
+  build?: BuildInfo | null;
   container_metadata: Record<string, unknown>;
   ardupilot_descriptor?: Record<string, string | number> | null;
   details: Record<string, unknown>;
@@ -161,6 +163,23 @@ export interface Scan {
   can_modify?: boolean;
 }
 
+export interface BuildInfo {
+  version?: string;
+  board?: string;
+  revision?: string;
+  date?: string;
+  time?: string;
+}
+
+export interface ImageInfo {
+  flash_base?: string;
+  flash_base_source?: string;
+  derived_from_elf?: boolean;
+  symbol_count?: number;
+  symbols_from?: string;
+  identical_to?: number;
+}
+
 export interface Artifact {
   id: number;
   name: string;
@@ -177,6 +196,7 @@ export interface Artifact {
   extraction: string | null;
   extraction_note: string | null;
   elf?: Record<string, unknown>;
+  image?: ImageInfo;
 }
 
 export interface ToolStatus {

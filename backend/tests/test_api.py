@@ -268,3 +268,14 @@ def test_links_planted_by_a_compromised_sandbox_are_not_followed(client, setting
     assert not (work / "findings.json").is_symlink() and (work / "findings.json").read_text().startswith("[")
     assert list(outside.iterdir()) == []  # no tool directory was created through the link
     assert client.get(f"/api/scans/{s['id']}/artifacts").status_code == 200
+
+
+def test_artifacts_expose_raw_image_facts(client, settings, fixtures):
+    """The inventory shows a raw MCU image's load address (curated keys only, not arbitrary details)."""
+    s = upload(client, fixtures["px4"])
+    process_all(settings)
+    arts = client.get(f"/api/scans/{s['id']}/artifacts").json()["items"]
+    images = [a["image"] for a in arts if a.get("image")]
+    assert images and images[0]["flash_base"].startswith("0x")
+    assert all(set(i) <= {"flash_base", "flash_base_source", "derived_from_elf", "symbol_count", "symbols_from",
+                          "identical_to"} for i in images)

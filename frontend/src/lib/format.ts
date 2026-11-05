@@ -1,4 +1,4 @@
-import type { Finding } from "./api";
+import type { BuildInfo, Finding, ImageInfo } from "./api";
 
 export function formatBytes(n: number | null | undefined): string {
   if (n === null || n === undefined) return "-";
@@ -97,3 +97,23 @@ export const CLASSIFICATION_HELP: Record<string, string> = {
   unverified: "Needs manual verification (version-based match or static-analysis warning).",
   info: "Informational context.",
 };
+
+export function buildLine(b: BuildInfo | null | undefined): string | null {
+  if (!b) return null;
+  const parts = [b.revision ? `git ${b.revision}` : null, b.date ?? null, b.time ?? null].filter(Boolean);
+  return parts.length ? parts.join(" · ") : null;
+}
+
+export function imageSummary(i: ImageInfo | null | undefined): string | null {
+  if (!i || !i.flash_base) return null;
+  const parts = [`load address ${i.flash_base}`];
+  if (i.symbol_count) {
+    parts.push(
+      i.derived_from_elf
+        ? `${i.symbol_count.toLocaleString("en-US")} function symbols (derived from the ELF)`
+        : `${i.symbol_count.toLocaleString("en-US")} function symbols from ${i.symbols_from || "the build's ELF"}`,
+    );
+  }
+  if (i.identical_to !== undefined && i.identical_to !== null) parts.push(`identical to artifact #${i.identical_to}`);
+  return parts.join(" · ");
+}
