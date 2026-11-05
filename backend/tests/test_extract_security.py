@@ -748,3 +748,34 @@ def test_cpio_archives_concatenated_like_an_initramfs_are_all_analysed(tmp_path)
         assert any(a.name.startswith("trailing_") for a in res.artifacts) == trailing, name
         fs_roots = [tmp_path / f"w_{name}" / fs["root"] for fs in res.filesystems if fs["type"] == "cpio"]
         assert fs_roots and not any(p.name.startswith("trailing_") for r in fs_roots for p in r.rglob("*"))
+
+
+def test_root_filesystem_after_a_uimage_kernel_is_analysed(tmp_path):
+    """Sysupgrade-style images put the root filesystem after the kernel uImage, on the next erase block; only
+    the declared uImage payload was extracted, so the root filesystem went unanalysed."""
+    import gzip
+    import struct
+    import subprocess
+    import zlib
+    if not shutil.which("mksquashfs"):
+        pytest.skip("mksquashfs unavailable")
+    tree = tmp_path / "rootfs"
+    (tree / "etc").mkdir(parents=True)
+    (tree / "etc" / "passwd").write_text("root::0:0::/root:/bin/ash\n")
+    sqfs = tmp_path / "root.squashfs"
+    subprocess.run(["mksquashfs", str(tree), str(sqfs), "-noappend", "-quiet"], check=True, capture_output=True)
+    payload = gzip.compress(b"Linux version 5.4.0\x00" * 200, mtime=0)
+    hdr = bytearray(struct.pack(">IIIIIIIBBBB32s", 0x27051956, 0, 0, len(payload), 0x80008000, 0x80008000,
+                                zlib.crc32(payload), 5, 2, 2, 1, b"Linux-5.4.0"))
+    struct.pack_into(">I", hdr, 4, zlib.crc32(bytes(hdr)))
+    kernel = bytes(hdr) + payload
+    img = tmp_path / "sysupgrade.bin"
+    img.write_bytes(kernel + b"\xff" * (-len(kernel) % 65536) + sqfs.read_bytes())
+    res = Extractor(tmp_path / "w", Limits()).run(img, img.name)
+    rootfs = [a for a in res.artifacts if a.format == "squashfs"]
+    assert rootfs and rootfs[0].details["carved_offset"] == "0x10000"  # starts after the 0xFF padding
+    assert "/etc/passwd" in {a.name for a in res.artifacts if a.origin == "extracted"}
+    plain = tmp_path / "kernel-only.bin"
+    plain.write_bytes(kernel + b"\xff" * 4096)  # padding only: nothing extra
+    res = Extractor(tmp_path / "w2", Limits()).run(plain, plain.name)
+    assert not any(a.name.startswith("trailing_") for a in res.artifacts)

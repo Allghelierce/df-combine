@@ -575,15 +575,20 @@ class Extractor:
         """Data after the last stream or archive: flash padding (0xFF/0x00) is ignored, anything else is
         analysed as an artifact of its own instead of being dropped (it may be another image). It is written
         to a directory of its own, so it never appears inside an extracted root filesystem."""
-        size = art.size - off
         with src.open("rb") as fp:
             fp.seek(off)
+            pos, start = off, None
             while chunk := fp.read(COPY_CHUNK):
+                if start is None and (rest := chunk.lstrip(b"\xff")):
+                    start = pos + len(chunk) - len(rest)  # after 0xFF padding (zeros may be data: ext boot block)
                 if chunk.translate(None, b"\x00\xff"):
                     break
+                pos += len(chunk)
             else:
-                art.details["trailing_padding_bytes"] = size
+                art.details["trailing_padding_bytes"] = art.size - off
                 return []
+            off = start if start is not None else off
+            size = art.size - off
             name = f"trailing_{off:08x}.bin"
             tdir = self.root / f"{art.id:05d}_trailing.d"
             tdir.mkdir()
@@ -919,7 +924,10 @@ class Extractor:
             ext = {"gzip": ".gz", "bzip2": ".bz2", "lzma": ".lzma"}.get(hdr["compression"], ".bin")
             dest = out / f"payload{ext}"
             self._write_stream(_Bounded(fp, size), dest, label="uImage payload")
-        return [self._child(art, dest, f"payload{ext}", "decoded")]
+        children = [self._child(art, dest, f"payload{ext}", "decoded")]
+        if 64 + size < art.size:  # e.g. the root filesystem after the kernel in a sysupgrade-style image
+            children += self._trailing_data(art, src, 64 + size, "the uImage payload")
+        return children
 
     def h_cpio(self, art: Artifact) -> list[Artifact]:
         src = self.path_of(art.id)
