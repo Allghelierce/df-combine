@@ -186,6 +186,10 @@ def run(input_path: Path, original_name: str, work: Path, limits: Limits,
     root = arts[0]
     arch, bits, endian, os_hint = _primary_arch(arts, ctx)
     primary = platforms[0] if platforms else None
+    if os_hint is None and primary and primary.family == "companion-linux":
+        # A Linux userland was identified from its files (kernel version string, BusyBox, init scripts)
+        # even though no Linux ELF could be parsed, e.g. binaries that are stripped of headers or missing.
+        os_hint = "linux"
     board_id = container_meta.get("board_id")
     if board_id is None and ap_desc and "board_id" in ap_desc:
         board_id = ap_desc["board_id"]

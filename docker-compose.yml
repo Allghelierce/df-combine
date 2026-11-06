@@ -28,7 +28,7 @@ services:
       DFA_SANDBOX_MODE: docker
       DFA_SANDBOX_HOST_DATA_DIR: ${PWD}/var
       DFA_API_KEY: ${DFA_API_KEY:-}
-      DFA_FACT_URL: ${DFA_FACT_URL:-}
+      DFA_CWE_CHECKER_IMAGE: ${DFA_CWE_CHECKER_IMAGE:-ghcr.io/fkie-cad/cwe_checker:stable}  # Tools page status
     volumes:
       - ./var:/data
       - /var/run/docker.sock:/var/run/docker.sock
@@ -43,7 +43,6 @@ services:
       DFA_SANDBOX_MODE: docker
       DFA_SANDBOX_HOST_DATA_DIR: ${PWD}/var
       DFA_WORKER_THREADS: ${DFA_WORKER_THREADS:-2}
-      DFA_FACT_URL: ${DFA_FACT_URL:-}
       DFA_CWE_CHECKER_IMAGE: ${DFA_CWE_CHECKER_IMAGE:-ghcr.io/fkie-cad/cwe_checker:stable}
     volumes:
       - ./var:/data

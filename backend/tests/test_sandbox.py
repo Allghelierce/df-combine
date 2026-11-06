@@ -19,6 +19,23 @@ def test_local_mode_memory_limit_enforced(settings, fixtures, tmp_path):
         run_analysis(fixtures["px4"], "fw.px4", tmp_path / "w", settings)
 
 
+def test_memory_watchdog_kills_running_analysis(settings, fixtures, tmp_path, monkeypatch):
+    """Where RLIMIT_AS is unusable (macOS), a child above the limit is killed while it runs."""
+    from dfa import sandbox
+    monkeypatch.setattr(sandbox, "ADDRESS_SPACE_LIMIT", False)
+    monkeypatch.setattr(sandbox, "_rss_bytes", lambda pid: 10**12)
+    with pytest.raises(SandboxError, match="exceeded its memory limit"):
+        run_analysis(fixtures["px4"], "fw.px4", tmp_path / "w", settings)
+
+
+def test_rss_reader():
+    import os
+
+    from dfa.sandbox import _rss_bytes
+    assert _rss_bytes(os.getpid()) > 1024 * 1024
+    assert _rss_bytes(2**22 + 12345) == 0  # no such process
+
+
 def test_docker_required_but_missing(settings):
     settings.sandbox_mode = "docker"
     settings.sandbox_image = "dfa-test/does-not-exist:0"

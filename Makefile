@@ -1,7 +1,7 @@
 VENV ?= .venv
 PY := $(VENV)/bin/python
 
-.PHONY: install backend-install frontend-install sandbox-image fixtures test backend-test frontend-test lint dev-api dev-ui build run
+.PHONY: install backend-install frontend-install sandbox-image fixtures cve-db test backend-test frontend-test lint dev-api dev-ui build run
 
 install: backend-install frontend-install
 
@@ -17,6 +17,11 @@ sandbox-image:
 
 fixtures:
 	$(PY) scripts/generate_fixtures.py
+
+# Download NVD (fkie-cad mirror), CISA KEV and Exploit-DB and build backend/var/cve.db (~400 MB).
+# Re-run to refresh; a failed update keeps the previous database.
+cve-db:
+	cd backend && ../$(PY) -m dfa.cve update
 
 test: backend-test frontend-test
 

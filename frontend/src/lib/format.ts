@@ -1,3 +1,29 @@
+import { SEVERITIES, Severity } from "./api";
+
+export type SeverityCountMap = Partial<Record<Severity, number>> | null | undefined;
+
+/** Non-zero severities, most severe first. */
+export function severityParts(counts: SeverityCountMap): { severity: Severity; n: number }[] {
+  return SEVERITIES.map((severity) => ({ severity, n: counts?.[severity] ?? 0 })).filter((p) => p.n > 0);
+}
+
+/** "23 findings: 3 critical, 6 high, 10 medium, 4 low" */
+export function findingsSummary(counts: SeverityCountMap): string {
+  const parts = severityParts(counts);
+  const total = parts.reduce((a, p) => a + p.n, 0);
+  if (!total) return "No findings";
+  return `${total} finding${total === 1 ? "" : "s"}: ${parts.map((p) => `${p.n} ${p.severity}`).join(", ")}`;
+}
+
+/** "1 link", "3 links" */
+export function plural(n: number, one: string, many = `${one}s`): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+export function capitalize(s: string): string {
+  return s ? s[0].toUpperCase() + s.slice(1) : s;
+}
+
 export function formatBytes(n: number | null | undefined): string {
   if (n === null || n === undefined) return "-";
   if (n < 1024) return `${n} B`;

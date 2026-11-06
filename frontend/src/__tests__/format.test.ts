@@ -1,4 +1,4 @@
-import { formatBytes, formatDuration, riskLabel, shortHash, toolStatusTone } from "../lib/format";
+import { formatBytes, formatDuration, plural, riskLabel, shortHash, toolStatusTone } from "../lib/format";
 
 describe("format helpers", () => {
   it("formats bytes", () => {
@@ -21,5 +21,16 @@ describe("format helpers", () => {
   it("shortens hashes and durations", () => {
     expect(shortHash("abcdef0123456789", 6)).toBe("abcdef…");
     expect(formatDuration("2026-01-01T00:00:00Z", "2026-01-01T00:01:05Z")).toBe("1m 5s");
+  });
+});
+
+describe("plural", () => {
+  it("uses the singular only for exactly one", () => {
+    expect(plural(1, "link")).toBe("1 link");
+    expect(plural(0, "link")).toBe("0 links");
+    expect(plural(3, "link")).toBe("3 links");
+  });
+  it("accepts an irregular plural", () => {
+    expect(plural(2, "filesystem or container", "filesystems or containers")).toBe("2 filesystems or containers");
   });
 });

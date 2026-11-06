@@ -14,7 +14,7 @@ classification:
                   password assignment).  May be a false positive.
     unverified  - a claim that needs manual verification, typically a
                   version-based "known vulnerable" match (distro backports are
-                  possible) or a static-analysis warning from cwe_checker/FACT.
+                  possible) or a static-analysis warning from cwe_checker.
     info        - inventory / context, not a weakness on its own.
 """
 from __future__ import annotations

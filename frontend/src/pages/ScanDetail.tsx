@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { RiskGauge, SeverityDonut, StackedBar } from "../components/charts";
+import { cveDetails, CveTable } from "../components/CveTable";
 import { FindingsTable } from "../components/FindingsTable";
-import { CopyText, Empty, ErrorBox, Icon, Panel, StatusBadge, usePolling } from "../components/ui";
+import { CopyText, Empty, ErrorBox, Section, StatusBadge, usePolling } from "../components/ui";
 import { api, Artifact, Finding, Scan, ToolRun } from "../lib/api";
-import { formatBytes, formatDate, formatDuration, toolStatusTone } from "../lib/format";
+import { capitalize, findingsSummary, formatBytes, formatDate, formatDuration, plural, riskLabel, toolStatusTone } from "../lib/format";
 
-type Tab = "overview" | "findings" | "inventory" | "components" | "log";
+type Tab = "findings" | "vulns" | "details" | "inventory" | "components" | "log";
 
 interface Step {
   key: string;
@@ -25,7 +25,7 @@ export function pipelineSteps(scan: Scan): Step[] {
     { key: "upload", label: "Upload", state: "done" },
     {
       key: "sandbox",
-      label: "Isolated extraction & built-in scan",
+      label: "Built-in checks",
       state: sandboxDone
         ? builtin.some((r) => r.status === "failed")
           ? "failed"
@@ -38,9 +38,9 @@ export function pipelineSteps(scan: Scan): Step[] {
     },
   ];
   for (const [tool, label] of [
+    ["cve_lookup", "CVE lookup"],
     ["fwanalyzer", "FwAnalyzer"],
     ["cwe_checker", "cwe_checker"],
-    ["fact", "FACT"],
   ] as const) {
     const r = byTool(tool);
     let state: Step["state"] = "pending";
@@ -57,13 +57,22 @@ export function pipelineSteps(scan: Scan): Step[] {
   return steps;
 }
 
+const STEP_WORD: Record<Step["state"], string> = {
+  done: "done",
+  active: "running",
+  pending: "waiting",
+  failed: "failed",
+  skipped: "skipped",
+  unavailable: "unavailable",
+};
+
 export default function ScanDetail() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
   const [scan, setScan] = useState<Scan | null>(null);
   const [findings, setFindings] = useState<Finding[] | null>(null);
   const [artifacts, setArtifacts] = useState<Awaited<ReturnType<typeof api.artifacts>> | null>(null);
-  const [tab, setTab] = useState<Tab>("overview");
+  const [tab, setTab] = useState<Tab>("findings");
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -115,75 +124,81 @@ export default function ScanDetail() {
     return (
       <div className="page">
         <ErrorBox error={error} />
-        {!error && <div className="empty">Loading scan…</div>}
+        {!error && <Empty>Loading scan…</Empty>}
       </div>
     );
   }
 
   const ident = scan.identification;
-  const steps = pipelineSteps(scan);
+  const tools = pipelineSteps(scan).filter((s) => s.key !== "upload" && s.key !== "report");
+  const cveRun = scan.tool_runs?.find((r) => r.tool === "cve_lookup");
+  const cve = cveDetails(cveRun);
+  const lastEvent = scan.events?.length ? scan.events[scan.events.length - 1].message : "Waiting for a worker";
   return (
     <div className="page">
+      <div className="crumbs">
+        <Link to="/scans">Scans</Link> / <span className="mono">{scan.id.slice(0, 8)}</span>
+      </div>
       <header className="page-head">
-        <div className="title-block">
-          <div className="crumbs">
-            <Link to="/scans">Scan history</Link> / <span className="mono">{scan.id.slice(0, 8)}</span>
-          </div>
+        <div>
           <h1 className="break">{scan.original_filename}</h1>
-          <div className="head-meta">
-            <StatusBadge status={scan.status} />
-            <span className="muted">{formatBytes(scan.size)}</span>
-            <CopyText text={scan.sha256} display={`sha256 ${scan.sha256.slice(0, 20)}…`} />
-            <span className="muted small">uploaded {formatDate(scan.created_at)}</span>
-            {scan.finished_at && <span className="muted small">took {formatDuration(scan.started_at, scan.finished_at)}</span>}
-          </div>
+          <p className="meta">
+            <StatusBadge status={scan.status} />, {formatBytes(scan.size)}, uploaded {formatDate(scan.created_at)}
+            {scan.finished_at && `, took ${formatDuration(scan.started_at, scan.finished_at)}`}
+          </p>
         </div>
-        <div className="head-actions">
-          <button className="btn" disabled={scan.status !== "completed" || !!busy} onClick={() => act("pdf")}>
+        <div className="actions">
+          <button className="btn primary" disabled={scan.status !== "completed" || !!busy} onClick={() => act("pdf")}>
             {busy === "pdf" ? "Generating…" : "Export PDF"}
           </button>
-          <button className="btn ghost" disabled={!!busy || running} onClick={() => act("json")}>
+          <button className="btn" disabled={!!busy || running} onClick={() => act("json")}>
             Export JSON
           </button>
-          <button className="btn ghost" disabled={running || !!busy} onClick={() => act("rescan")}>
+          <button className="btn" disabled={running || !!busy} onClick={() => act("rescan")}>
             Re-scan
           </button>
-          <button className="btn danger ghost" disabled={scan.status === "running" || !!busy} onClick={() => act("delete")}>
+          <button className="btn danger" disabled={scan.status === "running" || !!busy} onClick={() => act("delete")}>
             Delete
           </button>
         </div>
       </header>
       <ErrorBox error={error} />
 
-      <Panel className="pipeline-panel">
-        <ol className="pipeline" aria-label="Scan pipeline">
-          {steps.map((s) => (
-            <li key={s.key} className={`step ${s.state}`} title={s.note}>
-              <span className="step-dot" />
-              <span className="step-label">{s.label}</span>
-              <span className="step-state">{s.state}</span>
+      <div className="scan-summary">
+        {scan.status === "completed" && <p className="summary">{findingsSummary(scan.severity_counts)}</p>}
+        {ident && (
+          <p>
+            {ident.platform}, {ident.format_description}
+            {ident.architecture ? `, ${ident.architecture}` : ""}
+          </p>
+        )}
+        <ul className="tool-line" aria-label="Analysis tools">
+          {tools.map((s) => (
+            <li key={s.key} title={s.note}>
+              {s.label}: <span className={`state-${s.state}`}>{STEP_WORD[s.state]}</span>
             </li>
           ))}
-        </ol>
+        </ul>
         {running && (
           <div className="live">
-            <div className="progress">
+            <div className="progress" role="progressbar" aria-valuenow={scan.progress} aria-valuemin={0} aria-valuemax={100}>
               <span style={{ width: `${Math.max(scan.progress, 3)}%` }} />
             </div>
-            <div className="mono small muted">
-              {scan.progress}% · {scan.stage} · {scan.events?.length ? scan.events[scan.events.length - 1].message : "waiting for worker"}
-            </div>
+            <p className="muted">
+              {scan.progress}%: {lastEvent}
+            </p>
           </div>
         )}
         {scan.status === "failed" && <div className="error-box">Scan failed: {scan.error}</div>}
-      </Panel>
+      </div>
 
       <div className="tabs" role="tablist">
         {(
           [
-            ["overview", "Overview"],
             ["findings", `Findings${findings ? ` (${findings.length})` : ""}`],
-            ["inventory", `Inventory${artifacts ? ` (${artifacts.total})` : ""}`],
+            ["vulns", `Vulnerabilities${cve ? ` (${cve.totals.cves})` : ""}`],
+            ["details", "Details"],
+            ["inventory", `Files${artifacts ? ` (${artifacts.total})` : ""}`],
             ["components", `Components (${scan.components?.length ?? 0})`],
             ["log", "Activity log"],
           ] as [Tab, string][]
@@ -194,44 +209,41 @@ export default function ScanDetail() {
         ))}
       </div>
 
-      {tab === "overview" && <Overview scan={scan} />}
-      {tab === "findings" &&
-        (findings ? <Panel><FindingsTable findings={findings} /></Panel> : <Empty>{running ? "Findings appear when the scan completes." : "Loading…"}</Empty>)}
+      {tab === "findings" && (findings ? <FindingsTable findings={findings} /> : <Empty>{running ? "Findings appear when the scan completes." : "Loading…"}</Empty>)}
+      {tab === "vulns" && <CveTable run={cveRun} running={running} />}
+      {tab === "details" && <Details scan={scan} />}
       {tab === "inventory" && <Inventory data={artifacts} running={running} />}
       {tab === "components" && <Components scan={scan} />}
       {tab === "log" && <ActivityLog scan={scan} />}
-      {!ident && !running && scan.status !== "failed" && <Empty>No identification data.</Empty>}
     </div>
   );
 }
 
-function Overview({ scan }: { scan: Scan }) {
+function Details({ scan }: { scan: Scan }) {
   const ident = scan.identification;
-  const cls = scan.classification_counts;
   const ex = scan.extraction_summary;
+  const risk = riskLabel(scan.risk_score);
   return (
-    <div className="grid-3">
-      <Panel title="Firmware identification" className="span-2">
+    <>
+      <Section title="Firmware">
+        <CopyText text={scan.sha256} display={`SHA-256 ${scan.sha256}`} />
         {ident ? (
-          <div className="ident">
-            <div className="ident-hero">
-              <div className="platform">
-                {Icon.chip}
-                <span className="platform-name">{ident.platform}</span>
-                {ident.platform_confidence && <span className={`pill conf-${ident.platform_confidence}`}>{ident.platform_confidence} confidence</span>}
-              </div>
-              <div className="muted small">{ident.platform_family}</div>
-            </div>
-            <dl className="kv two-col">
+          <>
+            <dl className="kv">
+              <dt>Platform</dt>
+              <dd>
+                {ident.platform}
+                {ident.platform_confidence && <span className="muted"> ({ident.platform_confidence} confidence)</span>}
+              </dd>
               <dt>Format</dt>
               <dd>{ident.format_description}</dd>
               <dt>Architecture</dt>
               <dd>
-                {ident.architecture ?? "unknown"}
-                {ident.bits ? ` · ${ident.bits}-bit` : ""}
-                {ident.endianness ? ` · ${ident.endianness}-endian` : ""}
+                {[ident.architecture ?? "unknown", ident.bits ? `${ident.bits}-bit` : null, ident.endianness ? `${ident.endianness}-endian` : null]
+                  .filter(Boolean)
+                  .join(", ")}
               </dd>
-              <dt>OS / runtime</dt>
+              <dt>OS</dt>
               <dd>{ident.os_hint ?? "unknown"}</dd>
               <dt>Version</dt>
               <dd className="mono">{ident.platform_version ?? "–"}</dd>
@@ -246,116 +258,59 @@ function Overview({ scan }: { scan: Scan }) {
                   <dt>Board ID</dt>
                   <dd>
                     {ident.board_id}
-                    {ident.board_hint ? ` — ${ident.board_hint}` : ""}
+                    {ident.board_hint ? ` (${ident.board_hint})` : ""}
                   </dd>
                 </>
               )}
               <dt>Entropy</dt>
-              <dd>{ident.entropy.toFixed(2)} bits/byte</dd>
+              <dd>{ident.entropy.toFixed(2)} bits per byte</dd>
               <dt>Isolation</dt>
-              <dd className="small">{ex?.isolation_detail ?? scan.isolation ?? "–"}</dd>
+              <dd>{ex?.isolation_detail ?? scan.isolation ?? "–"}</dd>
+              <dt>Risk score</dt>
+              <dd>
+                {scan.risk_score ?? "–"}
+                {scan.risk_score !== null && ` of 100, ${risk.label.toLowerCase()}`}
+                <span className="muted"> (a heuristic from severity and evidence, not a probability)</span>
+              </dd>
             </dl>
             {ident.platform_candidates.length > 0 && (
-              <details className="candidates">
-                <summary>Platform evidence ({ident.platform_candidates.length} candidate(s))</summary>
+              <details>
+                <summary>Why this platform ({plural(ident.platform_candidates.length, "candidate")})</summary>
                 <ul>
                   {ident.platform_candidates.map((c) => (
                     <li key={c.name}>
-                      <b>{c.name}</b> <span className="muted">score {c.score}, {c.confidence}</span>
-                      <div className="mono small muted">{c.evidence.join(" · ")}</div>
+                      {c.name} <span className="muted">(score {c.score}, {c.confidence})</span>
+                      <div className="mono muted">{c.evidence.join("; ")}</div>
                     </li>
                   ))}
                 </ul>
               </details>
             )}
-            {ident.ardupilot_descriptor && (
-              <details className="candidates">
-                <summary>ArduPilot app descriptor</summary>
-                <dl className="kv two-col mono small">
-                  {Object.entries(ident.ardupilot_descriptor).map(([k, v]) => (
-                    <div key={k} className="kv-row">
-                      <dt>{k}</dt>
-                      <dd>{String(v)}</dd>
-                    </div>
-                  ))}
-                </dl>
-              </details>
-            )}
-            {Object.keys(ident.container_metadata ?? {}).length > 0 && (
-              <details className="candidates">
-                <summary>Container metadata</summary>
-                <dl className="kv two-col mono small">
-                  {Object.entries(ident.container_metadata).map(([k, v]) => (
-                    <div key={k} className="kv-row">
-                      <dt>{k}</dt>
-                      <dd>{String(v)}</dd>
-                    </div>
-                  ))}
-                </dl>
-              </details>
-            )}
-          </div>
+            {ident.ardupilot_descriptor && <KeyValues summary="ArduPilot app descriptor" data={ident.ardupilot_descriptor} />}
+            {Object.keys(ident.container_metadata ?? {}).length > 0 && <KeyValues summary="Container metadata" data={ident.container_metadata} />}
+          </>
         ) : (
-          <Empty>Identification is available once isolated analysis finishes.</Empty>
+          <Empty>Identification is available once the built-in checks finish.</Empty>
         )}
-      </Panel>
-      <Panel title="Risk">
-        <RiskGauge score={scan.risk_score} />
-        <p className="muted small center">Heuristic summary of severity × evidence class. Not a probability of compromise.</p>
-      </Panel>
-      <Panel title="Severity breakdown">
-        <SeverityDonut counts={scan.severity_counts ?? {}} />
-      </Panel>
-      <Panel title="Evidence class">
-        <StackedBar
-          items={[
-            { key: "detected", label: "detected", value: cls?.detected ?? 0, color: "var(--cls-detected)" },
-            { key: "suspicious", label: "suspicious", value: cls?.suspicious ?? 0, color: "var(--cls-suspicious)" },
-            { key: "unverified", label: "unverified", value: cls?.unverified ?? 0, color: "var(--cls-unverified)" },
-            { key: "info", label: "info", value: cls?.info ?? 0, color: "var(--cls-info)" },
-          ]}
-        />
-        <ul className="cls-help small muted">
-          <li>
-            <b>detected</b> — concrete evidence present; exploitability not verified
-          </li>
-          <li>
-            <b>suspicious</b> — heuristic match, may be a false positive
-          </li>
-          <li>
-            <b>unverified</b> — version-based or static-analysis warning
-          </li>
-        </ul>
-      </Panel>
-      <Panel title="Extraction">
+      </Section>
+
+      <Section title="Extraction">
         {ex ? (
           <>
-            <div className="stats compact">
-              <div>
-                <b>{ex.artifact_count}</b>
-                <span className="muted small">artifacts</span>
-              </div>
-              <div>
-                <b>{ex.filesystems.length}</b>
-                <span className="muted small">containers / FS</span>
-              </div>
-              <div>
-                <b>{ex.link_count}</b>
-                <span className="muted small">links (not followed)</span>
-              </div>
-            </div>
-            <div className="tags">
-              {Object.entries(ex.categories).map(([k, v]) => (
-                <span className="tag" key={k}>
-                  {k.replace("_", " ")} <b>{v}</b>
-                </span>
-              ))}
-            </div>
-            {ex.limits_hit.length > 0 && <div className="warn-box small">Limits reached: {ex.limits_hit.join("; ")}</div>}
+            <p>
+              {plural(ex.artifact_count, "file")} extracted from {plural(ex.filesystems.length, "container or filesystem", "containers or filesystems")}.{" "}
+              {ex.link_count > 0 && `${plural(ex.link_count, "link")} recorded but not followed.`}
+            </p>
+            <p className="muted">
+              {Object.entries(ex.categories)
+                .map(([k, v]) => `${k.replace("_", " ")}: ${v}`)
+                .join(", ")}
+            </p>
+            {ex.limits_hit.length > 0 && <div className="warn-box">Limits reached: {ex.limits_hit.join("; ")}</div>}
             {ex.warnings.length > 0 && (
               <details>
-                <summary className="small">{ex.warnings.length} extraction warning(s)</summary>
-                <ul className="mono small warn-list">
+                <summary>{plural(ex.warnings.length, "extraction warning")}</summary>
+                <ul className="mono">
                   {ex.warnings.map((w, i) => (
                     <li key={i}>{w}</li>
                   ))}
@@ -366,11 +321,28 @@ function Overview({ scan }: { scan: Scan }) {
         ) : (
           <Empty>Pending.</Empty>
         )}
-      </Panel>
-      <Panel title="Analysis engines" className="span-3">
+      </Section>
+
+      <Section title="Tool runs">
         <ToolRuns runs={scan.tool_runs ?? []} />
-      </Panel>
-    </div>
+      </Section>
+    </>
+  );
+}
+
+function KeyValues({ summary, data }: { summary: string; data: Record<string, unknown> }) {
+  return (
+    <details>
+      <summary>{summary}</summary>
+      <dl className="kv mono">
+        {Object.entries(data).map(([k, v]) => (
+          <div key={k} className="kv-row">
+            <dt>{k}</dt>
+            <dd>{String(v)}</dd>
+          </div>
+        ))}
+      </dl>
+    </details>
   );
 }
 
@@ -380,23 +352,21 @@ function ToolRuns({ runs }: { runs: ToolRun[] }) {
     <table className="table">
       <thead>
         <tr>
-          <th>Engine</th>
+          <th>Tool</th>
           <th>Status</th>
-          <th>Findings</th>
-          <th>Duration</th>
+          <th className="num">Findings</th>
+          <th className="num">Time</th>
           <th>Details</th>
         </tr>
       </thead>
       <tbody>
         {runs.map((r, i) => (
           <tr key={i}>
-            <td className="strong">{r.display_name}</td>
-            <td>
-              <span className={`pill ${toolStatusTone(r.status)}`}>{r.status}</span>
-            </td>
-            <td>{r.findings_count}</td>
-            <td className="mono small">{r.duration_s !== null ? `${r.duration_s.toFixed(1)}s` : "–"}</td>
-            <td className="small tool-msg">{r.message}</td>
+            <td className="nowrap">{r.display_name}</td>
+            <td className={`tone-${toolStatusTone(r.status)}`}>{capitalize(r.status)}</td>
+            <td className="num">{r.findings_count}</td>
+            <td className="num">{r.duration_s !== null ? `${r.duration_s.toFixed(1)}s` : "–"}</td>
+            <td className="muted">{r.message}</td>
           </tr>
         ))}
       </tbody>
@@ -408,33 +378,36 @@ function Inventory({ data, running }: { data: Awaited<ReturnType<typeof api.arti
   const [cat, setCat] = useState("");
   const [q, setQ] = useState("");
   const cats = useMemo(() => Array.from(new Set((data?.items ?? []).map((a) => a.category))).sort(), [data]);
-  if (!data) return <Empty>{running ? "Inventory appears when extraction completes." : "Loading…"}</Empty>;
+  if (!data) return <Empty>{running ? "The file list appears when extraction completes." : "Loading…"}</Empty>;
   const items = data.items.filter((a: Artifact) => (!cat || a.category === cat) && (!q || a.display_path.toLowerCase().includes(q.toLowerCase())));
   return (
-    <Panel>
-      <div className="filter-row">
-        <select value={cat} onChange={(e) => setCat(e.target.value)} aria-label="Filter by category">
-          <option value="">All categories</option>
-          {cats.map((c) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
-          ))}
-        </select>
-        <input type="search" placeholder="Filter path…" value={q} onChange={(e) => setQ(e.target.value)} />
-        <span className="muted small">
-          {items.length} / {data.total}
+    <>
+      <div className="filters">
+        <span className="filter">
+          <label htmlFor="inv-cat">Category</label>
+          <select id="inv-cat" value={cat} onChange={(e) => setCat(e.target.value)}>
+            <option value="">All</option>
+            {cats.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+        </span>
+        <input type="search" placeholder="Filter by path" aria-label="Filter by path" value={q} onChange={(e) => setQ(e.target.value)} />
+        <span className="muted count">
+          {items.length} of {data.total}
         </span>
       </div>
       <div className="table-scroll">
-        <table className="table inventory">
+        <table className="table">
           <thead>
             <tr>
               <th>Path</th>
               <th>Category</th>
               <th>Format</th>
-              <th>Size</th>
-              <th>Arch / hardening</th>
+              <th className="num">Size</th>
+              <th>Architecture and hardening</th>
               <th>Mode</th>
             </tr>
           </thead>
@@ -443,33 +416,31 @@ function Inventory({ data, running }: { data: Awaited<ReturnType<typeof api.arti
               const elf = a.elf as Record<string, string | boolean | null> | undefined;
               return (
                 <tr key={a.id}>
-                  <td className="mono small path" style={{ paddingLeft: `${8 + a.depth * 12}px` }} title={a.display_path}>
+                  <td className="mono path" style={{ paddingLeft: `${8 + a.depth * 14}px` }} title={a.display_path}>
                     {a.name}
-                    {a.extraction && a.extraction !== "ok" && <span className={`pill ${a.extraction === "failed" ? "bad" : "warn"}`}>{a.extraction}</span>}
+                    {a.extraction && a.extraction !== "ok" && <span className={a.extraction === "failed" ? "tone-bad" : "tone-warn"}> ({a.extraction})</span>}
                   </td>
+                  <td>{a.category}</td>
+                  <td>{a.format_description}</td>
+                  <td className="num nowrap">{formatBytes(a.size)}</td>
                   <td>
-                    <span className="tag">{a.category}</span>
-                  </td>
-                  <td className="small">{a.format_description}</td>
-                  <td className="mono small">{formatBytes(a.size)}</td>
-                  <td className="small">
                     {elf ? (
                       <>
                         {String(elf.arch)}
                         {elf.os_hint === "linux" && elf.interpreter ? (
                           <span className="hardening">
-                            <span className={elf.nx ? "ok" : "bad"}>NX</span>
-                            <span className={elf.pie ? "ok" : "bad"}>PIE</span>
-                            <span className={elf.relro === "full" ? "ok" : elf.relro === "partial" ? "warn" : "bad"}>RELRO</span>
-                            <span className={elf.canary ? "ok" : "bad"}>Canary</span>
+                            <span className={elf.nx ? "tone-ok" : "tone-bad"}>NX</span>
+                            <span className={elf.pie ? "tone-ok" : "tone-bad"}>PIE</span>
+                            <span className={elf.relro === "full" ? "tone-ok" : elf.relro === "partial" ? "tone-warn" : "tone-bad"}>RELRO</span>
+                            <span className={elf.canary ? "tone-ok" : "tone-bad"}>Canary</span>
                           </span>
                         ) : null}
                       </>
                     ) : (
-                      "–"
+                      <span className="muted">–</span>
                     )}
                   </td>
-                  <td className="mono small">{a.mode !== null && a.mode !== undefined ? a.mode.toString(8).padStart(4, "0") : "–"}</td>
+                  <td className="mono">{a.mode !== null && a.mode !== undefined ? a.mode.toString(8).padStart(4, "0") : "–"}</td>
                 </tr>
               );
             })}
@@ -478,10 +449,8 @@ function Inventory({ data, running }: { data: Awaited<ReturnType<typeof api.arti
       </div>
       {data.link_count > 0 && (
         <details>
-          <summary className="small">
-            {data.link_count} symlink/hardlink/device entries recorded but not materialised (traversal protection)
-          </summary>
-          <ul className="mono small warn-list">
+          <summary>{data.link_count} symlinks, hardlinks or device entries were recorded but not created (path traversal protection)</summary>
+          <ul className="mono">
             {data.links.slice(0, 200).map((l, i) => (
               <li key={i}>
                 [{l.kind}] {l.path}
@@ -491,7 +460,7 @@ function Inventory({ data, running }: { data: Awaited<ReturnType<typeof api.arti
           </ul>
         </details>
       )}
-    </Panel>
+    </>
   );
 }
 
@@ -499,7 +468,8 @@ function Components({ scan }: { scan: Scan }) {
   const comps = scan.components ?? [];
   if (!comps.length) return <Empty>No software components with recognisable version strings were found.</Empty>;
   return (
-    <Panel title="Software components" actions={<span className="muted small">Identified from version strings — verify before relying on them.</span>}>
+    <>
+      <p className="muted">Identified from version strings. Verify them before relying on them.</p>
       <table className="table">
         <thead>
           <tr>
@@ -512,35 +482,32 @@ function Components({ scan }: { scan: Scan }) {
         <tbody>
           {comps.map((c) => (
             <tr key={`${c.name}-${c.version}`}>
-              <td className="strong">{c.name}</td>
+              <td>{c.name}</td>
               <td className="mono">{c.version}</td>
-              <td className="small muted">{c.method}</td>
-              <td className="mono small">{c.sources.join(" · ")}</td>
+              <td className="muted">{c.method}</td>
+              <td className="mono">{c.sources.join(", ")}</td>
             </tr>
           ))}
         </tbody>
       </table>
-    </Panel>
+    </>
   );
 }
 
 function ActivityLog({ scan }: { scan: Scan }) {
   const ev = scan.events ?? [];
+  if (ev.length === 0) return <Empty>No events yet.</Empty>;
   return (
-    <Panel title="Activity log">
-      {ev.length === 0 ? (
-        <Empty>No events yet.</Empty>
-      ) : (
-        <ol className="log">
-          {ev.map((e, i) => (
-            <li key={i} className={`lvl-${e.level}`}>
-              <span className="mono small muted">{new Date(e.ts).toLocaleTimeString()}</span>
-              <span className="tag">{e.stage}</span>
-              <span>{e.message}</span>
-            </li>
-          ))}
-        </ol>
-      )}
-    </Panel>
+    <table className="table log">
+      <tbody>
+        {ev.map((e, i) => (
+          <tr key={i} className={`lvl-${e.level}`}>
+            <td className="mono muted nowrap">{new Date(e.ts).toLocaleTimeString()}</td>
+            <td className="muted nowrap">{e.stage}</td>
+            <td>{e.message}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }

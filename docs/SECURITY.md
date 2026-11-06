@@ -55,7 +55,12 @@ DfuSe, MBR/GPT, uImage), pyelftools, and well-known unpackers
      (paths are re-validated before external tools use them).
 4. **Local fallback** (`DFA_SANDBOX_MODE=local`, or `auto` without Docker):
    a separate interpreter with `RLIMIT_AS`, `RLIMIT_CPU`, `RLIMIT_FSIZE`,
-   no core dumps and a minimal environment. This is **not** container
+   no core dumps and a minimal environment. macOS rejects any `RLIMIT_AS`
+   below the address space every process already reserves (about 400 GB on
+   Apple Silicon), so there the memory limit (`DFA_SANDBOX_MEMORY`) is
+   enforced by a watchdog that kills the analysis process when its resident
+   size exceeds the limit (checked every 0.5 s and again on its peak usage at
+   exit). Child unpackers it starts are not covered by that watchdog. This is **not** container
    isolation; the UI shows a warning banner and every scan records the
    isolation mode. Set `DFA_ALLOW_UNSANDBOXED=false` to refuse scans instead.
 

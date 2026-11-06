@@ -9,7 +9,7 @@ from ..findings import Classification as C
 from ..findings import Confidence as K
 from ..findings import Evidence, Finding, redact
 from ..findings import Severity as S
-from .base import ScanContext
+from .base import ScanContext, read_prefix
 
 TOOL = "builtin:secrets"
 
@@ -97,7 +97,7 @@ def scan(ctx: ScanContext) -> list[Finding]:
 
 
 def _rebuild_pem_text(ctx: ScanContext, art) -> str:
-    raw = ctx.paths[art.id].read_bytes()[: ctx.limits.max_scan_bytes_per_file]
+    raw = read_prefix(ctx.paths[art.id], ctx.limits.max_scan_bytes_per_file)
     return raw.decode("latin-1")
 
 
