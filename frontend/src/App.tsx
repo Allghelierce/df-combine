@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
-import { Icon } from "./components/ui";
 import { api, AppConfig, getApiKey, setApiKey } from "./lib/api";
 import Compare from "./pages/Compare";
 import Dashboard from "./pages/Dashboard";
@@ -20,32 +19,31 @@ export default function App() {
       .catch((e) => setCfgError(e.message));
   }, []);
 
-  const sandboxTone = cfg?.sandbox_mode === "docker" ? "ok" : cfg?.sandbox_mode === "local" ? "warn" : "bad";
+  const isolation =
+    cfg?.sandbox_mode === "docker"
+      ? { tone: "ok", label: "Isolated in Docker" }
+      : cfg?.sandbox_mode === "local"
+        ? { tone: "warn", label: "No container isolation" }
+        : { tone: "bad", label: "Sandbox unavailable" };
 
   return (
     <div className="shell">
       <aside className="sidebar">
-        <div className="brand">
-          <span className="brand-mark">{Icon.shield}</span>
-          <div>
-            <div className="brand-name">Drone Firmware</div>
-            <div className="brand-sub">Analyzer</div>
-          </div>
-        </div>
+        <div className="brand">Drone Firmware Analyzer</div>
         <nav>
           <NavLink to="/" end>
-            {Icon.dash} Dashboard
+            Upload
           </NavLink>
-          <NavLink to="/scans">{Icon.history} Scan history</NavLink>
-          <NavLink to="/tools">{Icon.tools} Analysis tools</NavLink>
+          <NavLink to="/scans">Scans</NavLink>
+          <NavLink to="/tools">Tools</NavLink>
         </nav>
         <div className="sidebar-foot">
           {cfg && (
-            <div className={`sandbox-pill tone-${sandboxTone}`} title={cfg.sandbox_detail}>
-              <span className="dot" /> Sandbox: {cfg.sandbox_mode}
+            <div className={`tone-${isolation.tone}`} title={cfg.sandbox_detail}>
+              {isolation.label}
             </div>
           )}
-          <div className="muted small">v{cfg?.version ?? "…"} · static analysis only</div>
+          <div className="muted">Version {cfg?.version ?? "…"}</div>
         </div>
       </aside>
       <main className="main">
@@ -62,14 +60,14 @@ export default function App() {
                 }}
               >
                 <input type="password" placeholder="API key" value={keyInput} onChange={(e) => setKeyInput(e.target.value)} />
-                <button className="btn sm">Save key</button>
+                <button className="btn">Save key</button>
               </form>
             )}
           </div>
         )}
         {cfg && cfg.sandbox_mode !== "docker" && (
           <div className="banner warn" title={cfg.sandbox_detail}>
-            Container isolation is not active: {cfg.sandbox_detail}. Build the sandbox image (see README) for production use.
+            Container isolation is off: {cfg.sandbox_detail}. Run <code>make sandbox-image</code> before scanning untrusted firmware.
           </div>
         )}
         <Routes>

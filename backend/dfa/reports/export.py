@@ -78,8 +78,60 @@ def json_report(scan: Scan) -> dict:
     }
 
 
-def _p(text, style) -> Paragraph:
+def _p(text, style, raw: bool = False) -> Paragraph:
+    if raw:  # caller already escaped any untrusted parts and uses reportlab markup
+        return Paragraph(str(text), style)
     return Paragraph(escape(str(text if text is not None else "-")).replace("\n", "<br/>"), style)
+
+
+PDF_CVE_TOP = 25  # per component: every exploited CVE plus this many others (full list in the JSON report)
+
+
+def _cve_story(run, h2, body, small) -> list:
+    """'Vulnerabilities (CVEs)' section from the cve_lookup tool run's details."""
+    story = [_p("Vulnerabilities (CVEs)", h2)]
+    if run is None:
+        return story + [_p("CVE lookup did not run for this scan.", body)]
+    details = run.details or {}
+    if run.status != "completed" or "totals" not in details:
+        return story + [_p(f"CVE lookup {run.status}: {run.message or 'no details'}", body)]
+    t, db = details["totals"], details.get("db") or {}
+    grid = ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#c5ced8"))
+    head_bg = ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef2f6"))
+    labels = [("CVEs", "cves"), ("Critical", "critical"), ("High", "high"), ("Medium", "medium"), ("Low", "low"),
+              ("Actively exploited", "known_exploited"), ("Public exploit", "public_exploit")]
+    tt = Table([[_p(lbl, small) for lbl, _ in labels], [_p(f"{t.get(k, 0):,}", body) for _, k in labels]])
+    tt.setStyle(TableStyle([grid, head_bg, ("ALIGN", (0, 0), (-1, -1), "CENTER")]))
+    story += [_p(f"NVD data as of {(db.get('nvd_timestamp') or db.get('built_at') or 'unknown')[:10]}"
+                 + (" (out of date)" if db.get("stale") else "") + ". Matches are version based and unverified: "
+                 "vendors may have backported fixes without changing the version string.", small),
+              Spacer(1, 3), tt]
+    quiet = []
+    for comp in details.get("components", []):
+        cves = comp.get("cves") or []
+        label = f"{comp['name']} {comp['version']}"
+        if not cves:
+            quiet.append(label + ("" if comp.get("mapped") else " (no CVE mapping)"))
+            continue
+        urgent = [c for c in cves if c["kev"] or c["exploits"]]
+        shown = urgent + [c for c in cves if not (c["kev"] or c["exploits"])][:PDF_CVE_TOP]
+        rows = [[_p(h, small) for h in ("CVE", "CVSS", "Severity", "Flags", "Summary")]]
+        for c in shown:
+            flags = ", ".join(x for x in ("exploited" if c["kev"] else "", "ransomware" if c.get("ransomware") else "",
+                                          f"{len(c['exploits'])} exploit(s)" if c["exploits"] else "",
+                                          "vendor data" if c.get("match") == "cna" else "") if x)
+            rows.append([_p(c["id"], small), _p("-" if c["score"] is None else f"{c['score']:.1f}", small),
+                         _p(c["severity"], small), _p(flags or "-", small), _p(c["summary"][:180], small)])
+        ct = Table(rows, colWidths=[31 * mm, 12 * mm, 15 * mm, 25 * mm, 95 * mm], repeatRows=1)
+        ct.setStyle(TableStyle([grid, head_bg, ("VALIGN", (0, 0), (-1, -1), "TOP")]))
+        story += [Spacer(1, 6), _p(f"<b>{escape(label)}</b>: {len(cves):,} known CVEs", body, raw=True), ct]
+        if len(shown) < len(cves):
+            story.append(_p(f"Showing {len(shown)} of {len(cves):,} CVEs (all actively exploited or with a public "
+                            f"exploit, then the {PDF_CVE_TOP} highest scored). The full list is in the JSON report.",
+                            small))
+    if quiet:
+        story += [Spacer(1, 4), _p("No known CVEs matched: " + "; ".join(quiet), small)]
+    return story
 
 
 def pdf_report(scan: Scan) -> bytes:
@@ -145,6 +197,8 @@ def pdf_report(scan: Scan) -> bytes:
         ct.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#c5ced8")),
                                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef2f6"))]))
         story.append(ct)
+
+    story += _cve_story(next((t for t in scan.tool_runs if t.tool == "cve_lookup"), None), h2, body, small)
 
     story += [PageBreak(), _p("Findings", h2)]
     findings = sorted(scan.findings, key=lambda f: (f.severity_rank, f.title))

@@ -13,6 +13,7 @@ from .adapters.base import AdapterContext
 from .adapters.registry import get_adapters
 from .config import Settings
 from .core.findings import SEVERITY_ORDER, Finding, correlate, dedupe
+from .cve.match import supersede_kb
 from .db import session_scope
 from .models import FindingRow, Scan, ScanEvent, ToolRun
 from .sandbox import SandboxError, run_analysis
@@ -109,6 +110,7 @@ def process_scan(scan_id: str, settings: Settings) -> None:
 
     # ---- stage 2: external tool adapters ----
     adapters = get_adapters(settings)
+    cve_details: dict | None = None
     for i, ad in enumerate(adapters):
         pct = 65 + int(30 * (i + 1) / len(adapters))
         log_event(scan_id, f"tool:{ad.name}", f"Running {ad.display_name}")
@@ -118,12 +120,17 @@ def process_scan(scan_id: str, settings: Settings) -> None:
         t0 = now()
         r = ad.execute(ctx)
         findings += r.findings
+        if ad.name == "cve_lookup" and r.status == "completed":
+            cve_details = r.details
         _store_tool_run(scan_id, ad.name, ad.display_name, r.status, r.message, t0, len(r.findings),
                         r.raw_output_path, r.details)
         level = "info" if r.status in ("completed", "skipped") else "warning"
         log_event(scan_id, f"tool:{ad.name}", f"{ad.display_name}: {r.status} - {r.message}", level, progress=pct)
 
     # ---- stage 3: normalise + persist ----
+    if cve_details:
+        # The CVE database supersedes built-in knowledge-base entries it fully covers (e.g. Heartbleed).
+        findings = supersede_kb(findings, cve_details)
     final = [f.to_dict() for f in dedupe(correlate(findings))]
     sev = Counter(f["severity"] for f in final)
     cls = Counter(f["classification"] for f in final)

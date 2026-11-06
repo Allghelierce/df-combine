@@ -17,6 +17,12 @@ TEXT_SUFFIXES = (".conf", ".cfg", ".ini", ".txt", ".sh", ".param", ".params", ".
                  ".yaml", ".yml", ".xml", ".py", ".lua", ".service", ".rules", ".env", ".properties")
 
 
+def read_prefix(path: Path, max_bytes: int) -> bytes:
+    """The first ``max_bytes`` of ``path`` without reading the rest (artifacts can be multi-GB)."""
+    with path.open("rb") as fp:
+        return fp.read(max_bytes)
+
+
 @dataclass
 class ScanContext:
     artifacts: list[Artifact]
@@ -43,7 +49,7 @@ class ScanContext:
         val = None
         if art.format == "text" or (art.size <= max_bytes and art.name.lower().endswith(TEXT_SUFFIXES)):
             try:
-                raw = self.paths[art.id].read_bytes()[:max_bytes]
+                raw = read_prefix(self.paths[art.id], max_bytes)
                 if b"\x00" not in raw[:4096]:
                     val = raw.decode("utf-8", "replace")
             except OSError:

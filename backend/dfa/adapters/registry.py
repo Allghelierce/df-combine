@@ -3,11 +3,11 @@ from __future__ import annotations
 
 from ..config import Settings
 from .base import ToolAdapter, ToolStatus
+from .cve_lookup import CveLookupAdapter
 from .cwe_checker import CweCheckerAdapter
-from .fact import FactAdapter
 from .fwanalyzer import FwAnalyzerAdapter
 
-ADAPTER_CLASSES: list[type[ToolAdapter]] = [FwAnalyzerAdapter, CweCheckerAdapter, FactAdapter]
+ADAPTER_CLASSES: list[type[ToolAdapter]] = [CveLookupAdapter, FwAnalyzerAdapter, CweCheckerAdapter]
 
 
 def get_adapters(settings: Settings) -> list[ToolAdapter]:

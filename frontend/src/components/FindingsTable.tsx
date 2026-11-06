@@ -1,22 +1,23 @@
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { CLASSIFICATIONS, Classification, Finding, SEVERITIES, Severity } from "../lib/api";
-import { CLASSIFICATION_HELP } from "../lib/format";
-import { ClassBadge, Empty, SeverityBadge } from "./ui";
+import { capitalize, CLASSIFICATION_HELP } from "../lib/format";
+import { Empty, SeverityBadge } from "./ui";
 
 export function FindingsTable({ findings }: { findings: Finding[] }) {
-  const [sev, setSev] = useState<Set<Severity>>(new Set());
-  const [cls, setCls] = useState<Set<Classification>>(new Set());
+  const [sev, setSev] = useState<Severity | "">("");
+  const [cls, setCls] = useState<Classification | "">("");
   const [tool, setTool] = useState("");
   const [q, setQ] = useState("");
   const [open, setOpen] = useState<number | null>(null);
+  const id = useId();
 
   const tools = useMemo(() => Array.from(new Set(findings.map((f) => f.source_tool))).sort(), [findings]);
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return findings.filter(
       (f) =>
-        (!sev.size || sev.has(f.severity)) &&
-        (!cls.size || cls.has(f.classification)) &&
+        (!sev || f.severity === sev) &&
+        (!cls || f.classification === cls) &&
         (!tool || f.source_tool === tool) &&
         (!needle ||
           f.title.toLowerCase().includes(needle) ||
@@ -25,140 +26,127 @@ export function FindingsTable({ findings }: { findings: Finding[] }) {
     );
   }, [findings, sev, cls, tool, q]);
 
-  function toggle<T>(set: Set<T>, v: T, update: (s: Set<T>) => void) {
-    const n = new Set(set);
-    if (n.has(v)) n.delete(v);
-    else n.add(v);
-    update(n);
-  }
-
   const sevCount = (s: Severity) => findings.filter((f) => f.severity === s).length;
   const clsCount = (c: Classification) => findings.filter((f) => f.classification === c).length;
 
   return (
     <div className="findings">
       <div className="filters">
-        <div className="chips" aria-label="Filter by severity">
-          {SEVERITIES.map((s) => (
-            <button
-              key={s}
-              type="button"
-              className={`chip sev-${s} ${sev.has(s) ? "on" : ""}`}
-              onClick={() => toggle(sev, s, setSev)}
-              aria-pressed={sev.has(s)}
-            >
-              {s} <b>{sevCount(s)}</b>
-            </button>
-          ))}
-        </div>
-        <div className="chips" aria-label="Filter by classification">
-          {CLASSIFICATIONS.map((c) => (
-            <button
-              key={c}
-              type="button"
-              className={`chip cls-${c} ${cls.has(c) ? "on" : ""}`}
-              onClick={() => toggle(cls, c, setCls)}
-              title={CLASSIFICATION_HELP[c]}
-              aria-pressed={cls.has(c)}
-            >
-              {c} <b>{clsCount(c)}</b>
-            </button>
-          ))}
-        </div>
-        <div className="filter-row">
-          <select value={tool} onChange={(e) => setTool(e.target.value)} aria-label="Filter by tool">
-            <option value="">All tools</option>
+        <span className="filter">
+          <label htmlFor={`${id}-sev`}>Severity</label>
+          <select id={`${id}-sev`} value={sev} onChange={(e) => setSev(e.target.value as Severity | "")}>
+            <option value="">All</option>
+            {SEVERITIES.map((s) => (
+              <option key={s} value={s}>
+                {capitalize(s)} ({sevCount(s)})
+              </option>
+            ))}
+          </select>
+        </span>
+        <span className="filter">
+          <label htmlFor={`${id}-cls`}>Evidence</label>
+          <select id={`${id}-cls`} value={cls} onChange={(e) => setCls(e.target.value as Classification | "")}>
+            <option value="">All</option>
+            {CLASSIFICATIONS.map((c) => (
+              <option key={c} value={c} title={CLASSIFICATION_HELP[c]}>
+                {capitalize(c)} ({clsCount(c)})
+              </option>
+            ))}
+          </select>
+        </span>
+        <span className="filter">
+          <label htmlFor={`${id}-tool`}>Tool</label>
+          <select id={`${id}-tool`} value={tool} onChange={(e) => setTool(e.target.value)}>
+            <option value="">All</option>
             {tools.map((t) => (
               <option key={t} value={t}>
                 {t}
               </option>
             ))}
           </select>
-          <input type="search" placeholder="Search title, component, CWE…" value={q} onChange={(e) => setQ(e.target.value)} />
-          <span className="muted small">
-            {filtered.length} / {findings.length}
-          </span>
-        </div>
+        </span>
+        <input type="search" placeholder="Search title, path or CWE" aria-label="Search findings" value={q} onChange={(e) => setQ(e.target.value)} />
+        <span className="muted count">
+          {filtered.length} of {findings.length}
+        </span>
       </div>
 
       {filtered.length === 0 ? (
-        <Empty>{findings.length ? "No findings match the filters." : "No findings were produced. This does not mean the firmware is free of vulnerabilities."}</Empty>
+        <Empty>{findings.length ? "No findings match these filters." : "No findings were produced. This does not mean the firmware is free of vulnerabilities."}</Empty>
       ) : (
         <ul className="finding-list">
           {filtered.map((f) => {
             const isOpen = open === f.id;
+            const alsoBy = f.tags.filter((t) => t.startsWith("corroborated-by:")).map((t) => t.replace("corroborated-by:", ""));
             return (
-              <li key={f.id} className={`finding ${isOpen ? "open" : ""} edge-${f.severity}`}>
+              <li key={f.id} className={`finding ${isOpen ? "open" : ""}`}>
                 <button type="button" className="finding-head" onClick={() => setOpen(isOpen ? null : f.id)} aria-expanded={isOpen}>
                   <SeverityBadge severity={f.severity} />
-                  <ClassBadge value={f.classification} />
-                  <span className="finding-title">{f.title}</span>
-                  {f.tags
-                    .filter((t) => t.startsWith("corroborated-by:"))
-                    .map((t) => (
-                      <span key={t} className="pill ok" title="The same issue was independently reported by this tool">
-                        ✓ {t.replace("corroborated-by:", "")}
-                      </span>
-                    ))}
-                  <span className="finding-meta mono">{f.source_tool}</span>
-                  <span className="chev">{isOpen ? "▾" : "▸"}</span>
+                  <span className="finding-main">
+                    <span className="finding-title">{f.title}</span>
+                    <span className="finding-path mono" title={f.affected_component}>
+                      {f.affected_component}
+                    </span>
+                  </span>
+                  <span className="finding-source">
+                    <span>{capitalize(f.classification)}</span>
+                    <span className="mono">{f.source_tool}</span>
+                  </span>
                 </button>
-                <div className="finding-component mono" title={f.affected_component}>
-                  {f.affected_component}
-                </div>
                 {isOpen && (
                   <div className="finding-body">
                     <p>{f.description}</p>
                     <dl className="kv">
-                      <dt>Classification</dt>
+                      <dt>Evidence</dt>
                       <dd>
-                        {f.classification} — {CLASSIFICATION_HELP[f.classification]} Confidence: <b>{f.confidence}</b>.
+                        {capitalize(f.classification)}. {CLASSIFICATION_HELP[f.classification]} Confidence: {f.confidence}.
                       </dd>
                       <dt>Rule</dt>
-                      <dd className="mono">
-                        {f.source_tool} / {f.rule_id}
+                      <dd>
+                        <span className="mono">
+                          {f.source_tool} / {f.rule_id}
+                        </span>
                         {f.cwe && (
                           <>
-                            {" · "}
+                            {", "}
                             <a href={`https://cwe.mitre.org/data/definitions/${f.cwe.replace("CWE-", "")}.html`} target="_blank" rel="noreferrer noopener">
                               {f.cwe}
                             </a>
                           </>
                         )}
                       </dd>
-                      <dt>Remediation</dt>
+                      <dt>Fix</dt>
                       <dd>{f.remediation}</dd>
                     </dl>
+                    {alsoBy.length > 0 && <p className="muted">{`Also reported by ${alsoBy.join(", ")}`}</p>}
                     {f.evidence.length > 0 && (
-                      <div className="evidence">
-                        <div className="evidence-title">Evidence</div>
-                        <table>
-                          <tbody>
-                            {f.evidence.map((e, i) => (
-                              <tr key={i}>
-                                <td className="ev-kind">{e.kind}</td>
-                                <td className="mono ev-value">{e.value}</td>
-                                <td className="mono ev-loc">{e.location}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
+                      <table className="evidence">
+                        <caption>Evidence</caption>
+                        <tbody>
+                          {f.evidence.map((e, i) => (
+                            <tr key={i}>
+                              <td className="muted">{e.kind}</td>
+                              <td className="mono">{e.value}</td>
+                              <td className="mono muted">{e.location}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
                     )}
                     {f.references.length > 0 && (
-                      <div className="refs">
-                        {f.references.map((r) =>
-                          r.startsWith("http") ? (
-                            <a key={r} href={r} target="_blank" rel="noreferrer noopener">
-                              {r}
-                            </a>
-                          ) : (
-                            <span key={r} className="tag">
-                              {r}
-                            </span>
-                          ),
-                        )}
-                      </div>
+                      <ul className="refs">
+                        {f.references.map((r) => (
+                          <li key={r}>
+                            {r.startsWith("http") ? (
+                              <a href={r} target="_blank" rel="noreferrer noopener">
+                                {r}
+                              </a>
+                            ) : (
+                              r
+                            )}
+                          </li>
+                        ))}
+                      </ul>
                     )}
                   </div>
                 )}

@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { FindingsTable } from "../components/FindingsTable";
-import { Empty, ErrorBox, Panel, SeverityBadge } from "../components/ui";
+import { Empty, ErrorBox, Section, SeverityBadge } from "../components/ui";
 import { api, Comparison } from "../lib/api";
-import { formatDate } from "../lib/format";
+import { capitalize, formatDate } from "../lib/format";
 
 type Tab = "new" | "resolved" | "severity_changed" | "unchanged";
 
@@ -20,7 +20,7 @@ export default function Compare() {
     api.compare(base, target).then(setData).catch(setError);
   }, [base, target]);
 
-  if (!base || !target) return <Empty>Select two completed scans in the scan history to compare them.</Empty>;
+  if (!base || !target) return <div className="page"><Empty>Select two completed scans on the Scans page to compare them.</Empty></div>;
   if (!data)
     return (
       <div className="page">
@@ -38,53 +38,35 @@ export default function Compare() {
   ];
   return (
     <div className="page">
-      <header className="page-head">
-        <div>
-          <div className="crumbs">
-            <Link to="/scans">Scan history</Link> / compare
-          </div>
-          <h1>Release comparison</h1>
-          <p className="muted">
-            Findings are matched by tool, rule and in-filesystem path, so renamed packages still line up. Version-based findings
-            follow the component.
-          </p>
-        </div>
-      </header>
-      <div className="grid-2">
+      <div className="crumbs">
+        <Link to="/scans">Scans</Link> / compare
+      </div>
+      <h1>Compare releases</h1>
+      <p className="lede">
+        Findings are matched by tool, rule and path inside the filesystem, so renamed packages still line up. Version-based findings follow the
+        component.
+      </p>
+      <dl className="kv">
         {(["base", "target"] as const).map((k) => (
-          <Panel key={k} title={k === "base" ? "Baseline (older)" : "Target (newer)"}>
-            <Link to={`/scans/${data[k].id}`} className="strong">
-              {data[k].original_filename}
-            </Link>
-            <div className="muted small">
-              {data[k].identification?.platform} · {data[k].identification?.platform_version ?? "version n/a"} · uploaded{" "}
-              {formatDate(data[k].created_at)} · risk {data[k].risk_score ?? "–"}
-            </div>
-          </Panel>
-        ))}
-      </div>
-      <div className="stats">
-        <div className="stat tone-critical">
-          <div className="stat-label">New findings</div>
-          <div className="stat-value">{s.new}</div>
-        </div>
-        <div className="stat">
-          <div className="stat-label">Resolved</div>
-          <div className="stat-value" style={{ color: "var(--ok)" }}>
-            {s.resolved}
+          <div key={k} className="kv-row">
+            <dt>{k === "base" ? "Older" : "Newer"}</dt>
+            <dd>
+              <Link to={`/scans/${data[k].id}`}>{data[k].original_filename}</Link>
+              <span className="muted">
+                {" "}
+                {[data[k].identification?.platform, data[k].identification?.platform_version, `uploaded ${formatDate(data[k].created_at)}`, `risk ${data[k].risk_score ?? "–"}`]
+                  .filter(Boolean)
+                  .join(", ")}
+              </span>
+            </dd>
           </div>
-        </div>
-        <div className="stat">
-          <div className="stat-label">Severity changed</div>
-          <div className="stat-value">{s.severity_changed}</div>
-        </div>
-        <div className="stat">
-          <div className="stat-label">Component changes</div>
-          <div className="stat-value">{s.component_changes}</div>
-        </div>
-      </div>
+        ))}
+      </dl>
+      <p className="summary">
+        {s.new} new, {s.resolved} resolved, {s.severity_changed} changed severity, {s.component_changes} component changes
+      </p>
       {data.components.length > 0 && (
-        <Panel title="Component changes">
+        <Section title="Component changes">
           <table className="table">
             <thead>
               <tr>
@@ -97,17 +79,15 @@ export default function Compare() {
             <tbody>
               {data.components.map((c) => (
                 <tr key={c.name}>
-                  <td className="strong">{c.name}</td>
-                  <td>
-                    <span className={`pill ${c.change === "removed" ? "muted" : c.change === "added" ? "warn" : "ok"}`}>{c.change}</span>
-                  </td>
+                  <td>{c.name}</td>
+                  <td>{capitalize(c.change)}</td>
                   <td className="mono">{c.before.join(", ") || "–"}</td>
                   <td className="mono">{c.after.join(", ") || "–"}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-        </Panel>
+        </Section>
       )}
       <div className="tabs" role="tablist">
         {tabs.map(([k, label, n]) => (
@@ -117,19 +97,15 @@ export default function Compare() {
         ))}
       </div>
       {tab === "severity_changed" && data.severity_changed.length > 0 && (
-        <Panel>
-          <ul className="tool-mini">
-            {data.severity_changed.map((f) => (
-              <li key={f.id}>
-                <SeverityBadge severity={f.previous_severity} /> → <SeverityBadge severity={f.severity} /> <span>{f.title}</span>
-              </li>
-            ))}
-          </ul>
-        </Panel>
+        <ul className="plain-list">
+          {data.severity_changed.map((f) => (
+            <li key={f.id}>
+              <SeverityBadge severity={f.previous_severity} /> to <SeverityBadge severity={f.severity} />: {f.title}
+            </li>
+          ))}
+        </ul>
       )}
-      <Panel>
-        <FindingsTable findings={data[tab]} />
-      </Panel>
+      <FindingsTable findings={data[tab]} />
     </div>
   );
 }

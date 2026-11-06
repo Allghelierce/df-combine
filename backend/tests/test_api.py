@@ -36,8 +36,6 @@ def test_end_to_end_companion(client, settings, fixtures):
     assert d["risk_score"] > 50
     tools = {t["tool"]: t for t in d["tool_runs"]}
     assert tools["builtin:secrets"]["status"] == "completed"
-    assert tools["fact"]["status"] == "unavailable"  # not configured
-    assert "DFA_FACT_URL" in tools["fact"]["message"]
     assert tools["cwe_checker"]["status"] in ("unavailable", "completed", "failed")
     assert any(e["stage"] == "complete" for e in d["events"])
 
@@ -99,7 +97,7 @@ def test_rescan(client, settings, fixtures):
     d = client.get(f"/api/scans/{s['id']}").json()
     assert d["status"] == "completed"
     # Tool runs are replaced, not duplicated.
-    assert len([t for t in d["tool_runs"] if t["tool"] == "fact"]) == 1
+    assert len([t for t in d["tool_runs"] if t["tool"] == "cwe_checker"]) == 1
 
 
 def test_upload_limits(client, settings, tmp_path):
@@ -165,7 +163,7 @@ def test_stats(client, settings, fixtures):
 def test_tools_endpoint(client):
     tools = client.get("/api/tools").json()["tools"]
     names = {t["name"] for t in tools}
-    assert {"builtin", "fwanalyzer", "cwe_checker", "fact"} <= names
+    assert {"builtin", "fwanalyzer", "cwe_checker"} <= names and "fact" not in names
     for t in tools:
         assert "detail" in t and isinstance(t["available"], bool)
 

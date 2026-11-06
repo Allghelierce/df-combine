@@ -59,13 +59,14 @@ class Settings(BaseSettings):
     fwanalyzer_bin: str | None = None  # defaults to 'fwanalyzer' on PATH
     fwanalyzer_timeout_s: int = 600
 
-    # FACT (external service)
-    fact_url: str | None = None  # e.g. http://fact.local:5000
-    fact_api_key: str | None = None
-    fact_timeout_s: int = 3600
-    fact_poll_s: float = 15.0
-    fact_max_upload_mb: int = 256
-    fact_verify_tls: bool = True
+    # Local CVE database (built with `make cve-db` / `python -m dfa.cve update`)
+    cve_lookup_enabled: bool = True
+    cve_db_path: Path | None = None  # default: <data_dir>/cve.db
+    cve_db_max_age_days: int = 30  # older NVD data is still used, with an "out of date" warning
+
+    @property
+    def cve_db_file(self) -> Path:
+        return self.cve_db_path or self.data_dir / "cve.db"
 
     @property
     def db_url(self) -> str:

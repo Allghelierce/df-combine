@@ -1,10 +1,10 @@
 import json
 import shutil
+import subprocess
 
-import httpx
 import pytest
 
-from dfa.adapters import cwe_checker, fact, fwanalyzer
+from dfa.adapters import cwe_checker, fwanalyzer
 from dfa.adapters.base import AdapterContext
 from dfa.adapters.registry import all_statuses
 
@@ -27,7 +27,6 @@ def ctx_for(settings, manifest, tmp_path, input_path=None):
 def test_statuses_report_unavailable_tools(settings):
     st = {s["name"]: s for s in all_statuses(settings)}
     assert st["builtin"]["available"]
-    assert st["fact"]["available"] is False and "DFA_FACT_URL" in st["fact"]["detail"]
     if not shutil.which("cwe_checker"):
         assert st["cwe_checker"]["available"] is False
 
@@ -54,10 +53,41 @@ def test_cwe_checker_plan(settings, tmp_path):
         {"id": 4, "name": "/lib/libc.so", "format": "elf", "elf": {**elf, "machine": "EM_XTENSA"}, "size": 1},
     ]}}
     targets, _ = ad.plan(ctx_for(settings, man, tmp_path))
-    assert [t["artifact"]["id"] for t in targets] == [2, 1]
+    assert [t["artifact"]["id"] for t in targets] == [2]  # BusyBox is skipped: slow (~9 min) and noisy
     raw = {"extraction": {"artifacts": [{"id": 0, "name": "image.bin", "format": "cortexm_raw", "size": 10}]}}
     targets, reason = ad.plan(ctx_for(settings, raw, tmp_path))
     assert targets == [] and "bare-metal" in reason
+
+
+def test_cwe_checker_names_unchecked_return_value():
+    ws = [{"name": "CWE252", "version": "0.1", "addresses": ["00101170"], "tids": [], "symbols": [], "other": [],
+           "description": "(Unchecked Return Value) ..."}]
+    (f,) = cwe_checker.normalize(ws, "fw > /usr/bin/flightd")
+    assert f.title == "[cwe_checker] CWE252: Unchecked return value (1 warning)"
+    assert f.cwe == "CWE-252"
+
+
+def test_cwe_checker_removes_container_after_timeout(settings, tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run_cmd(cmd, timeout, cwd=None):
+        calls.append(cmd)
+        if cmd[:2] == ["docker", "run"]:
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        return 0, "", "", 0.0
+
+    monkeypatch.setattr(cwe_checker, "run_cmd", fake_run_cmd)
+    ad = cwe_checker.CweCheckerAdapter(settings)
+    monkeypatch.setattr(ad, "status", lambda: ad._status(True, "test", mode="docker"))
+    (tmp_path / "flightd").write_bytes(b"\x7fELF")
+    art = {"id": 1, "name": "/usr/bin/flightd", "path": "flightd", "display_path": "fw > /usr/bin/flightd"}
+
+    res = ad.run(ctx_for(settings, {}, tmp_path), [{"artifact": art, "bare_metal": None}])
+
+    run_cmd_args = calls[0]
+    name = run_cmd_args[run_cmd_args.index("--name") + 1]
+    assert calls[1] == ["docker", "rm", "-f", name]
+    assert res.details["targets"][0]["status"] == "failed"
 
 
 def test_cwe_checker_unavailable_execute(settings, tmp_path):
@@ -118,55 +148,6 @@ def test_fwanalyzer_real_run(settings, fixtures, tmp_path, key):
     if key == "ext4":
         # Stock e2tools makes FwAnalyzer's extfs backend fail; we fall back to dirfs and say so.
         assert any(r.get("mode") for r in res.details["runs"])
-
-
-class FakeFact:
-    def __init__(self):
-        self.uploaded = None
-        self.status_calls = 0
-
-    def handler(self, request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/rest/status":
-            self.status_calls += 1
-            running = {"abc_123": {}} if self.status_calls < 3 else {}
-            return httpx.Response(200, json={"system_status": {"backend": {"analysis": {"current_analyses": running}}}})
-        if request.method == "PUT" and request.url.path == "/rest/firmware":
-            self.uploaded = json.loads(request.content)
-            return httpx.Response(200, json={"uid": "abc_123"})
-        if request.url.path == "/rest/firmware/abc_123":
-            return httpx.Response(200, json={"firmware": {"meta_data": {}, "analysis": {
-                "crypto_material": {"summary": {"SshRsaPrivateKeyBlock": ["uid1", "uid2"]}},
-                "users_and_passwords": {"summary": {"root:unix": ["uid3"]}},
-                "cve_lookup": {"summary": {"OpenSSL 1.0.1e (CRITICAL)": ["uid4"]}},
-                "exploit_mitigations": {"summary": {"NX enabled": ["u"], "Canary disabled": ["u5"]}},
-                "file_type": {"summary": {"application/x-executable": ["u"]}},
-            }}})
-        return httpx.Response(404)
-
-
-def test_fact_adapter_with_mock(settings, tmp_path, monkeypatch):
-    settings.fact_url = "http://fact.test"
-    settings.fact_poll_s = 0
-    fake = FakeFact()
-    ad = fact.FactAdapter(settings)
-    monkeypatch.setattr(ad, "_client", lambda: httpx.Client(base_url="http://fact.test",
-                                                            transport=httpx.MockTransport(fake.handler)))
-    inp = tmp_path / "fw.bin"
-    inp.write_bytes(b"firmware")
-    res = ad.execute(ctx_for(settings, {"identification": {"platform": "PX4"}}, tmp_path, input_path=inp))
-    assert res.status == "completed", res.message
-    assert fake.uploaded["vendor"] == "PX4" and fake.uploaded["binary"] == "ZmlybXdhcmU="
-    titles = [f.title for f in res.findings]
-    assert any("SshRsaPrivateKeyBlock" in t for t in titles)
-    assert any("Canary disabled" in t for t in titles) and not any("NX enabled" in t for t in titles)
-    cve = next(f for f in res.findings if f.rule_id == "fact-cve_lookup")
-    assert cve.severity.value == "high" and cve.classification.value == "unverified"
-
-
-def test_fact_unreachable(settings, tmp_path):
-    settings.fact_url = "http://127.0.0.1:9"
-    r = fact.FactAdapter(settings).execute(ctx_for(settings, {}, tmp_path))
-    assert r.status == "unavailable" and "unreachable" in r.message
 
 
 def test_correlation_merges_fwanalyzer_duplicates():

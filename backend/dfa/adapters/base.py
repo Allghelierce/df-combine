@@ -5,7 +5,7 @@ Each external analysis tool is wrapped by an adapter that
 1. reports whether the tool is installed/reachable (:meth:`status`),
 2. decides whether it is applicable to *this* firmware (:meth:`plan`) - tools
    are not interchangeable: cwe_checker wants ELF binaries, FwAnalyzer wants
-   Linux filesystem images/trees, FACT wants the original upload, and
+   Linux filesystem images/trees, and
 3. runs it and normalises its native output into :class:`Finding` objects.
 
 Adapters never raise for expected failures; they return an

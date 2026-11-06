@@ -18,7 +18,7 @@ def fixtures(tmp_path_factory) -> dict[str, Path]:
 
 @pytest.fixture()
 def settings(tmp_path) -> Settings:
-    return Settings(data_dir=tmp_path / "data", sandbox_mode="local", fact_url=None,
+    return Settings(data_dir=tmp_path / "data", sandbox_mode="local",
                     cwe_checker_image="dfa-test/nonexistent-cwe-checker:none", worker_mode="external",
                     max_upload_mb=64)
 

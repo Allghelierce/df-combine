@@ -74,6 +74,61 @@ export interface ToolRun {
   details: Record<string, unknown>;
 }
 
+/** One CVE matched against a component by the `cve_lookup` tool. */
+export interface CveEntry {
+  id: string;
+  /** CVSS base score; null when NVD has not scored the CVE yet. */
+  score: number | null;
+  severity: Severity;
+  cvss_version: string | null;
+  /** Listed in the CISA Known Exploited Vulnerabilities catalog. */
+  kev: boolean;
+  ransomware: boolean;
+  /** Exploit-DB ids. */
+  exploits: string[];
+  summary: string;
+  published: string | null;
+  /** "nvd" = NVD configuration match, "cna" = vendor-published affected versions (lower confidence). */
+  match: "nvd" | "cna";
+}
+
+export interface CveComponentResult {
+  name: string;
+  version: string;
+  method: string;
+  /** False when there is no CVE mapping for this component; `cves` is then empty. */
+  mapped: boolean;
+  cpe: string[];
+  /** Already sorted: exploited first, then with exploits, then by score. */
+  cves: CveEntry[];
+}
+
+export interface CveDatabaseInfo {
+  built_at: string;
+  nvd_timestamp: string;
+  cve_count: number;
+  age_days: number;
+  stale: boolean;
+}
+
+export interface CveTotals {
+  components: number;
+  cves: number;
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  known_exploited: number;
+  public_exploit: number;
+}
+
+/** `ToolRun.details` of a completed `cve_lookup` run. */
+export interface CveLookupDetails {
+  db: CveDatabaseInfo;
+  totals: CveTotals;
+  components: CveComponentResult[];
+}
+
 export interface ScanEvent {
   ts: string;
   level: string;

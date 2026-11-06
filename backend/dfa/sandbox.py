@@ -7,7 +7,9 @@ limits and the firmware mounted read-only.
 Fallback (``sandbox_mode=local``, or ``auto`` when Docker is unavailable and
 ``allow_unsandboxed`` is true): a separate Python subprocess with rlimits
 (address space, CPU time, file size, open files) and a wall-clock timeout.
-This fallback is clearly reported as *not container-isolated*.
+On macOS, which rejects address-space limits, the memory limit is enforced by
+watching the subprocess's resident size instead. This fallback is clearly
+reported as *not container-isolated*.
 """
 from __future__ import annotations
 
@@ -15,6 +17,7 @@ import json
 import os
 import resource
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -28,6 +31,22 @@ from .config import BACKEND_DIR, Settings
 
 class SandboxError(RuntimeError):
     pass
+
+
+# macOS reserves hundreds of GB of virtual address space for every process (dyld shared cache etc.) and
+# rejects any RLIMIT_AS below that with EINVAL ("current limit exceeds maximum limit"). There the local
+# fallback enforces the memory limit by watching the child's resident size instead.
+ADDRESS_SPACE_LIMIT = sys.platform != "darwin"
+
+
+def _rss_bytes(pid: int) -> int:
+    """Current resident size of ``pid`` in bytes, or 0 if it cannot be read."""
+    try:
+        out = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True, timeout=5,
+                             stdin=subprocess.DEVNULL).stdout
+        return int(out.strip() or 0) * 1024
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
 
 
 @dataclass
@@ -125,15 +144,20 @@ def run_analysis(input_path: Path, original_name: str, work_dir: Path, settings:
         ]
         preexec = None
         env = None
+        mem, watch_memory = 0, False
     else:
         cmd = [sys.executable, "-m", "dfa.core.analyze", "--input", str(input_path), f"--name={safe_name}",
                "--work", str(work_dir), "--limits", limits]
         mem = _mem_bytes(settings.sandbox_memory)
         cpu = settings.sandbox_timeout_s
         fsize = settings.max_extract_file_mb * 1024 * 1024 + 1
+        watch_memory = not ADDRESS_SPACE_LIMIT
+        if watch_memory:
+            explanation += "; memory limit enforced by a resident-size watchdog (macOS rejects RLIMIT_AS)"
 
         def preexec() -> None:  # pragma: no cover - runs in the child
-            resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
+            if not watch_memory:
+                resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
             resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 5))
             resource.setrlimit(resource.RLIMIT_FSIZE, (fsize, fsize))
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
@@ -157,23 +181,56 @@ def run_analysis(input_path: Path, original_name: str, work_dir: Path, settings:
     th.start()
     progress_file = work_dir / "progress.log"
     seen = 0
-    timed_out = False
-    while proc.poll() is None:
+    timed_out = over_memory = False
+    peak_rss = 0
+
+    def exited() -> bool:
+        nonlocal peak_rss
+        if not watch_memory:
+            return proc.poll() is not None
+        # Reap with wait4 to learn the child's peak resident size.
+        try:
+            pid, status, usage = os.wait4(proc.pid, os.WNOHANG)
+        except ChildProcessError:
+            return proc.poll() is not None
+        if pid == 0:
+            return False
+        proc.returncode = os.waitstatus_to_exitcode(status)
+        peak_rss = usage.ru_maxrss * (1 if sys.platform == "darwin" else 1024)  # bytes on macOS, KiB elsewhere
+        return True
+
+    def kill() -> None:
+        if not watch_memory:
+            proc.kill()
+            return
+        try:  # not reaped yet, so the pid is still ours; Popen.kill() would reap it behind wait4's back
+            os.kill(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    while not exited():
         time.sleep(0.5)
         if progress and progress_file.exists():
             lines = progress_file.read_text(errors="replace").splitlines()
             for ln in lines[seen:]:
                 progress(ln.split(" ", 1)[-1])
             seen = len(lines)
+        if watch_memory and not over_memory and _rss_bytes(proc.pid) > mem:
+            over_memory = True
+            kill()
+            continue
         if time.monotonic() - t0 > settings.sandbox_timeout_s:
             timed_out = True
-            proc.kill()
+            kill()
             break
     proc.wait()
     th.join(timeout=5)
     log_tail = "".join(tail)[-4000:]
     if timed_out:
         raise SandboxError(f"analysis sandbox timed out after {settings.sandbox_timeout_s}s")
+    if over_memory or (watch_memory and peak_rss > mem):
+        raise SandboxError(f"analysis sandbox exceeded its memory limit of {settings.sandbox_memory} "
+                           f"(peak resident size {peak_rss / 2**20:.0f} MiB)")
     manifest_path = work_dir / "manifest.json"
     if not manifest_path.exists():
         raise SandboxError(f"analysis sandbox exited with status {proc.returncode} without a manifest. "

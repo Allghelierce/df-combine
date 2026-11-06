@@ -6,7 +6,7 @@ Facts established from the upstream project:
   ``--bare-metal-config`` JSON (processor id, flash base, RAM base/size) and
   support is marked *experimental* upstream.
 * Requires Ghidra (headless) - easiest via the Docker image
-  ``ghcr.io/fkie-cad/cwe_checker`` (x86-64 only prebuilt).
+  ``ghcr.io/fkie-cad/cwe_checker`` (``:stable`` x86-64 only; ``:latest`` also arm64).
 * Output: ``--json`` (with ``--quiet``) prints a JSON array of CweWarning
   objects: {name, version, addresses, tids, symbols, other, description}.
 * Results are static-analysis warnings with expected false positives and
@@ -14,9 +14,11 @@ Facts established from the upstream project:
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import shutil
+import uuid
 from collections import defaultdict
 from pathlib import Path
 
@@ -30,7 +32,7 @@ from .base import AdapterContext, AdapterResult, ToolAdapter, run_cmd
 SUPPORTED_ELF_ARCH = {"EM_ARM", "EM_AARCH64", "EM_X86_64", "EM_386", "EM_MIPS", "EM_PPC", "EM_PPC64", "EM_RISCV"}
 CWE_SEVERITY = {
     "CWE78": S.high, "CWE119": S.medium, "CWE125": S.medium, "CWE787": S.medium, "CWE134": S.medium,
-    "CWE190": S.low, "CWE215": S.info, "CWE243": S.low, "CWE332": S.low, "CWE337": S.low, "CWE367": S.low,
+    "CWE190": S.low, "CWE215": S.info, "CWE243": S.low, "CWE252": S.low, "CWE332": S.low, "CWE337": S.low, "CWE367": S.low,
     "CWE416": S.medium, "CWE415": S.medium, "CWE426": S.low, "CWE467": S.low, "CWE476": S.low,
     "CWE560": S.low, "CWE676": S.low, "CWE782": S.low, "CWE789": S.low,
 }
@@ -38,6 +40,7 @@ CWE_TITLES = {
     "CWE78": "OS command injection", "CWE119": "Buffer overflow", "CWE125": "Out-of-bounds read",
     "CWE787": "Out-of-bounds write", "CWE134": "Externally-controlled format string",
     "CWE190": "Integer overflow", "CWE215": "Debug information exposure", "CWE243": "chroot without chdir",
+    "CWE252": "Unchecked return value",
     "CWE332": "Insufficient PRNG entropy", "CWE337": "Predictable PRNG seed", "CWE367": "TOCTOU race condition",
     "CWE416": "Use after free", "CWE415": "Double free", "CWE426": "Untrusted search path",
     "CWE467": "sizeof() on pointer type", "CWE476": "NULL pointer dereference",
@@ -83,13 +86,13 @@ class CweCheckerAdapter(ToolAdapter):
             if a.get("format") == "elf" and elf:
                 if elf.get("machine") not in SUPPORTED_ELF_ARCH or elf.get("is_kernel_module"):
                     continue
+                if "busybox" in a["name"]:  # ~9 min and thousands of warnings per run; rarely the target
+                    continue
                 score = 0
                 if a.get("category") == "executable":
                     score += 10
                 if PRIORITY_NAMES.search(a["name"].rsplit("/", 1)[-1]):
                     score += 5
-                if "busybox" in a["name"]:
-                    score -= 20
                 if a.get("category") == "firmware_image":
                     score += 8
                 cands.append((score, a["size"], {"artifact": a, "bare_metal": None}))
@@ -122,10 +125,13 @@ class CweCheckerAdapter(ToolAdapter):
             if t["bare_metal"]:
                 cfg_path = out_dir / f"bare_metal_{i}.json"
                 cfg_path.write_text(json.dumps(t["bare_metal"]))
-            cmd = self._command(st.mode, path, cfg_path)
+            container = f"dfa-cwe-{uuid.uuid4().hex[:12]}" if st.mode == "docker" else None
+            cmd = self._command(st.mode, path, cfg_path, container)
             try:
                 rc, stdout, stderr, dur = run_cmd(cmd, timeout=self.settings.cwe_checker_timeout_s)
             except Exception as exc:  # noqa: BLE001 - includes TimeoutExpired per binary
+                if container:  # killing the docker CLI does not stop the container
+                    _remove_container(container)
                 failures += 1
                 per_target.append({"binary": a["display_path"], "status": "failed", "error": str(exc)[:300]})
                 continue
@@ -152,13 +158,14 @@ class CweCheckerAdapter(ToolAdapter):
             msg += f" ({failures} failed)"
         return AdapterResult(status, msg, findings, str(out_dir), {"targets": per_target})
 
-    def _command(self, mode: str | None, path: Path, cfg: Path | None) -> list[str]:
+    def _command(self, mode: str | None, path: Path, cfg: Path | None, container: str | None = None) -> list[str]:
         if mode == "local":
             cmd = [self._local() or "cwe_checker", str(path), "--json", "--quiet"]
             if cfg:
                 cmd += ["--bare-metal-config", str(cfg)]
             return cmd
-        cmd = ["docker", "run", "--rm", "--network", "none", "--memory", self.settings.cwe_checker_memory,
+        cmd = ["docker", "run", "--rm", *(["--name", container] if container else []),
+               "--network", "none", "--memory", self.settings.cwe_checker_memory,
                "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                "--pids-limit", "512", "-v", f"{_host_path(path, self.settings)}:/input:ro"]
         if cfg:
@@ -167,6 +174,12 @@ class CweCheckerAdapter(ToolAdapter):
         if cfg:
             cmd += ["--bare-metal-config", "/bare_metal.json"]
         return cmd
+
+
+def _remove_container(name: str) -> None:
+    # Best effort: the original failure is what gets reported.
+    with contextlib.suppress(Exception):
+        run_cmd(["docker", "rm", "-f", name], timeout=60)
 
 
 def parse_output(stdout: str) -> list[dict]:

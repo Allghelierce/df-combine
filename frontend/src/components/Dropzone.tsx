@@ -2,7 +2,6 @@ import { DragEvent, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 import { formatBytes } from "../lib/format";
-import { Icon } from "./ui";
 
 const ACCEPTED = ".bin,.hex,.elf,.img,.zip,.tar,.gz,.tgz,.px4,.apj,.dfu,.squashfs,.ext4,.xz,.bz2";
 
@@ -87,7 +86,6 @@ export function Dropzone({ maxMb, onUploaded }: { maxMb?: number; onUploaded?: (
           e.target.value = "";
         }}
       />
-      <div className="dz-icon">{Icon.upload}</div>
       {busy && file ? (
         <>
           <div className="dz-title">
@@ -97,18 +95,17 @@ export function Dropzone({ maxMb, onUploaded }: { maxMb?: number; onUploaded?: (
           <div className="progress">
             <span style={{ width: `${pct}%` }} />
           </div>
-          <div className="dz-sub mono">
+          <div className="dz-sub">
             {pct}% of {formatBytes(file.size)}
           </div>
         </>
       ) : (
         <>
-          <div className="dz-title">Drop firmware here or click to browse (multiple files allowed)</div>
+          <div className="dz-title">Drop firmware files here, or click to choose</div>
           <div className="dz-sub">
-            PX4 (.px4), ArduPilot (.apj), .bin, .hex, .elf, .img, .zip, .tar, .gz / .tar.gz, DfuSe, SquashFS, ext4
-            {maxMb ? ` · max ${maxMb} MiB` : ""}
+            .px4, .apj, .bin, .hex, .elf, .img, .zip, .tar, .gz, DfuSe, SquashFS or ext4{maxMb ? `, up to ${maxMb} MiB each` : ""}. The
+            format is read from the file contents, not the extension.
           </div>
-          <div className="dz-note">Format is detected from content, not the extension. Firmware is never executed.</div>
         </>
       )}
       {error && (
