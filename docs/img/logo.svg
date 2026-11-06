@@ -1,20 +1,20 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Drone Firmware Analyzer">
-  <!-- propeller ear tufts -->
-  <g stroke="#22324a" stroke-width="10" stroke-linecap="round"><path d="M168 150 L150 96 M344 150 L362 96"/></g>
-  <g fill="#9cc3f2" stroke="#22324a" stroke-width="6"><ellipse cx="150" cy="92" rx="62" ry="12"/><ellipse cx="362" cy="92" rx="62" ry="12"/></g>
-  <g fill="#22324a"><circle cx="150" cy="92" r="10"/><circle cx="362" cy="92" r="10"/></g>
+  <!-- propeller ear tufts (black underlay = thin outline) -->
+  <g stroke-linecap="round"><path d="M168 150 L150 96 M344 150 L362 96" stroke="#000" stroke-width="16"/><path d="M168 150 L150 96 M344 150 L362 96" stroke="#22324a" stroke-width="10"/></g>
+  <g fill="#9cc3f2" stroke="#000" stroke-width="3"><ellipse cx="150" cy="92" rx="62" ry="12"/><ellipse cx="362" cy="92" rx="62" ry="12"/></g>
+  <g fill="#22324a" stroke="#000" stroke-width="3"><circle cx="150" cy="92" r="10"/><circle cx="362" cy="92" r="10"/></g>
   <!-- body -->
-  <path d="M256 128 C356 128 412 196 412 290 C412 392 344 456 256 456 C168 456 100 392 100 290 C100 196 156 128 256 128 Z" fill="#22324a"/>
+  <path d="M256 128 C356 128 412 196 412 290 C412 392 344 456 256 456 C168 456 100 392 100 290 C100 196 156 128 256 128 Z" fill="#22324a" stroke="#000" stroke-width="3"/>
   <path d="M256 330 C312 330 344 368 344 404 C344 432 304 450 256 450 C208 450 168 432 168 404 C168 368 200 330 256 330 Z" fill="#33476a"/>
   <g stroke="#9cc3f2" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0.8">
     <path d="M222 372 l14 12 l14 -12 M262 372 l14 12 l14 -12 M242 404 l14 12 l14 -12"/>
   </g>
   <!-- camera-lens eyes -->
-  <circle cx="194" cy="250" r="70" fill="#e7f0fb"/><circle cx="318" cy="250" r="70" fill="#e7f0fb"/>
+  <circle cx="194" cy="250" r="70" fill="#e7f0fb" stroke="#000" stroke-width="3"/><circle cx="318" cy="250" r="70" fill="#e7f0fb" stroke="#000" stroke-width="3"/>
   <circle cx="194" cy="250" r="44" fill="#1f5aa6"/><circle cx="318" cy="250" r="44" fill="#1f5aa6"/>
   <circle cx="194" cy="250" r="22" fill="#22324a"/><circle cx="318" cy="250" r="22" fill="#22324a"/>
   <circle cx="206" cy="238" r="9" fill="#fff"/><circle cx="330" cy="238" r="9" fill="#fff"/>
   <!-- beak and feet -->
-  <path d="M256 290 L276 316 L256 342 L236 316 Z" fill="#ff9f1c"/>
-  <g stroke="#ff9f1c" stroke-width="10" stroke-linecap="round"><path d="M214 456 v22 M228 456 v18 M284 456 v18 M298 456 v22"/></g>
+  <path d="M256 290 L276 316 L256 342 L236 316 Z" fill="#ff9f1c" stroke="#000" stroke-width="3" stroke-linejoin="round"/>
+  <g stroke-linecap="round"><path d="M214 456 v22 M228 456 v18 M284 456 v18 M298 456 v22" stroke="#000" stroke-width="16"/><path d="M214 456 v22 M228 456 v18 M284 456 v18 M298 456 v22" stroke="#ff9f1c" stroke-width="10"/></g>
 </svg>
