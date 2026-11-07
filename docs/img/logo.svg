@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Drone Firmware Analyzer">
   <!-- propeller ear tufts (black underlay = thin outline) -->
-  <g stroke-linecap="round"><path d="M168 150 L150 96 M344 150 L362 96" stroke="#000" stroke-width="16"/><path d="M168 150 L150 96 M344 150 L362 96" stroke="#22324a" stroke-width="10"/></g>
+  <g stroke-linecap="round"><path d="M168 150 L150 96 M344 150 L362 96" stroke="#000" stroke-width="16"/><path d="M168 150 L150 96 M344 150 L362 96" stroke="#8e97a2" stroke-width="10"/></g>
   <g fill="#a3abb5" stroke="#000" stroke-width="3"><ellipse cx="150" cy="92" rx="62" ry="12"/><ellipse cx="362" cy="92" rx="62" ry="12"/></g>
   <g fill="#22324a" stroke="#000" stroke-width="3"><circle cx="150" cy="92" r="10"/><circle cx="362" cy="92" r="10"/></g>
   <!-- body -->
