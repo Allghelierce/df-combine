@@ -10,7 +10,9 @@
     <path d="M222 372 l14 12 l14 -12 M262 372 l14 12 l14 -12 M242 404 l14 12 l14 -12"/>
   </g>
   <!-- camera-lens eyes -->
-  <circle cx="194" cy="250" r="70" fill="#e7f0fb" stroke="#000" stroke-width="3"/><circle cx="318" cy="250" r="70" fill="#e7f0fb" stroke="#000" stroke-width="3"/>
+  <!-- outlines first, whites on top: one symmetric outline around both eyes, neither drawn in front -->
+  <circle cx="194" cy="250" r="70" fill="none" stroke="#000" stroke-width="6"/><circle cx="318" cy="250" r="70" fill="none" stroke="#000" stroke-width="6"/>
+  <circle cx="194" cy="250" r="70" fill="#e7f0fb"/><circle cx="318" cy="250" r="70" fill="#e7f0fb"/>
   <circle cx="194" cy="250" r="44" fill="#1f5aa6"/><circle cx="318" cy="250" r="44" fill="#1f5aa6"/>
   <circle cx="194" cy="250" r="22" fill="#22324a"/><circle cx="318" cy="250" r="22" fill="#22324a"/>
   <circle cx="206" cy="238" r="9" fill="#fff"/><circle cx="330" cy="238" r="9" fill="#fff"/>
